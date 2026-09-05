@@ -335,7 +335,7 @@ void pg_all_reduce_cpu_kernel
         if (t == 0)
         {
             s_wait_ok = true;
-            uint64_t deadline = sync_deadline();
+            uint64_t deadline = sync_deadline(ctx);
             uint64_t sleep = SYNC_MIN_SLEEP;
             while (true)
             {
@@ -492,7 +492,7 @@ void pg_all_reduce_cpu_recv_kernel
     {
         cc = (uint32_t)ldg_acquire_sys_u32(ctx->cpusum_stage_device + this_device * REDUCE_STAGE_STRIDE)
              & 0x7fffffffu;
-        uint64_t deadline = sync_deadline();
+        uint64_t deadline = sync_deadline(ctx);
         uint64_t sleep = SYNC_MIN_SLEEP;
         while (true)
         {

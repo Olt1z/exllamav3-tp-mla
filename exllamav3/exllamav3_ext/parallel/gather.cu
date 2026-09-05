@@ -135,7 +135,7 @@ void pg_gather_kernel
             size_t dst_offset = (size_t) (all_offsets[src_device]);
             int num_stages = (int) CEIL_DIVIDE(bytes_to_recv, stage_size);
             uint32_t sleep = SYNC_MIN_SLEEP;
-            uint64_t deadline = sync_deadline();
+            uint64_t deadline = sync_deadline(ctx);
 
             int stage_recv = 0;
             while (stage_recv < num_stages)
@@ -188,7 +188,7 @@ void pg_gather_kernel
         int num_stages = (int) CEIL_DIVIDE(bytes_to_send, stage_size);
         bool no_overflow = num_stages < num_buf_stages - 2;
         uint32_t sleep = SYNC_MIN_SLEEP;
-        uint64_t deadline = sync_deadline();
+        uint64_t deadline = sync_deadline(ctx);
 
         int stage_send = 0;
         while (stage_send < num_stages)
@@ -291,7 +291,7 @@ void pg_gather_small_kernel
             if (t == 0)
             {
                 uint32_t sleep = SYNC_MIN_SLEEP;
-                uint64_t deadline = sync_deadline();
+                uint64_t deadline = sync_deadline(ctx);
                 while (ldg_acquire_sys_u32(ctx->gather_stage_produced + src_rank) < 1)
                 {
                     __nanosleep(sleep);

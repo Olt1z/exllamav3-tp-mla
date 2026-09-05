@@ -100,7 +100,7 @@ void pg_all_reduce_kernel
     // Loop around ring
     for (int iter = 0; iter < (num_ranks - 1) * 2; ++iter)
     {
-        uint64_t deadline = sync_deadline();
+        uint64_t deadline = sync_deadline(ctx);
 
         // Outgoing segment to (rank+1)%num_ranks is (rank+iter)%num_iters
         // Incoming segment from (rank-1)%num_ranks is (rank+iter-1)%num_iters

@@ -21,7 +21,7 @@ __device__ __forceinline__ void pg_barrier_inner
 
         if (this_device == coordinator_device)
         {
-            uint64_t deadline = sync_deadline();
+            uint64_t deadline = sync_deadline(ctx);
             uint32_t pending = device_mask & ~(1 << this_device);
 
             // Wait for other participants to arrive at epoch
@@ -57,7 +57,7 @@ __device__ __forceinline__ void pg_barrier_inner
         }
         else
         {
-            uint64_t deadline = sync_deadline();
+            uint64_t deadline = sync_deadline(ctx);
 
             // Wait for coordinator to bump epoch
             uint64_t sleep = SYNC_MIN_SLEEP;

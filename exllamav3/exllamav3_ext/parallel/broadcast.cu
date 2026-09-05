@@ -78,7 +78,7 @@ void pg_broadcast_kernel
         {
             if (threadIdx.x == 0)
             {
-                uint64_t deadline = sync_deadline();
+                uint64_t deadline = sync_deadline(ctx);
 
                 uint32_t pending = device_mask & ~(1 << this_device);
                 uint32_t sleep = SYNC_MIN_SLEEP;
@@ -125,7 +125,7 @@ void pg_broadcast_kernel
         {
             if (threadIdx.x == 0)
             {
-                uint64_t deadline = sync_deadline();
+                uint64_t deadline = sync_deadline(ctx);
                 uint64_t sleep = SYNC_MIN_SLEEP;
                 while (ldg_acquire_sys_u32(broadcast_stages_ptr + src_device) <= stage)
                 {
@@ -226,7 +226,7 @@ void pg_broadcast_ll_kernel
     if (threadIdx.x == 0)
     {
         uint32_t sequence = ldg_acquire_sys_u32(ctx->broadcast_ll_sequence_device + this_device);
-        uint64_t deadline = sync_deadline();
+        uint64_t deadline = sync_deadline(ctx);
         uint32_t sleep = SYNC_MIN_SLEEP;
         while ((cookie_s = ldg_acquire_sys_u32(&ctx->broadcast_ll_epoch)) == sequence)
         {
@@ -267,7 +267,7 @@ void pg_broadcast_ll_kernel
         // Consumer
         else
         {
-            uint64_t deadline = sync_deadline();
+            uint64_t deadline = sync_deadline(ctx);
             for (int i = t; i < chunk_items && !(*abort_flag); i += NUM_THREADS_LL)
             {
                 size_t item_end = (iter * iter_size + i + 1) * sizeof(copy_t);
@@ -288,7 +288,7 @@ void pg_broadcast_ll_kernel
 
             if constexpr (is_producer)
             {
-                uint64_t deadline = sync_deadline();
+                uint64_t deadline = sync_deadline(ctx);
                 uint32_t pending = device_mask & ~(1 << this_device);
                 uint32_t sleep = SYNC_MIN_SLEEP;
                 while (pending)

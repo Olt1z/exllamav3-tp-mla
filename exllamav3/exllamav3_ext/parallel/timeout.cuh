@@ -1,9 +1,9 @@
 #pragma once
 #include "context.cuh"
 
-__device__ __forceinline__ uint64_t sync_deadline()
+__device__ __forceinline__ uint64_t sync_deadline(PGContext* ctx)
 {
-    return globaltimer_ns() + SYNC_TIMEOUT * 45000000000ull;
+    return globaltimer_ns() + ctx->sync_timeout_ns;
 }
 
 __device__ __forceinline__ uint32_t check_timeout(PGContext* ctx, uint64_t deadline, const char* name)
