@@ -49,7 +49,7 @@ Custo aceito: cada rank guarda o latente inteiro (576 valores por token por cama
 - [x] 3. `tp_import`: `MLAttention` local com as cabeças do rank, com e sem rope
 - [x] 4. `forward`: all-reduce depois do `o_proj` e cache por rank
 - [x] 5. `supports_tp: True` no `glm_moe_dsa` (escrito; só conta como provado depois do 6)
-- [ ] 6. Teste de fumaça com 2 placas no corte de 4 camadas do GLM-5.3
+- [x] 6. Teste de fumaça com 2 placas no corte de 4 camadas do GLM-5.3 (05/09, 2× RTX 3090; ver "Resultado da bancada")
 - [ ] 6b. Corte do Flash (3 KDA + 1 MLA), mesmo teste, flag no `glm5_next`
 - [ ] 6c. DeepSeek V3 e Mistral-4: corte, mesmo teste, flag
 - [ ] 6d. Decode em grafo CUDA no rank TP (hoje desligado por `has_split_cache`) e tokens/s antes/depois
@@ -62,6 +62,27 @@ placas, gera 64 tokens greedy e compara os logits com a placa única (o ExLlamaV
 determinístico bit a bit; a comparação é por KL contra o ruído medido entre duas execuções
 iguais), e confere que as duas placas passam de 30 % de uso durante a geração. Modelos
 grandes são provados por um corte de poucas camadas quantizado pelo hub.
+
+## Resultado da bancada (05/09/2026, 2× RTX 3090, corte de 4 camadas do GLM-5.3)
+
+- **Importação exata.** `tests/test_tp_mla_import.py` e `tests/test_tp_mla_cache.py`: a `MLAttention`
+  reconstruída por `tp_export`/`tp_import` é bit a bit igual à original, filho a filho, no caminho
+  sem cache e com cache, denso e DSA esparso, prefill e decode, inclusive a camada `shared`.
+- **Fatia por cabeças correta.** A soma dos forwards de dois módulos com metade das cabeças difere
+  do módulo inteiro por 1e-3 a 3e-2 relativo: é o arredondamento do kernel EXL3 com a soma
+  dividida (no prefill MHA em fp32 a diferença cai para 2e-5), não erro de índice.
+- **A divergência do TP não é da atenção.** TP em 2 placas deu KL 0,020 contra uma placa, mas o TP
+  com *uma* placa, sem fatiar nada, deu 0,023. Causa: o all-reduce do backend nativo manda tensor
+  fp32 por um fio bf16 (`all_reduce_cpu.cu`: "fp32 payloads keep the bf16 wire for range"), e o
+  GLM emite atenção e MLP em fp32. Simular esse arredondamento numa placa
+  (`tp_mla_smoke.py --simular-fio-bf16`) reproduz KL 0,025; TP contra a simulação fica em 0,003.
+  O Llama, com saídas fp16, dá 0,00005 no mesmo teste. Régua justa para modelos de saída fp32:
+  comparar o TP com a simulação, não com a placa única crua.
+- **Os artefatos da nossa esteira não carregavam.** O `kv_b_proj` saía quantizado, e o motor exige
+  o peso cru. `tests/bancada/reparar_kv_b_proj.py` desquantiza e o hub passou a manter esse
+  tensor fp16 (classe `kv-b`). O corte publicado já está reparado.
+- Velocidade no corte não diz nada útil (4 camadas, latência de lançamento): 180 tok/s numa placa,
+  230 em duas. A medida que vale é no modelo inteiro, etapa 7.
 
 ## Branches e upstream
 

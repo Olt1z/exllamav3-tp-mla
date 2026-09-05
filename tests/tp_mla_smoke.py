@@ -75,6 +75,9 @@ def main():
     p.add_argument("--tp-moe-ts", action = "store_true", help = "tensor split nos experts em vez de expert parallel")
     p.add_argument("--tp-dev-limits", default = None,
                    help = "paralelismo máximo por classe, ex.: 'attn=1' (só experts/MLP divididos) ou 'moe=1,mlp=1,linear=1' (só a atenção dividida)")
+    p.add_argument("--simular-fio-bf16", action = "store_true",
+                   help = "numa placa só: arredonda a saída fp32 de cada atenção e MLP para bf16, como o all_reduce do TP faz "
+                          "(all_reduce_cpu.cu: 'fp32 payloads keep the bf16 wire'); dá a régua justa para comparar com o TP")
     args = p.parse_args()
     tp_dev_limits = None
     if args.tp_dev_limits:
@@ -93,6 +96,21 @@ def main():
         tp_dev_limits = tp_dev_limits,
     )
     print(f"carga: {time.time() - t0:.0f} s, dispositivos {model.active_devices}")
+    if args.simular_fio_bf16:
+        n = 0
+        for blk in model.modules:
+            for nome in ("attn", "mlp"):
+                sub = getattr(blk, nome, None)
+                if sub is None or not hasattr(sub, "forward"):
+                    continue
+                def fio(orig):
+                    def f(x, params, *a, **k):
+                        y = orig(x, params, *a, **k)
+                        return y.to(torch.bfloat16).to(y.dtype) if y.dtype == torch.float32 else y
+                    return f
+                sub.forward = fio(sub.forward)
+                n += 1
+        print(f"fio bf16 simulado em {n} submódulos")
     tokenizer = Tokenizer.from_config(config)
 
     # Template de chat da própria arquitetura: o mesmo teste serve ao GLM, ao Flash e ao DeepSeek
