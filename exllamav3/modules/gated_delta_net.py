@@ -341,6 +341,11 @@ class GatedDeltaNet(Module):
         a_proj: Linear | None = None,
         norm: GatedRMSNorm | None = None,
         o_proj: Linear | None = None,
+        # KDA gate projections, pre-built by tp_import (rank-local slices of f_b/g_b, replicated f_a/g_a)
+        f_a_proj: Linear | None = None,
+        f_b_proj: Linear | None = None,
+        g_a_proj: Linear | None = None,
+        g_b_proj: Linear | None = None,
         qmap: str | None = None,
         out_dtype: torch.dtype | None = None,
         select_hq_bits: int = 0,
@@ -375,9 +380,9 @@ class GatedDeltaNet(Module):
         # gate (f_a/f_b + per-channel dt_bias + per-head A_log, "safe gate" when
         # gate_lower_bound is set), a low-rank sigmoid output gate (g_a/g_b) in place of z,
         # and in-kernel q/k l2norm. Shares the conv, projections, cache and rewind machinery
-        self.kda = key_f_a is not None
+        self.kda = key_f_a is not None or f_a_proj is not None
         self.gate_lower_bound = gate_lower_bound
-        if self.kda:
+        if self.kda and f_a_proj is None:
             assert key_f_b and key_g_a and key_g_b, \
                 "KDA mode requires key_f_a, key_f_b, key_g_a and key_g_b"
             assert key_b and not key_a, \
@@ -475,7 +480,11 @@ class GatedDeltaNet(Module):
         # KDA low-rank forget-gate and output-gate projections. Kept in fp16 (qmap = None):
         # the reference fp8 checkpoints exclude them from quantization, which is a strong
         # sensitivity signal
-        if self.kda:
+        if self.kda and f_a_proj is not None:
+            self.f_a_proj, self.f_b_proj, self.g_a_proj, self.g_b_proj = f_a_proj, f_b_proj, g_a_proj, g_b_proj
+            for m in (self.f_a_proj, self.f_b_proj, self.g_a_proj, self.g_b_proj):
+                self.register_submodule(m)
+        elif self.kda:
             self.f_a_proj = Linear(config, f"{key}.{key_f_a}", hidden_size, self.k_head_dim, qmap = None, out_dtype = torch.float, pad_to = 1)
             self.f_b_proj = Linear(config, f"{key}.{key_f_b}", self.k_head_dim, self.k_dim, qmap = None, out_dtype = torch.float, pad_to = 1)
             self.g_a_proj = Linear(config, f"{key}.{key_g_a}", hidden_size, self.v_head_dim, qmap = None, out_dtype = torch.float, pad_to = 1)
@@ -1088,26 +1097,26 @@ class GatedDeltaNet(Module):
 
 
     def make_tp_allocation(self, options: dict) -> list[TPAllocation]:
-        assert self.qkv_proj is not None
-        assert self.z_proj is not None
+        # Two variants share the split by K-heads. GDN (Qwen3-Next): qkv_proj + z_proj + b/a_proj.
+        # KDA (GLM-5.3-Flash): qkv_proj + b_proj, gates f_a->f_b and g_a->g_b (the *_a stage is
+        # head-independent and replicated; *_b is per head and split), no z_proj / a_proj.
+        assert self.qkv_proj is not None, f"{self.key}: TP needs the split qkv projection (fused qkvz is not supported)"
         assert self.b_proj is not None
-        assert self.a_proj is not None
-        storage = 0
-        storage += self.qkv_proj.storage_size()
-        storage += self.z_proj.storage_size()
-        storage += self.b_proj.storage_size()
-        storage += self.a_proj.storage_size()
+        if not self.kda:
+            assert self.z_proj is not None
+            assert self.a_proj is not None
+        split_projs = [p for p in (self.qkv_proj, self.z_proj, self.b_proj, self.a_proj, self.f_b_proj, self.g_b_proj) if p is not None]
+        replicated = [p for p in (self.f_a_proj, self.g_a_proj) if p is not None]
+        storage = sum(p.storage_size() for p in split_projs)
         for cl in self.recurrent_layers:
             storage += cl.storage_size()
         overhead_d = 0
         overhead_d += self.hidden_size * (self.out_dtype or torch.half).itemsize
+        overhead_d += sum(p.storage_size() for p in replicated)
         overhead_s = 0
         overhead_s += 2 * self.num_k_heads * self.k_head_dim * torch.half.itemsize
         overhead_s += 2 * self.num_v_heads * self.v_head_dim * torch.half.itemsize
-        recons = max(
-            self.qkv_proj.recons_size(),
-            self.z_proj.recons_size(),
-        )
+        recons = max(p.recons_size() for p in split_projs)
         channel_width = 1
         channels_to_split = self.num_k_heads
         assert self.num_v_heads % self.num_k_heads == 0, \
@@ -1146,6 +1155,12 @@ class GatedDeltaNet(Module):
             else:
                 return child.tp_export(plan, producer)
 
+        # KDA loads q/k/v conv weights separately and fuses them lazily (load_local on CUDA, or
+        # the first forward); the parent exports from a CPU load, where they may still be apart
+        conv1d_weight = self.conv1d_weight
+        if conv1d_weight is None and self.conv1d_q_weight is not None:
+            conv1d_weight = torch.cat([self.conv1d_q_weight, self.conv1d_k_weight, self.conv1d_v_weight], dim = 0)
+
         return {
             "cls": GatedDeltaNet,
             "kwargs": {
@@ -1157,23 +1172,29 @@ class GatedDeltaNet(Module):
                 "rms_norm_eps": self.rms_norm_eps,
                 "conv_kernel_size": self.conv_kernel_size,
                 "beta_scale": self.beta_scale,
+                "gate_lower_bound": self.gate_lower_bound,
                 "out_dtype": self.out_dtype,
             },
             "num_k_heads": self.num_k_heads,
             "num_v_heads": self.num_v_heads,
             "num_kv_group": self.num_v_heads // self.num_k_heads,
+            "kda": self.kda,
             **{name: _export(getattr(self, name, None)) for name in (
                 "qkv_proj",
                 "z_proj",
                 "b_proj",
                 "a_proj",
+                "f_a_proj",
+                "f_b_proj",
+                "g_a_proj",
+                "g_b_proj",
                 "o_proj",
                 "norm",
-                "conv1d_weight",
                 "conv1d_bias",
                 "a_log",
                 "dt_bias",
             )},
+            "conv1d_weight": _export(conv1d_weight),
             "device": self.device,
             "recurrent_layers": [
                 rl.tp_export(plan) for rl in self.recurrent_layers
@@ -1209,6 +1230,12 @@ class GatedDeltaNet(Module):
             if num_k_heads else None
         b_split = (True, first * G, last * G) \
             if num_k_heads else None
+        kda = exported.get("kda", False)
+        # KDA: f_b maps k_head_dim -> k_dim (one block of k_head_dim per head), g_b maps
+        # v_head_dim -> v_dim; dt_bias is per (head, k channel), not per head as in GDN
+        fb_split = (True, first * k_head_dim, last * k_head_dim) \
+            if num_k_heads else None
+        dt_split = (True, first * G * k_head_dim, last * G * k_head_dim) if kda else a_split
 
         def _import(name):
             nonlocal exported, plan
@@ -1237,9 +1264,13 @@ class GatedDeltaNet(Module):
             o_proj = _import_split("o_proj", o_split),
             b_proj = _import_split("b_proj", b_split),
             a_proj = _import_split("a_proj", a_split),
+            f_a_proj = _import("f_a_proj") if num_k_heads else None,
+            f_b_proj = _import_split("f_b_proj", fb_split),
+            g_a_proj = _import("g_a_proj") if num_k_heads else None,
+            g_b_proj = _import_split("g_b_proj", z_split),
             norm = _import("norm"),
             a_log = _import_split("a_log", a_split),
-            dt_bias = _import_split("dt_bias", a_split),
+            dt_bias = _import_split("dt_bias", dt_split),
         )
 
         if num_k_heads:

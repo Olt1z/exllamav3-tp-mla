@@ -24,9 +24,11 @@ pela peça que falta:
 
 ## Fase 1: TP na `MLAttention`
 
-A infraestrutura de TP é genérica e já cobre a `Attention` comum, o `GatedDeltaNet`, os
-experts, as hyper-connections e os caches MLA/DSA, que replicam o latente por rank. O buraco é
-a própria `MLAttention`. Desenho: **replicar o pequeno, fatiar as cabeças.**
+A infraestrutura de TP é genérica e já cobre a `Attention` comum, o `GatedDeltaNet` na variante
+do Qwen3-Next, os experts, as hyper-connections e os caches MLA/DSA, que replicam o latente por
+rank. Os buracos são a própria `MLAttention` e, descoberto em 05/09 na carga do TR3, a variante
+KDA do `GatedDeltaNet` (Flash: `q/k/v_proj` separados, portas `f/g`, sem `z_proj`), que caía em
+`assert self.z_proj is not None`. Desenho: **replicar o pequeno, fatiar as cabeças.**
 
 | Peça | Em cada rank |
 | --- | --- |
