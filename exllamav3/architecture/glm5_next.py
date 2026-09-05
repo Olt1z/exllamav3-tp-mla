@@ -347,7 +347,10 @@ class Glm5NextModel(Model):
 
         self.calibration_all_experts = True
         self.caps.update({
-            "supports_tp": False,
+            # TP: KDA, hyper-connections, experts and caches already had it; the MLAttention
+            # replicates the latent and splits the query heads (see MLAttention.tp_import).
+            # Proof: bancada tp-mla, brandonmusic/GLM-5.3-Flash-tr3-4bpw
+            "supports_tp": True,
             "recurrent_states": True,
             "default_recurrent_checkpoint_interval": 2048,
             "linear_attn": True,

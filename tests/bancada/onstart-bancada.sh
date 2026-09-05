@@ -16,6 +16,11 @@ export HF_TOKEN
 FORK="${FORK:-https://github.com/Olt1z/exllamav3-tp-mla}"
 BRANCH="${BRANCH:-tp-mla}"
 CORTE="${CORTE:-Olt1z/GLM-5.3-podado-4L-EXL3-balanced-bl4ck0ut}"
+# BASE_DEVICES: placas da linha de base sem TP. "0" para corte que cabe numa placa; "all" para
+# modelo grande, que a base carrega em autosplit (camadas repartidas, uma placa por vez)
+BASE_DEVICES="${BASE_DEVICES:-0}"
+TOKENS="${TOKENS:-64}"
+if [ "$BASE_DEVICES" = "all" ]; then BASE=""; else BASE="CUDA_VISIBLE_DEVICES=$BASE_DEVICES"; fi
 REPO_SAIDAS="${REPO_SAIDAS:-Olt1z/quantizacao-bl4ck0ut}"
 PROVA_ID="${PROVA_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 nvidia-smi --query-gpu=name,memory.total,compute_cap --format=csv
@@ -58,18 +63,20 @@ from huggingface_hub import snapshot_download
 snapshot_download("$CORTE", local_dir="/workspace/corte", token=os.environ["HF_TOKEN"])
 PY
 du -sh /workspace/corte
+# Artefato da esteira antiga com kv_b_proj em treliça: repara antes de carregar
+python3 tests/bancada/reparar_kv_b_proj.py /workspace/corte
 
 set -e
 marco "4a. base, uma placa"
-CUDA_VISIBLE_DEVICES=0 python3 tests/tp_mla_smoke.py -m /workspace/corte --save /workspace/base.pt | tee /workspace/4a.txt
-marco "4b. ruído, uma placa"
-CUDA_VISIBLE_DEVICES=0 python3 tests/tp_mla_smoke.py -m /workspace/corte --compare /workspace/base.pt | tee /workspace/4b.txt
+env $BASE python3 tests/tp_mla_smoke.py -m /workspace/corte --tokens $TOKENS --save /workspace/base.pt | tee /workspace/4a.txt
+marco "4b. base com o fio bf16 simulado (régua justa para saída fp32)"
+env $BASE python3 tests/tp_mla_smoke.py -m /workspace/corte --simular-fio-bf16 --compare /workspace/base.pt --save /workspace/sim.pt | tee /workspace/4b.txt
 set +e
 marco "4c. TP, todas as placas"
-python3 tests/tp_mla_smoke.py -m /workspace/corte --tp --compare /workspace/base.pt | tee /workspace/4c.txt
+python3 tests/tp_mla_smoke.py -m /workspace/corte --tp --compare /workspace/sim.pt --save /workspace/tp.pt | tee /workspace/4c.txt
 echo "4c saiu com $?"
 marco "4d. TP com contexto longo (DSA esparso)"
-CUDA_VISIBLE_DEVICES=0 python3 tests/tp_mla_smoke.py -m /workspace/corte --prefill-tokens 3000 --save /workspace/base-longo.pt | tee /workspace/4d-base.txt
+env $BASE python3 tests/tp_mla_smoke.py -m /workspace/corte --simular-fio-bf16 --prefill-tokens 3000 --save /workspace/base-longo.pt | tee /workspace/4d-base.txt
 python3 tests/tp_mla_smoke.py -m /workspace/corte --tp --compare /workspace/base-longo.pt --prefill-tokens 3000 | tee /workspace/4d.txt
 echo "4d saiu com $?"
 
