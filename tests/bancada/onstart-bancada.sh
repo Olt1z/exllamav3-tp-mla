@@ -49,7 +49,7 @@ NUCLEOS=$(nproc); export MAX_JOBS=$(( NUCLEOS > 8 ? 8 : (NUCLEOS < 2 ? 2 : NUCLE
 export TORCH_CUDA_ARCH_LIST="$CAP"
 marco "compilando a extensão para sm $CAP com MAX_JOBS=$MAX_JOBS"
 pip install -q --no-build-isolation -e . 2>&1 | tail -3
-python3 -c "import exllamav3, exllamav3_ext; print('exllamav3', exllamav3.__version__)"
+python3 -c "import exllamav3_ext; from exllamav3.version import __version__ as v; print('exllamav3', v, 'ext ok')"
 
 marco "3. corte $CORTE"
 python3 - <<PY

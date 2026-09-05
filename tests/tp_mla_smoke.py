@@ -73,7 +73,12 @@ def main():
     p.add_argument("--compare", help = "arquivo de --save para comparar (teacher forcing)")
     p.add_argument("--max-kl", type = float, help = "falha se a KL média passar deste valor")
     p.add_argument("--tp-moe-ts", action = "store_true", help = "tensor split nos experts em vez de expert parallel")
+    p.add_argument("--tp-dev-limits", default = None,
+                   help = "paralelismo máximo por classe, ex.: 'attn=1' (só experts/MLP divididos) ou 'moe=1,mlp=1,linear=1' (só a atenção dividida)")
     args = p.parse_args()
+    tp_dev_limits = None
+    if args.tp_dev_limits:
+        tp_dev_limits = {k: int(v) for k, v in (par.split("=") for par in args.tp_dev_limits.split(","))}
 
     base = torch.load(args.compare) if args.compare else None
     n_tokens = base["tokens"].shape[0] if base is not None else args.tokens
@@ -85,6 +90,7 @@ def main():
     model.load(
         tensor_p = args.tp, progressbar = True, verbose = args.tp,
         tp_options = {"moe_tensor_split": True} if args.tp_moe_ts else None,
+        tp_dev_limits = tp_dev_limits,
     )
     print(f"carga: {time.time() - t0:.0f} s, dispositivos {model.active_devices}")
     tokenizer = Tokenizer.from_config(config)
@@ -105,9 +111,14 @@ def main():
     tokens = []
     sampler = GpuSampler()
     sampler.start()
+    # Os primeiros passos pagam compilação de kernels e captura de grafos; o tok/s mede os demais
+    AQUECIMENTO = min(16, n_tokens // 2)
     torch.cuda.synchronize()
     t0 = time.time()
     for i in range(n_tokens):
+        if i == AQUECIMENTO:
+            torch.cuda.synchronize()
+            t0 = time.time()
         params = {
             "attn_mode": "flash_attn", "cache": cache, "past_len": ids.shape[-1] - 1,
             "batch_shape": (1, args.cache), "recurrent_states": recurrent_states,
@@ -127,7 +138,8 @@ def main():
     logits_all = torch.stack(logits_all)
     tokens = torch.tensor(tokens)
     print("texto:", tokenizer.decode(tokens.unsqueeze(0))[0].replace("\n", "\\n"))
-    print(f"decode: {n_tokens} tokens em {dt:.1f} s = {n_tokens / dt:.2f} tok/s")
+    medidos = n_tokens - AQUECIMENTO
+    print(f"decode: {medidos} tokens (após {AQUECIMENTO} de aquecimento) em {dt:.2f} s = {medidos / dt:.2f} tok/s")
     print("uso médio por GPU (%):", [f"{u:.0f}" for u in sampler.mean_per_gpu()])
 
     if args.save:
