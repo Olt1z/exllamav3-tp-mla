@@ -52,6 +52,7 @@ Custo aceito: cada rank guarda o latente inteiro (576 valores por token por cama
 - [ ] 6. Teste de fumaça com 2 placas no corte de 4 camadas do GLM-5.3
 - [ ] 6b. Corte do Flash (3 KDA + 1 MLA), mesmo teste, flag no `glm5_next`
 - [ ] 6c. DeepSeek V3 e Mistral-4: corte, mesmo teste, flag
+- [ ] 6d. Decode em grafo CUDA no rank TP (hoje desligado por `has_split_cache`) e tokens/s antes/depois
 - [ ] 7. PR para o upstream (fase 1)
 - [ ] 8. Fase 2: ligar a flag do Qwen 3-Next e do Qwen 3.8-Flash-Next e provar com corte
 - [ ] 9. Fase 3: Olmo, LFM 2.5, AfMoE
