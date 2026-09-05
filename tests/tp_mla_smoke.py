@@ -10,6 +10,10 @@ token) e grava os logits de cada passo. Rodado duas vezes:
     python tests/tp_mla_smoke.py -m /modelo --compare base.pt
     # TP em todas as placas, mesmos tokens da base (teacher forcing), compara os logits
     python tests/tp_mla_smoke.py -m /modelo --tp --compare base.pt --max-kl 0.01
+    # repetir os três com --prefill-tokens 3000 para exercitar o indexador DSA esparso
+
+Sem --prefill-tokens o contexto fica abaixo de index_topk e o DSA roda denso: o k_norm do
+indexador, o top-k por rank e o kernel esparso só são provados com o contexto longo.
 
 Com --compare, os tokens alimentados são os da base, então os logits são comparáveis posição
 a posição: KL média/máxima de base -> atual, diferença absoluta máxima e concordância do top-1.
@@ -22,9 +26,12 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import torch
 from exllamav3 import Config, Model, Cache, Tokenizer
 
-PROMPT = (
-    "[gMASK]<sop><|user|>\nExplique em três frases por que o céu é azul e por que o pôr do sol "
-    "é avermelhado.<|assistant|>\n"
+PERGUNTA = "Explique em três frases por que o céu é azul e por que o pôr do sol é avermelhado."
+# Texto de enchimento para levar o contexto acima de index_topk e exercitar o caminho esparso
+# do indexador DSA (com --prefill-tokens); abaixo desse limite a seleção é all-inclusive
+ENCHIMENTO = (
+    "A luz do sol atravessa a atmosfera e as moléculas de ar espalham mais os comprimentos de "
+    "onda curtos do que os longos. "
 )
 
 
@@ -60,6 +67,8 @@ def main():
     p.add_argument("--tp", action = "store_true", help = "carregar com tensor_p = True")
     p.add_argument("--tokens", type = int, default = 64)
     p.add_argument("--cache", type = int, default = 4096)
+    p.add_argument("--prefill-tokens", type = int, default = 0,
+                   help = "enche o prompt até este tamanho (ex.: 3000 passa do index_topk 2048 do GLM-5.3)")
     p.add_argument("--save", help = "grava tokens e logits do decode neste arquivo")
     p.add_argument("--compare", help = "arquivo de --save para comparar (teacher forcing)")
     p.add_argument("--max-kl", type = float, help = "falha se a KL média passar deste valor")
@@ -80,7 +89,14 @@ def main():
     print(f"carga: {time.time() - t0:.0f} s, dispositivos {model.active_devices}")
     tokenizer = Tokenizer.from_config(config)
 
-    ids = tokenizer.encode(PROMPT, encode_special_tokens = True)
+    # Template de chat da própria arquitetura: o mesmo teste serve ao GLM, ao Flash e ao DeepSeek
+    pergunta = PERGUNTA
+    if args.prefill_tokens:
+        n_ench = len(tokenizer.encode(ENCHIMENTO)[0])
+        pergunta = ENCHIMENTO * (args.prefill_tokens // n_ench + 1) + PERGUNTA
+    ids = tokenizer.encode(model.default_chat_prompt(pergunta), encode_special_tokens = True)
+    assert ids.shape[-1] + n_tokens <= args.cache, "prompt + tokens não cabem no --cache"
+    print(f"prompt: {ids.shape[-1]} tokens")
     params = {"attn_mode": "flash_attn", "cache": cache, "past_len": 0, "batch_shape": (1, args.cache)}
     model.prefill(input_ids = ids[:, :-1], params = params)
     recurrent_states = params.get("recurrent_states")
