@@ -105,6 +105,18 @@ class MLAttention(Module):
         index_kpool: int = 0,
         index_kpool_tail: bool = True,
         key_indexer: str = "indexer",
+        # Pre-built children, supplied by tp_import (rank-local slices); None = construct from config
+        q_proj: Linear | None = None,
+        q_a_proj: Linear | None = None,
+        q_a_layernorm: RMSNorm | None = None,
+        q_b_proj: Linear | None = None,
+        kv_a_proj_with_mqa: Linear | None = None,
+        kv_a_layernorm: RMSNorm | None = None,
+        o_proj: Linear | None = None,
+        idx_wq_b: Linear | None = None,
+        idx_wk: Linear | None = None,
+        idx_k_norm: LayerNorm | None = None,
+        idx_weights: Linear | None = None,
     ):
         super().__init__(config, key, None)
 
@@ -140,57 +152,6 @@ class MLAttention(Module):
         qmap_in = qmap + ".input" if qmap is not None else None
         qmap_o = qmap + ".o" if qmap is not None else None
 
-        # Query path: either a direct projection or a LoRA-style pair with a norm between
-        if q_lora_rank is None:
-            self.q_a_proj = None
-            self.q_a_layernorm = None
-            self.q_b_proj = None
-            self.q_proj = Linear(
-                config, f"{key}.{key_q}", hidden_size, num_q_heads * self.qk_head_dim,
-                qmap = qmap_in, out_dtype = torch.half, trim_padded_out = True,
-                select_hq_bits = select_hq_bits, qbits_key = qbits_key,
-            )
-            self.register_submodule(self.q_proj)
-        else:
-            self.q_a_proj = Linear(
-                config, f"{key}.{key_q_a}", hidden_size, q_lora_rank,
-                qmap = qmap_in, out_dtype = torch.half, trim_padded_out = True,
-                select_hq_bits = select_hq_bits, qbits_key = qbits_key,
-            )
-            self.q_a_layernorm = RMSNorm(
-                config, f"{key}.{key_q_a_norm}", rms_norm_eps, out_dtype = torch.half,
-            )
-            self.q_b_proj = Linear(
-                config, f"{key}.{key_q_b}", q_lora_rank, num_q_heads * self.qk_head_dim,
-                qmap = qmap + ".q_a" if qmap is not None else None,
-                out_dtype = torch.half, trim_padded_out = True,
-                select_hq_bits = select_hq_bits, qbits_key = qbits_key,
-            )
-            self.q_proj = self.q_b_proj
-            self.register_submodule(self.q_a_proj)
-            self.register_submodule(self.q_a_layernorm)
-            self.register_submodule(self.q_b_proj)
-
-        # Latent path. The output of this projection goes straight into the cache, so it is the
-        # one place where quantization error compounds over the whole context
-        self.kv_a_proj_with_mqa = Linear(
-            config, f"{key}.{key_kv_a}", hidden_size, kv_lora_rank + qk_rope_head_dim,
-            qmap = qmap_in, out_dtype = torch.half, trim_padded_out = True,
-            select_hq_bits = select_hq_bits, qbits_key = qbits_key,
-        )
-        self.kv_a_layernorm = RMSNorm(
-            config, f"{key}.{key_kv_a_norm}", rms_norm_eps, out_dtype = torch.half,
-        )
-        self.register_submodule(self.kv_a_proj_with_mqa)
-        self.register_submodule(self.kv_a_layernorm)
-
-        self.o_proj = Linear(
-            config, f"{key}.{key_o}", num_q_heads * v_head_dim, hidden_size,
-            qmap = qmap_o, out_dtype = out_dtype, trim_padded_out = True,
-            select_hq_bits = select_hq_bits, qbits_key = qbits_key,
-        )
-        self.register_submodule(self.o_proj)
-
         # DSA lightning indexer (GLM-5.2 / DeepSeek-V3.2-on-MLA). "full" layers score and select
         # index_topk tokens per query and publish the selection; "shared" layers reuse the
         # nearest preceding full layer's selection. None = plain dense MLA
@@ -213,36 +174,6 @@ class MLAttention(Module):
             None if indexer_mode != "full" else
             index_head_dim * 2 if index_kpool else index_head_dim
         )
-        if indexer_mode == "full":
-            assert q_lora_rank is not None, "DSA indexer queries project from the q_a latent"
-            self.idx_wq_b = Linear(
-                config, f"{key}.{key_indexer}.wq_b", q_lora_rank, index_n_heads * index_head_dim,
-                qmap = qmap + ".q_a" if qmap is not None else None,
-                out_dtype = torch.half, trim_padded_out = True,
-                select_hq_bits = select_hq_bits, qbits_key = qbits_key,
-            )
-            # Key head and per-head scoring weights are router-like: tiny, and selection noise
-            # is coherent across every layer sharing it, so they stay unquantized
-            self.idx_wk = Linear(
-                config, f"{key}.{key_indexer}.wk", hidden_size, index_head_dim,
-                qmap = None, out_dtype = torch.half, pad_to = 1,
-            )
-            self.idx_k_norm = LayerNorm(
-                config, f"{key}.{key_indexer}.k_norm", index_norm_eps, out_dtype = torch.half,
-            )
-            self.idx_weights = Linear(
-                config, f"{key}.{key_indexer}.weights_proj", hidden_size, index_n_heads,
-                qmap = None, out_dtype = torch.half, pad_to = 1,
-            )
-            self.register_submodule(self.idx_wq_b)
-            self.register_submodule(self.idx_wk)
-            self.register_submodule(self.idx_k_norm)
-            self.register_submodule(self.idx_weights)
-        else:
-            self.idx_wq_b = None
-            self.idx_wk = None
-            self.idx_k_norm = None
-            self.idx_weights = None
 
         self.caps.update({
             "kv_cache": True
@@ -251,6 +182,7 @@ class MLAttention(Module):
         self.cache_layers = []
         self.tp_cache_lookup = {}
         self.has_split_cache = False
+        self.tp_reduce = False
         self.dispatch_cache = {}
 
         # kv_b_proj, stored ONLY in the flattened (kv_lora_rank, H * dim) form: the prefill
@@ -260,6 +192,96 @@ class MLAttention(Module):
         self.w_uk_flat = None   # (kv_lora_rank, H * qk_nope_head_dim)
         self.w_uv_flat = None   # (kv_lora_rank, H * v_head_dim)
         self._scratch = {}
+
+        self.q_a_proj = None
+        self.q_a_layernorm = None
+        self.q_b_proj = None
+        self.q_proj = None
+        self.kv_a_proj_with_mqa = None
+        self.kv_a_layernorm = None
+        self.o_proj = None
+        self.idx_wq_b = None
+        self.idx_wk = None
+        self.idx_k_norm = None
+        self.idx_weights = None
+
+        # TP rank that received no query heads: participates in the all-reduce only
+        if num_q_heads == 0:
+            return
+
+        # Query path: either a direct projection or a LoRA-style pair with a norm between
+        if q_lora_rank is None:
+            self.q_proj = q_proj if q_proj is not None else Linear(
+                config, f"{key}.{key_q}", hidden_size, num_q_heads * self.qk_head_dim,
+                qmap = qmap_in, out_dtype = torch.half, trim_padded_out = True,
+                select_hq_bits = select_hq_bits, qbits_key = qbits_key,
+            )
+            self.register_submodule(self.q_proj)
+        else:
+            self.q_a_proj = q_a_proj if q_a_proj is not None else Linear(
+                config, f"{key}.{key_q_a}", hidden_size, q_lora_rank,
+                qmap = qmap_in, out_dtype = torch.half, trim_padded_out = True,
+                select_hq_bits = select_hq_bits, qbits_key = qbits_key,
+            )
+            self.q_a_layernorm = q_a_layernorm if q_a_layernorm is not None else RMSNorm(
+                config, f"{key}.{key_q_a_norm}", rms_norm_eps, out_dtype = torch.half,
+            )
+            self.q_b_proj = q_b_proj if q_b_proj is not None else Linear(
+                config, f"{key}.{key_q_b}", q_lora_rank, num_q_heads * self.qk_head_dim,
+                qmap = qmap + ".q_a" if qmap is not None else None,
+                out_dtype = torch.half, trim_padded_out = True,
+                select_hq_bits = select_hq_bits, qbits_key = qbits_key,
+            )
+            self.q_proj = self.q_b_proj
+            self.register_submodule(self.q_a_proj)
+            self.register_submodule(self.q_a_layernorm)
+            self.register_submodule(self.q_b_proj)
+
+        # Latent path. The output of this projection goes straight into the cache, so it is the
+        # one place where quantization error compounds over the whole context
+        self.kv_a_proj_with_mqa = kv_a_proj_with_mqa if kv_a_proj_with_mqa is not None else Linear(
+            config, f"{key}.{key_kv_a}", hidden_size, kv_lora_rank + qk_rope_head_dim,
+            qmap = qmap_in, out_dtype = torch.half, trim_padded_out = True,
+            select_hq_bits = select_hq_bits, qbits_key = qbits_key,
+        )
+        self.kv_a_layernorm = kv_a_layernorm if kv_a_layernorm is not None else RMSNorm(
+            config, f"{key}.{key_kv_a_norm}", rms_norm_eps, out_dtype = torch.half,
+        )
+        self.register_submodule(self.kv_a_proj_with_mqa)
+        self.register_submodule(self.kv_a_layernorm)
+
+        self.o_proj = o_proj if o_proj is not None else Linear(
+            config, f"{key}.{key_o}", num_q_heads * v_head_dim, hidden_size,
+            qmap = qmap_o, out_dtype = out_dtype, trim_padded_out = True,
+            select_hq_bits = select_hq_bits, qbits_key = qbits_key,
+        )
+        self.register_submodule(self.o_proj)
+
+        if indexer_mode == "full":
+            assert q_lora_rank is not None, "DSA indexer queries project from the q_a latent"
+            self.idx_wq_b = idx_wq_b if idx_wq_b is not None else Linear(
+                config, f"{key}.{key_indexer}.wq_b", q_lora_rank, index_n_heads * index_head_dim,
+                qmap = qmap + ".q_a" if qmap is not None else None,
+                out_dtype = torch.half, trim_padded_out = True,
+                select_hq_bits = select_hq_bits, qbits_key = qbits_key,
+            )
+            # Key head and per-head scoring weights are router-like: tiny, and selection noise
+            # is coherent across every layer sharing it, so they stay unquantized
+            self.idx_wk = idx_wk if idx_wk is not None else Linear(
+                config, f"{key}.{key_indexer}.wk", hidden_size, index_head_dim,
+                qmap = None, out_dtype = torch.half, pad_to = 1,
+            )
+            self.idx_k_norm = idx_k_norm if idx_k_norm is not None else LayerNorm(
+                config, f"{key}.{key_indexer}.k_norm", index_norm_eps, out_dtype = torch.half,
+            )
+            self.idx_weights = idx_weights if idx_weights is not None else Linear(
+                config, f"{key}.{key_indexer}.weights_proj", hidden_size, index_n_heads,
+                qmap = None, out_dtype = torch.half, pad_to = 1,
+            )
+            self.register_submodule(self.idx_wq_b)
+            self.register_submodule(self.idx_wk)
+            self.register_submodule(self.idx_k_norm)
+            self.register_submodule(self.idx_weights)
 
 
     def cache_layer_type(self, default, kwargs: dict):
@@ -288,18 +310,11 @@ class MLAttention(Module):
         return [[q, kv, o]]
 
 
-    def load_local(self, device, **kwargs):
+    def _alloc_runtime(self, device):
+        """Cache pages and the rope table: everything load_local sets up that does not come
+        from the tensor collection (a TP rank has no collection and receives its weights sliced)."""
         for cl in self.cache_layers:
             cl.alloc(device)
-
-        if self.index_kpool:
-            stc = self.config.stc
-            self.idx_kpool_ape = stc.get_tensor(
-                f"{self.key}.{self.key_indexer}.index_kpool_compress_ape", device,
-                no_defer = True, allow_bf16 = True).float()
-            self.idx_kpool_gate = stc.get_tensor(
-                f"{self.key}.{self.key_indexer}.index_kpool_compress_gate", device,
-                no_defer = True, allow_bf16 = True).to(torch.half)
 
         if self.rope_settings:
             self.rope = RoPE(device, self.rope_settings)
@@ -309,6 +324,19 @@ class MLAttention(Module):
             self.l4_beta = self.rope.llama_4_scaling_beta
             self.l4_original = self.rope.llama_4_scaling_original
             self.rope.llama_4_scaling_beta = 0.0
+
+
+    def load_local(self, device, **kwargs):
+        self._alloc_runtime(device)
+
+        if self.index_kpool:
+            stc = self.config.stc
+            self.idx_kpool_ape = stc.get_tensor(
+                f"{self.key}.{self.key_indexer}.index_kpool_compress_ape", device,
+                no_defer = True, allow_bf16 = True).float()
+            self.idx_kpool_gate = stc.get_tensor(
+                f"{self.key}.{self.key_indexer}.index_kpool_compress_gate", device,
+                no_defer = True, allow_bf16 = True).to(torch.half)
 
         # kv_b_proj maps the latent to per-head K-nope and V. Attention never applies it as that
         # GEMM; the halves fold into the query/output (decode) or up-project past tiles (prefill)
@@ -388,15 +416,25 @@ class MLAttention(Module):
         params: dict,
         out_dtype: torch.dtype | None = None
     ) -> torch.Tensor:
-        bsz, seqlen, _ = x.shape
-        attn_mode = params.get("attn_mode", "flash_attn_nc")
-        match attn_mode:
-            case "flash_attn":
-                x = self.decode_flash_attn(x, bsz, seqlen, params)
-            case "flash_attn_nc":
-                x = self.decode_flash_attn_nc(x, bsz, seqlen, params)
-            case _:
-                raise ValueError(f"Unknown attn_mode: {attn_mode}")
+        if self.num_q_heads == 0:
+            # TP rank without heads: contributes zeros to the reduction
+            x = torch.zeros_like(x, dtype = self.out_dtype)
+            if self.tp_reduce:
+                params["backend"].all_reduce(x, False)
+        else:
+            bsz, seqlen, _ = x.shape
+            attn_mode = params.get("attn_mode", "flash_attn_nc")
+            match attn_mode:
+                case "flash_attn":
+                    x = self.decode_flash_attn(x, bsz, seqlen, params)
+                case "flash_attn_nc":
+                    x = self.decode_flash_attn_nc(x, bsz, seqlen, params)
+                case _:
+                    raise ValueError(f"Unknown attn_mode: {attn_mode}")
+            # Each rank attends with its own query heads over a replicated latent cache; the
+            # partial o_proj outputs sum to the full projection
+            if self.tp_reduce:
+                params["backend"].all_reduce(x)
         return to2(x, out_dtype, self.out_dtype)
 
 
@@ -1116,9 +1154,181 @@ class MLAttention(Module):
             params["_as_dsa_indices"] = p2.get("dsa_topk_indices")
 
 
+    # Tensor parallel: the latent (kv_a projection, its norm, the rope key and the cache pages) is
+    # MQA state and is replicated on every rank, as are the q_a stage and the DSA indexer (the
+    # top-k selection is recomputed identically per rank, no communication). Query heads are
+    # split: each rank holds its column block of q_b/q_proj, W_UK and W_UV, and its row block of
+    # o_proj, and the partial o_proj outputs are all-reduced in forward()
+
+    def _tp_channel_width(self) -> int:
+        # Heads per allocation channel: the smallest head group whose q_b columns and o_proj rows
+        # are both 128-aligned (exl3 tiles) - 1 for 256-wide heads, 2 for DeepSeek-V3's 192/128
+        w = 1
+        while (w * self.qk_head_dim) % 128 or (w * self.v_head_dim) % 128:
+            w += 1
+        assert self.num_q_heads % w == 0, \
+            f"{self.key}: {self.num_q_heads} heads cannot split into 128-channel groups"
+        return w
+
+
     def make_tp_allocation(self, options: dict) -> list[TPAllocation]:
-        raise NotImplementedError()
+        replicated = [self.kv_a_proj_with_mqa] + \
+            ([self.q_a_proj] if self.q_a_proj is not None else []) + \
+            ([self.idx_wq_b, self.idx_wk, self.idx_weights] if self.idx_wq_b is not None else [])
+        storage_d = sum(m.storage_size() for m in replicated)
+        # The cache is replicated per rank (see cache/mla.py tp_export)
+        for cl in self.cache_layers:
+            storage_d += cl.storage_size()
+        H, D_c = self.num_q_heads, self.kv_lora_rank
+        storage_s = self.q_proj.storage_size() + self.o_proj.storage_size()
+        storage_s += D_c * H * (self.qk_nope_head_dim + self.v_head_dim) * torch.half.itemsize  # W_UK, W_UV
+        overhead_d = self.hidden_size * (self.out_dtype or torch.half).itemsize
+        overhead_d += (D_c + self.qk_rope_head_dim) * torch.half.itemsize  # latent row
+        for cl in self.cache_layers:
+            overhead_d += cl.overhead_size()
+        # Per head: q, absorbed q (latent-wide), latent output, unfolded output
+        overhead_s = H * (self.qk_head_dim + self.v_head_dim + 2 * D_c) * torch.half.itemsize
+        recons = max(self.q_proj.recons_size(), self.o_proj.recons_size())
+        cw = self._tp_channel_width()
+        tpa = TPAllocation(
+            key = self.key,
+            channel_width = cw,
+            channel_unit = "heads",
+            storage_per_device = storage_d,
+            storage_to_split = storage_s,
+            overhead_per_device = overhead_d,
+            overhead_to_split = overhead_s,
+            recons_temp = recons,
+            channels_to_split = H // cw,
+            limit_key = "attn"
+        )
+        return [tpa]
 
 
     def tp_export(self, plan, producer):
-        raise NotImplementedError("Tensor-parallel inference is not implemented for MLA layers")
+        assert self.device is not None, "Cannot export module for TP before loading."
+
+        def _export(child):
+            nonlocal producer
+            return child.tp_export(plan, producer) if child is not None else None
+
+        return {
+            "cls": MLAttention,
+            "kwargs": {
+                "key": self.key,
+                "layer_idx": self.layer_idx,
+                "hidden_size": self.hidden_size,
+                "kv_lora_rank": self.kv_lora_rank,
+                "qk_nope_head_dim": self.qk_nope_head_dim,
+                "qk_rope_head_dim": self.qk_rope_head_dim,
+                "v_head_dim": self.v_head_dim,
+                "rope_settings": self.rope_settings,
+                "q_lora_rank": self.q_lora_rank,
+                "sm_scale": self.sm_scale,
+                "rms_norm_eps": self.norm_eps,
+                "out_dtype": self.out_dtype,
+                "key_kv_b": self.key_kv_b,
+                "key_indexer": self.key_indexer,
+                "indexer_mode": self.indexer_mode,
+                "index_n_heads": self.index_n_heads,
+                "index_head_dim": self.index_head_dim,
+                "index_topk": self.index_topk,
+                "index_kpool": self.index_kpool,
+                "index_kpool_tail": self.index_kpool_tail,
+            },
+            "num_q_heads": self.num_q_heads,
+            **{name: _export(getattr(self, name)) for name in (
+                "q_a_proj",
+                "q_a_layernorm",
+                "q_b_proj",
+                "kv_a_proj_with_mqa",
+                "kv_a_layernorm",
+                "o_proj",
+                "idx_wq_b",
+                "idx_wk",
+                "idx_k_norm",
+                "idx_weights",
+            )},
+            # Direct q projection only exists without the LoRA pair (q_proj aliases q_b_proj otherwise)
+            "q_proj": _export(self.q_proj) if self.q_a_proj is None else None,
+            # Unquantized, head-major along dim 1: sliced to the local heads on import
+            "w_uk_flat": producer.send(self.w_uk_flat),
+            "w_uv_flat": producer.send(self.w_uv_flat),
+            "idx_kpool_ape": producer.send(self.idx_kpool_ape),
+            "idx_kpool_gate": producer.send(self.idx_kpool_gate),
+            "device": self.device,
+            "cache_layers": [
+                cl.tp_export(plan) for cl in self.cache_layers
+            ],
+        }
+
+
+    @staticmethod
+    def tp_import(local_context, exported, plan, **kwargs):
+        consumer = local_context["consumer"]
+        device = local_context["device"]
+        kw = exported["kwargs"]
+        first, last, unit = plan[kw["key"]]
+        assert unit == "heads"
+        H = last - first
+        # Widths come from the exported module, never from a model constant: GLM-5.3 has
+        # 192 + 64 / 256, the Flash 256 + 0 / 256, DeepSeek-V3 128 + 64 / 128
+        D_q = kw["qk_nope_head_dim"] + kw["qk_rope_head_dim"]
+        D_n = kw["qk_nope_head_dim"]
+        D_v = kw["v_head_dim"]
+
+        def _import(name):
+            nonlocal exported, plan
+            return exported[name]["cls"].tp_import(local_context, exported[name], plan) \
+                if exported.get(name) else None
+
+        def _import_split(name, split):
+            nonlocal exported, plan
+            return exported[name]["cls"].tp_import_split(local_context, exported[name], plan, split) \
+                if split and exported.get(name) else None
+
+        q_split = (True, first * D_q, last * D_q) if H else None
+        o_split = (False, first * D_v, last * D_v) if H else None
+
+        module = MLAttention(
+            config = None,
+            **kw,
+            num_q_heads = H,
+            q_proj = _import_split("q_proj", q_split),
+            q_a_proj = _import("q_a_proj") if H else None,
+            q_a_layernorm = _import("q_a_layernorm") if H else None,
+            q_b_proj = _import_split("q_b_proj", q_split),
+            kv_a_proj_with_mqa = _import("kv_a_proj_with_mqa") if H else None,
+            kv_a_layernorm = _import("kv_a_layernorm") if H else None,
+            o_proj = _import_split("o_proj", o_split),
+            idx_wq_b = _import("idx_wq_b") if H else None,
+            idx_wk = _import("idx_wk") if H else None,
+            idx_k_norm = _import("idx_k_norm") if H else None,
+            idx_weights = _import("idx_weights") if H else None,
+        )
+        module.device = device
+
+        if H:
+            module.w_uk_flat = consumer.recv(
+                exported["w_uk_flat"], cuda = True, slice_dim = 1, first = first * D_n, last = last * D_n
+            ).contiguous()
+            module.w_uv_flat = consumer.recv(
+                exported["w_uv_flat"], cuda = True, slice_dim = 1, first = first * D_v, last = last * D_v
+            ).contiguous()
+            module.idx_kpool_ape = consumer.recv(exported["idx_kpool_ape"], cuda = True)
+            module.idx_kpool_gate = consumer.recv(exported["idx_kpool_gate"], cuda = True)
+
+            cache_layers = exported["cache_layers"]
+            if len(cache_layers):
+                module.has_split_cache = True
+                for cl in cache_layers:
+                    cli = cl["cls"](None, module, **cl["args"])
+                    module.cache_layers.append(cli)
+                    module.tp_cache_lookup[cl["args"]["cache_id"]] = cli
+
+        if not kwargs.get("skip_reduction"):
+            module.tp_reduce = True
+
+        module._alloc_runtime(device)
+        torch.cuda.synchronize()
+        return module
