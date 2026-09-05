@@ -22,7 +22,6 @@ from pathlib import Path
 
 ENV = Path(__file__).resolve().parents[3] / "bl4ck0ut-hub/apps/api/.env"
 IMAGEM = "pytorch/pytorch:2.8.0-cuda12.8-cudnn9-devel"
-VRAM_MINIMA_MB = 22 * 1024
 
 
 def variavel(nome: str) -> str:
@@ -43,10 +42,10 @@ def vast(caminho: str, metodo: str = "GET", corpo: dict | None = None) -> dict:
         return json.load(r)
 
 
-def buscar(placas: int, disco: int, placa: str | None) -> list[dict]:
+def buscar(placas: int, disco: int, placa: str | None, vram: int = 22) -> list[dict]:
     q = {
         "verified": {"eq": True}, "rentable": {"eq": True}, "rented": {"eq": False}, "type": "on-demand",
-        "num_gpus": {"eq": placas}, "gpu_ram": {"gte": VRAM_MINIMA_MB}, "disk_space": {"gte": disco},
+        "num_gpus": {"eq": placas}, "gpu_ram": {"gte": vram * 1024}, "disk_space": {"gte": disco},
         "allocated_storage": disco, "inet_down": {"gte": 500}, "cuda_max_good": {"gte": 12.8},
         "reliability2": {"gte": 0.9}, "gpu_frac": {"gte": 0.5},
         "order": [["dph_total", "asc"]], "limit": 40,
@@ -57,8 +56,8 @@ def buscar(placas: int, disco: int, placa: str | None) -> list[dict]:
 
 
 def cmd_buscar(a: argparse.Namespace) -> None:
-    ofertas = buscar(a.placas, a.disco, a.placa)
-    print(f"{len(ofertas)} ofertas · {a.placas} placas · disco ≥ {a.disco} GB · VRAM ≥ 22 GiB por placa")
+    ofertas = buscar(a.placas, a.disco, a.placa, a.vram)
+    print(f"{len(ofertas)} ofertas · {a.placas} placas · disco ≥ {a.disco} GB · VRAM ≥ {a.vram} GiB por placa")
     print(f"{'oferta':>10}  {'placas':<26} {'$/h':>6}  {'rede Mb/s':>9}  {'disco':>6}  {'conf':>5}  região")
     for o in ofertas[:25]:
         print(f"{o['id']:>10}  {o['num_gpus']}× {o['gpu_name']:<22} {o['dph_total']:>6.2f}  {o.get('inet_down', 0):>9.0f}  {o.get('disk_space', 0):>6.0f}  {o.get('reliability2', 0):>5.2f}  {o.get('geolocation')}")
@@ -74,6 +73,8 @@ def cmd_comprar(a: argparse.Namespace) -> None:
             f"-e FORK={a.fork}",
             f"-e BRANCH={a.branch}",
             f"-e CORTE={a.corte}",
+            f"-e BASE_DEVICES={a.base_devices}",
+            f"-e TOKENS={a.tokens}",
         ]
     )
     corpo = {
@@ -109,10 +110,12 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
     b = sub.add_parser("buscar"); b.add_argument("--placas", type=int, default=2); b.add_argument("--disco", type=int, default=60)
-    b.add_argument("--placa", default=None)
+    b.add_argument("--placa", default=None); b.add_argument("--vram", type=int, default=22)
     c = sub.add_parser("comprar"); c.add_argument("oferta", type=int); c.add_argument("--disco", type=int, default=60)
     c.add_argument("--fork", default="https://github.com/Olt1z/exllamav3-tp-mla"); c.add_argument("--branch", default="tp-mla")
     c.add_argument("--corte", default="Olt1z/GLM-5.3-podado-4L-EXL3-balanced-bl4ck0ut")
+    c.add_argument("--base-devices", default="0", help="'0' para corte; 'all' para modelo grande (base em autosplit)")
+    c.add_argument("--tokens", type=int, default=64)
     lg = sub.add_parser("log"); lg.add_argument("instancia", type=int); lg.add_argument("--linhas", type=int, default=200)
     d = sub.add_parser("destruir"); d.add_argument("instancia", type=int)
     a = p.parse_args()
