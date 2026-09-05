@@ -86,6 +86,15 @@ grandes são provados por um corte de poucas camadas quantizado pelo hub.
 - Velocidade no corte não diz nada útil (4 camadas, latência de lançamento): 180 tok/s numa placa,
   230 em duas. A medida que vale é no modelo inteiro, etapa 7.
 
+## Timeout dos coletivos nativos
+
+O backend nativo aborta o grupo inteiro quando um rank espera mais que o prazo num coletivo
+(`## Synchronization timeout in kernel: ...`). O upstream fixa 90 s dentro do kernel. Aqui o prazo
+vive no `PGContext` e vem de `EXLLAMA_TP_SYNC_TIMEOUT` (segundos, padrão 90): a primeira geração
+compila os kernels Triton dos caminhos MLA e KDA em cada rank, e o rank mestre ainda compila os do
+draft MTP, então um rank atrasado pode estourar 90 s numa máquina sã. O backend NCCL só usa esse
+prazo nos coletivos que caem no fallback nativo (broadcast e gather).
+
 ## Branches e upstream
 
 - `tp-mla`: o trabalho, criado da tag `v1.4.6` do upstream.
