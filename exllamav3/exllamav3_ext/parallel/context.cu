@@ -5,11 +5,13 @@
 #include "../util.h"
 #include "../util.cuh"
 
-void pg_init_context(uintptr_t ctx)
+void pg_init_context(uintptr_t ctx, double sync_timeout_s)
 {
     PGContext* ctx_ptr = (PGContext*) ctx;
 
     ctx_ptr->sync_timeout = 0;
+    if (sync_timeout_s <= 0.0) sync_timeout_s = SYNC_TIMEOUT_DEFAULT_S;
+    ctx_ptr->sync_timeout_ns = (uint64_t)(sync_timeout_s * 1e9);
     ctx_ptr->barrier_epoch = 1;
     ctx_ptr->broadcast_ll_epoch = 1;
 

@@ -1,3 +1,4 @@
+import os
 import torch
 import torch.distributed as dist
 import time
@@ -348,7 +349,13 @@ class TPBackendNative:
         # Init global context
         if master:
             log_tp(device, f"Initializing global context")
-            ext.pg_init_context(self.ptr_g)
+            # Seconds a rank may wait for its peers in a native collective before the whole group
+            # aborts. The first forward JIT-compiles Triton kernels (MLA/KDA paths) in every rank,
+            # and the MTP draft only in the master, so the default can expire on a healthy first
+            # request; EXLLAMA_TP_SYNC_TIMEOUT raises it without recompiling
+            sync_timeout_s = float(os.environ.get("EXLLAMA_TP_SYNC_TIMEOUT", "90"))
+            log_tp(device, f"Sync timeout: {sync_timeout_s} s")
+            ext.pg_init_context(self.ptr_g, sync_timeout_s)
 
 
     def close(self):

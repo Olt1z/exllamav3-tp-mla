@@ -17,8 +17,9 @@
 #define SYNC_MIN_SLEEP 64
 #define SYNC_MAX_SLEEP 1024
 
-// Timeout in seconds
-#define SYNC_TIMEOUT 2ull
+// Default sync timeout in seconds (overridable per run via EXLLAMA_TP_SYNC_TIMEOUT, see
+// pg_init_context). 90 s keeps the historical value (2 x 45 s)
+#define SYNC_TIMEOUT_DEFAULT_S 90.0
 
 // Wire format of a CPU-assisted reduce. BF16 wire carries fp32/bf16 payloads (range-safe for
 // fp32 residual streams); FP16 wire carries fp16 payloads verbatim, making the reduce exact for
@@ -38,6 +39,10 @@ struct alignas(64) PGContext
 {
     uint32_t sync_timeout;
     uint32_t barrier_epoch;
+    // Deadline budget for every collective spin loop, read by the device at kernel start. Set once
+    // by the master in pg_init_context; the first forward JIT-compiles Triton kernels per rank
+    // (and the MTP draft in the master only), so a fixed 90 s can expire on a healthy run
+    uint64_t sync_timeout_ns;
     alignas(16) uint32_t barrier_epoch_device[MAX_DEVICES];
     alignas(16) uint32_t broadcast_stage_device[MAX_DEVICES];
     alignas(16) uint32_t reduce_stage_produced[MAX_DEVICES];
@@ -64,5 +69,5 @@ struct alignas(64) PGContext
     ReduceJob reduce_jobs[MAX_REDUCE_JOBS];
 };
 
-void pg_init_context(uintptr_t ctx);
+void pg_init_context(uintptr_t ctx, double sync_timeout_s);
 void pg_check_timeout(uintptr_t ctx);
