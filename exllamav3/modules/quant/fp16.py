@@ -181,7 +181,10 @@ class LinearFP16:
     def tp_import_split_n(local_context, exported, plan, splits, dbg = False):
         consumer = local_context["consumer"]
         device = local_context["device"]
-        id_w = exported["suh"]
+        # The fp16 export carries "weight"/"bias" (see tp_export); "suh" is the EXL3 layout. The
+        # n-way split was only ever reached with EXL3 projections until an unquantized KDA
+        # (GLM-5.3-Flash TR3) went through it
+        id_w = exported["weight"]
         id_b = exported["bias"]
 
         w_ = []
