@@ -246,8 +246,9 @@ class GlmMoeDsaModel(Model):
         # Activate all experts during H capture pass in quantization
         self.calibration_all_experts = True
 
-        # MLA layers currently do not support TP because the latent cache cannot be split by head
-        self.caps.update({"supports_tp": False})
+        # TP: the MLA latent cache is replicated per rank and the query heads are split (see
+        # MLAttention.tp_import); experts are expert-parallel as usual
+        self.caps.update({"supports_tp": True})
 
 
     @override
