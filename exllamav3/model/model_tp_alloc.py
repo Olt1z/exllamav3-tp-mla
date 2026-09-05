@@ -103,13 +103,15 @@ class TPAllocator:
                 if dev_limit is not None:
                     top_k_mask_(rem_mem_s, dev_limit)
 
-            # Active devices on layer
-            mask = [m > 0 for m in rem_mem_s]
-
             # Perform split
             channels = c.channels_to_split
             split = ratio_split(channels, rem_mem_s, chunk_size = 1)
             c.current_split = split
+
+            # Active devices on layer: those that actually received channels. A device with free
+            # memory but zero channels holds none of the module, so it must not be charged the
+            # per-device storage (replicated MLA caches make that charge large)
+            mask = [s > 0 for s in split]
 
             # Compute storage and overhead given layer and split
             tokens = self.output_num_tokens if c is self.components[-1] else self.num_tokens

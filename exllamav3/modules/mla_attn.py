@@ -176,10 +176,6 @@ class MLAttention(Module):
             index_head_dim * 2 if index_kpool else index_head_dim
         )
 
-        self.caps.update({
-            "kv_cache": True
-        })
-
         self.cache_layers = []
         self.tp_cache_lookup = {}
         self.has_split_cache = False
@@ -206,9 +202,14 @@ class MLAttention(Module):
         self.idx_k_norm = None
         self.idx_weights = None
 
-        # TP rank that received no query heads: participates in the all-reduce only
+        # TP rank that received no query heads: participates in the all-reduce only. Declared
+        # after this point so the rank is not listed among the cache modules (it owns no pages)
         if num_q_heads == 0:
             return
+
+        self.caps.update({
+            "kv_cache": True
+        })
 
         # Query path: either a direct projection or a LoRA-style pair with a norm between
         if q_lora_rank is None:
@@ -1156,9 +1157,10 @@ class MLAttention(Module):
 
     # Tensor parallel: the latent (kv_a projection, its norm, the rope key and the cache pages) is
     # MQA state and is replicated on every rank, as are the q_a stage and the DSA indexer (the
-    # top-k selection is recomputed identically per rank, no communication). Query heads are
-    # split: each rank holds its column block of q_b/q_proj, W_UK and W_UV, and its row block of
-    # o_proj, and the partial o_proj outputs are all-reduced in forward()
+    # top-k selection is recomputed per rank, no communication; ranks may pick different tokens
+    # on near-ties, which the TP smoke test measures against single-device noise). Query heads
+    # are split: each rank holds its column block of q_b/q_proj, W_UK and W_UV, and its row block
+    # of o_proj, and the partial o_proj outputs are all-reduced in forward()
 
     def _tp_channel_width(self) -> int:
         # Heads per allocation channel: the smallest head group whose q_b columns and o_proj rows
@@ -1183,11 +1185,17 @@ class MLAttention(Module):
         storage_s = self.q_proj.storage_size() + self.o_proj.storage_size()
         storage_s += D_c * H * (self.qk_nope_head_dim + self.v_head_dim) * torch.half.itemsize  # W_UK, W_UV
         overhead_d = self.hidden_size * (self.out_dtype or torch.half).itemsize
-        overhead_d += (D_c + self.qk_rope_head_dim) * torch.half.itemsize  # latent row
+        # Replicated projections reconstruct whole on every rank
+        overhead_d += max(m.recons_size() for m in replicated)
+        # Per-token transients (the allocator scales overhead_to_split by the chunk length): the
+        # latent row and the cache layer's own row transient are replicated, so counting them
+        # here undershoots by the rank's share; per head: q, the two rope-query copies, absorbed
+        # q, latent output, output
+        overhead_s = (D_c + self.qk_rope_head_dim) * torch.half.itemsize
         for cl in self.cache_layers:
-            overhead_d += cl.overhead_size()
-        # Per head: q, absorbed q (latent-wide), latent output, unfolded output
-        overhead_s = H * (self.qk_head_dim + self.v_head_dim + 2 * D_c) * torch.half.itemsize
+            overhead_s += cl.overhead_size()
+        overhead_s += H * (self.qk_head_dim + 2 * self.qk_rope_head_dim + self.v_head_dim + 2 * D_c) \
+            * torch.half.itemsize
         recons = max(self.q_proj.recons_size(), self.o_proj.recons_size())
         cw = self._tp_channel_width()
         tpa = TPAllocation(
@@ -1271,6 +1279,11 @@ class MLAttention(Module):
         first, last, unit = plan[kw["key"]]
         assert unit == "heads"
         H = last - first
+        # A "full" indexer layer publishes the top-k selection that later "shared" layers on the
+        # same rank consume; a rank with no heads skips the indexer, so it cannot host one
+        assert H or kw["indexer_mode"] != "full", \
+            f"{kw['key']}: DSA indexer layers need at least one head on every rank; " \
+            f"adjust gpu_split / tp_dev_limits"
         # Widths come from the exported module, never from a model constant: GLM-5.3 has
         # 192 + 64 / 256, the Flash 256 + 0 / 256, DeepSeek-V3 128 + 64 / 128
         D_q = kw["qk_nope_head_dim"] + kw["qk_rope_head_dim"]

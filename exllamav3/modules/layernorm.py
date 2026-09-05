@@ -145,6 +145,11 @@ class LayerNorm(Module):
         module.device = device
         w = consumer.recv(exported["weight"], cuda = True)
         module.weight = nn.Parameter(w)
+        # Biased norms (e.g. the DSA indexer's k_norm) export the bias too; dropping it here
+        # silently shifts every key the indexer scores
+        b = consumer.recv(exported["bias"], cuda = True)
+        module.bias = nn.Parameter(b) if b is not None else None
+        module._numel = w.numel() + (b.numel() if b is not None else 0)
         return module
 
     @staticmethod
