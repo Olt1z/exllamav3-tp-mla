@@ -117,9 +117,12 @@ MAX_JOBS=4 pip install -e .        # compila a extensão para a placa da máquin
 
 ## Como o hub usa
 
-O hub bl4ck0ut baixa o ExLlamaV3 por tarball do GitHub no arranque da máquina; quando a
-família passar no teste de fumaça, o commit fixado passa a apontar para este fork e o
-TabbyAPI é lançado com `tensor_parallel: true` quando há mais de uma placa.
+O hub bl4ck0ut instala o ExLlamaV3 por `pip install git+<repo>@<commit>` no arranque da máquina.
+Desde 05/09/2026 (`EXL3_REPO`/`EXL3_COMMIT` em `apps/api/src/data/exllama-capabilities.ts`) o
+repo é este fork e o commit é o a4e4960; a lista de arquiteturas sem TP é gerada do mesmo
+commit (`scripts/gen-exllama-registry.py`), e o TabbyAPI recebe `--tensor-parallel true` quando
+a arquitetura não está nela e há mais de uma placa. Cada família só sai da lista depois do
+teste de fumaça: o GLM-5.3 saiu em 05/09; o Flash sai na etapa 6b.
 
 ## Licença
 
