@@ -1,0 +1,9 @@
+TR3 do Flash inteiro pelo hub, 06/09/2026 20:14–21:00Z, instância 50094491 (4× RTX PRO 6000 S compartilhada,
+Califórnia, EPYC 9555 4,4 GHz, $6,75/h), fork a42908c, TP4 NCCL, 1M, grafo CUDA com atenção fp16 + DFlash 2.
+SSH recusado pelo host ("bad ownership or modes for /root/.ssh/authorized_keys", reboot não corrigiu):
+só o arranjo que o hub sobe sozinho foi medido, pela porta direta; a fonte é o servidor quando o espelho
+do log da Vast alcançou a linha Metrics, senão o relógio do cliente.
+Rodada A: curto 71–77 tok/s (cliente) · longo 125 tok/s, 65 % aceito (servidor) · difícil 109 (cliente), prefill 3.887–4.223 T/s
+Rodada B: curto 66 tok/s, 27 % (servidor) · longo 175 (cliente) · difícil 91 tok/s, 43 % (servidor), prefill 5.014 T/s
+Linha de base do mesmo host (etapa 4, MTP eager): curto 73–75 · longo 82 · difícil 92.
+Faltam, na MESMA máquina: eager + DFlash 2 e grafo + MTP (exigem relançar o TabbyAPI à mão).
