@@ -246,6 +246,37 @@ rascunho atualizado por rodada, posições, janela bilateral do `is_causal: fals
 **A exatidão do difícil (soma e agulha) falhou nos dois arranjos**: é do modelo a 4 bpw com 30k
 de contexto, não do rascunho (o alvo verifica, o decode é lossless).
 
+## Etapa 2 do plano de desempenho (06/09/2026, 17:24–17:54Z): prefill pelo gerador, no corte
+
+Duas bancadas de 2× RTX 3090 ($0,24/h, ~$0,15 no total), corte de 4 camadas do TR3,
+`tests/bancada/perfil_gerador.py` (prefill e decode pelo GERADOR, como o TabbyAPI: chunks,
+exportação de estados por chunk, rascunho), 4k/16k/30k, aquecido no maior tamanho. Logs em
+`Olt1z/quantizacao-bl4ck0ut/saidas/tp-mla/20260906T172411Z/` e `.../20260906T173814Z/`.
+
+| Arranjo | 16k | 30k |
+| --- | --- | --- |
+| 1 placa, chunk 4096 | 17.150–17.190 tok/s | 17.690–17.750 tok/s |
+| 1 placa, chunk 8192 | 17.020–17.050 | 17.340–17.390 |
+| TP2 NCCL, chunk 4096 | 15.600 | 16.080–16.100 |
+| TP2 NCCL, chunk 8192 | 15.390–15.480 | 15.750–15.800 |
+| TP2 nativo, chunk 4096 | 15.410–15.470 | 15.200–15.360 |
+| 1 placa + DFlash 2 (taps remapeados 0,1,2,3,3) | 12.140 (+0,40 s) | 11.020 (+1,03 s) |
+| TP2 NCCL + DFlash 2 | 11.150 (+0,43 s) | 10.250 (+1,07 s) |
+
+**Chunk 8192 não rende** (−1 a −2 % em todos os arranjos; no corte o MoE é 1 camada em 4, então
+um ganho grande no inteiro é improvável e um pequeno não paga máquina de 4× PRO 6000 para medir).
+**NCCL e nativo empatam** em TP2, e TP2 fica 9 % abaixo de uma placa no prefill, como no inteiro.
+**O rascunho custa 24–34 µs por token de prefill** (exportação dos 5 taps + `update_kv_from_target`),
+igual numa placa e em TP2 — a exportação pelos ranks não multiplica. Os +14 s do TR3 inteiro em 30k
+com o DFlash 2 (etapa 5, 1.199 contra 2.801 T/s) não são isso: aquela foi a primeira leitura de 30k
+da máquina e a régua só aquecia com o prompt de 5,4k, então o Triton compilou dentro da medida (o
+MTP, medido depois no mesmo host, já achou os kernels no cache). A régua passa a aquecer com cada
+tamanho que mede. Com taps remapeados a numérica do rascunho é lixo (0 aceito, o gerador corta o
+rascunho na primeira rodada), então o decode com rascunho no corte não diz nada.
+
+**O que sobra para o prefill**: nada barato. O motor cru já faz 4,2–4,8k tok/s no inteiro em TP4;
+o card faz 6,2k com FlashInfer e DeepGEMM. O chunk, o backend e o TP não mudam isso.
+
 ## Régua de desempenho
 
 Três prompts fixos, sempre os mesmos, e uma linha por prompt. É o "antes" e o "depois" de toda

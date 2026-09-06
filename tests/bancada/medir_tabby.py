@@ -187,9 +187,15 @@ def main():
 
     # curto e longo: os kernels de chunk do prefill compilam por forma, e a primeira leitura de um
     # prompt de 5k pagou ~9 s de Triton em 06/09/2026 (475 T/s em vez de ~2k)
+    # ... e o de 30k paga de novo (formas novas do KDA e do DSA): a leitura do DFlash 2 no TR3 em
+    # 06/09 (1.199 T/s no difícil, contra 2.801 do MTP medido depois no mesmo host) era isto.
+    # Aquece com CADA tamanho que vai medir, 8 tokens de saída
     print("aquecimento (compila Triton, não conta)…", flush = True)
     chat(args.url, args.chave, com_nonce("Diga apenas: pronto."), 8)
-    chat(args.url, args.chave, com_nonce(prompt_longo()), 8)
+    if "longo" in quais or "dificil" in quais:
+        chat(args.url, args.chave, com_nonce(prompt_longo()), 8)
+    if "dificil" in quais:
+        chat(args.url, args.chave, com_nonce(prompt_dificil()[0]), 8)
 
     resultados = []
     if "curto" in quais:
