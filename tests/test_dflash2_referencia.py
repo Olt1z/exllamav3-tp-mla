@@ -35,6 +35,7 @@ def main():
     p.add_argument("--ctx", type = int, default = 200)
     p.add_argument("--tokens", type = int, default = 64)
     p.add_argument("--cache", type = int, default = 4096)
+    p.add_argument("--tp", action = "store_true", help = "alvo em tensor parallel (exercita o top-k do lm_head e a exportação de estados nos ranks)")
     args = p.parse_args()
     dev = torch.device("cuda:0")
 
@@ -49,7 +50,11 @@ def main():
     cfg_t = Config.from_directory(args.alvo)
     target = Model.from_config(cfg_t)
     tcache = Cache(target, max_num_tokens = args.cache, max_history = draft.caps.get("default_draft_size", 4))
-    target.load(device = dev, progressbar = True)
+    if args.tp:
+        target.load(tensor_p = True, tp_backend = "nccl", progressbar = True)
+        print(f"alvo em TP nos dispositivos {target.active_devices}")
+    else:
+        target.load(device = dev, progressbar = True)
     tokenizer = Tokenizer.from_config(cfg_t)
     draft.attach_to(target)
     assert cfg_t.hidden_size * len(cfg_d.target_layer_ids) == draft.input_layer.target_state_size, \
@@ -99,13 +104,25 @@ def main():
     print(f"A. caminho: fork {ids[0, 1:].tolist()} · ref {tok_ref[0].tolist()} · iguais {iguais:.0%}")
     ok_a = cos > 0.999 and iguais >= 6 / 7
 
-    # --- B. gerador de ponta a ponta -------------------------------------------------------------
+    # --- C. exportação dos estados do alvo (o que update_kv_from_target recebe) ------------------
+    # No modelo inteiro o rascunho lê camadas altas; aqui basta provar que o forward do alvo (em TP
+    # ou não) devolve params["export_states"] para camadas que existem, na ordem pedida
     del ref, past, out_ref
     torch.cuda.empty_cache()
+    camadas = set(range(min(cfg_t.num_hidden_layers, len(cfg_d.target_layer_ids))))
+    ids_p = tokenizer.encode("A luz do sol atravessa a atmosfera.", encode_special_tokens = True)
+    pc = {"attn_mode": "flash_attn", "cache": tcache, "past_len": 0, "batch_shape": (1, args.cache),
+          "export_state_layers": camadas}
+    target.prefill(input_ids = ids_p, params = pc)
+    exp = pc.get("export_states")
+    formas = [tuple(t.shape) for t in exp] if exp else None
+    print(f"C. export_states para {sorted(camadas)}: {formas}")
+    ok_c = exp is not None and len(exp) == len(camadas) and all(t.shape[1] == ids_p.shape[1] for t in exp)
+    ok_a = ok_a and ok_c
     if max(cfg_d.target_layer_ids) >= cfg_t.num_hidden_layers:
         print(f"B. pulado: o rascunho lê as camadas {cfg_d.target_layer_ids} e o alvo tem {cfg_t.num_hidden_layers}; "
               "a mecânica no gerador e a aceitação só se medem no modelo inteiro")
-        print("OK" if ok_a else "FALHOU: estado ou caminho divergem da referência")
+        print("OK" if ok_a else "FALHOU: estado, caminho ou exportação de estados")
         sys.exit(0 if ok_a else 1)
     prompt = "Explique em três frases por que o céu é azul."
     from exllamav3.generator.sampler.presets import ArgmaxSampler

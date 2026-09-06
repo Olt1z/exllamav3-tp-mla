@@ -110,7 +110,7 @@ from huggingface_hub import snapshot_download
 snapshot_download("$DFLASH2", local_dir="/workspace/dflash2", token=os.environ["HF_TOKEN"])
 PY
   mkdir -p /workspace/dflash-ref/dflash && curl -sL https://raw.githubusercontent.com/z-lab/dflash/main/dflash/model.py -o /workspace/dflash-ref/dflash/model.py
-  env $BASE python3 tests/test_dflash2_referencia.py --alvo /workspace/corte --dflash2 /workspace/dflash2 \
+  python3 tests/test_dflash2_referencia.py --alvo /workspace/corte --dflash2 /workspace/dflash2 --tp \
     --referencia /workspace/dflash-ref/dflash/model.py 2>&1 | grep -v -E "it/s\]|━━" | tee /workspace/6.txt
   echo "6 saiu com ${PIPESTATUS[0]}"
 fi
