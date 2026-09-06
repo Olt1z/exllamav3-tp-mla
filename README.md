@@ -54,7 +54,7 @@ Custo aceito: cada rank guarda o latente inteiro (576 valores por token por cama
 - [x] 6. Teste de fumaça com 2 placas no corte de 4 camadas do GLM-5.3 (05/09, 2× RTX 3090; ver "Resultado da bancada")
 - [x] 6b. Corte do Flash (3 KDA + 1 MLA), mesmo teste, flag no `glm5_next` (06/09, 2× RTX 3090; ver "Resultado da bancada, Flash")
 - [ ] 6c. DeepSeek V3 e Mistral-4: corte, mesmo teste, flag
-- [ ] 6d. Decode em grafo CUDA no rank TP (hoje desligado por `has_split_cache`) e tokens/s antes/depois
+- [ ] 6d. Decode em grafo CUDA no rank TP: a guarda `has_split_cache` saiu de `build_bc_mla` (era legado; o upstream já tinha tirado a mesma da Attention em ccd5626); falta provar no corte (KL igual) e medir tokens/s antes/depois
 - [ ] 7. PR para o upstream (fase 1)
 - [ ] 8. Fase 2: ligar a flag do Qwen 3-Next e do Qwen 3.8-Flash-Next e provar com corte
 - [ ] 9. Fase 3: Olmo, LFM 2.5, AfMoE
@@ -114,8 +114,13 @@ chave):** sem TP o autosplit reparte por camadas (95 + 96 + 6 + 0 GB, o cache de
 primeiras placas) e decodifica 596 tokens a 54,1–54,7 tok/s; em TP4, 63,8 tok/s (+18 %). No prompt
 de 5.321 tokens o autosplit estoura a memória da placa 1 (`torch.OutOfMemoryError` no transiente do
 KDA, 93,3 de 95 GiB ocupados); em TP4 o mesmo prompt entra a 312 tok/s, porque cache e transientes
-se dividem pelas quatro placas. A carga é mais rápida sem TP (50 s contra 65 s). O decode em grafo
-CUDA no rank TP (`has_split_cache`) segue desligado: é a parte da etapa 6d que ainda falta.
+se dividem pelas quatro placas. A carga é mais rápida sem TP (50 s contra 65 s). Esses números são
+com o decode da MLA em modo eager no rank: `build_bc_mla` recusava o grafo CUDA quando
+`has_split_cache`. A guarda era legado do primeiro caminho C++ da MLA (d420170); o upstream tirou a
+equivalente da Attention em ccd5626 ("TP shards are eligible: the shard owns its split cache
+layers directly ... the output all-reduce runs after the captured block returns") e Attention,
+MLP, MoE, KDA e DSv4 já decodificam em grafo dentro do rank. A MLA passa a fazer o mesmo depois de
+dfc2ad8; o all-reduce fica fora do grafo, como nos outros. Ainda não provado nem medido (bancada).
 
 ## Régua de desempenho
 

@@ -612,7 +612,10 @@ def build_bc_mla(module, layer):
                 layer.get_idx() is not None
             ))
         )) and
-        not m.has_split_cache and
+        # TP shards are eligible, as in bc_attn (upstream ccd5626): the shard owns its split cache
+        # layers directly (decode_flash_attn resolves the opaque cache handle before this sees the
+        # layer), the module's heads/projections are already the local slices, and the output
+        # all-reduce runs after the captured block returns
         isinstance(layer, (CacheLayer_MLA_fp16, CacheLayer_MLA_quant)) and
         (not isinstance(layer, CacheLayer_MLA_quant) or (
             layer.qk is not None and layer.qk.device == dev
