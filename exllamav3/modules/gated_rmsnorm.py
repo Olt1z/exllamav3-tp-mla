@@ -181,9 +181,12 @@ class GatedRMSNorm(Module):
         w = consumer.recv(exported["weight"], cuda = True)
         module.weight = nn.Parameter(w)
         # load() builds the BC alongside the weight; the TP import must too, or graphed consumers
-        # (BC_GatedDeltaNetSplit holds norm.bc) get a null pointer
+        # (BC_GatedDeltaNetSplit holds norm.bc) get a null pointer. Same gate flag as load(): the
+        # KDA sigmoid gate; without it the fused KDA path on a rank applies silu and every
+        # linear-attention layer's output diverges (measured 06/09/2026 on the TR3 corte: KL 1.37)
         module.bc = ext.BC_GatedRMSNorm(module.weight, module.rms_norm_eps, module.constant_bias,
-                                        module.groups, module.gate_first)
+                                        module.groups, module.gate_first,
+                                        1 if module.gate_activation == "sigmoid" else 0)
         torch.cuda.synchronize()
         return module
 
@@ -207,6 +210,7 @@ class GatedRMSNorm(Module):
             w = w[first : last]
         module.weight = nn.Parameter(w.to(module.device).contiguous())
         module.bc = ext.BC_GatedRMSNorm(module.weight, module.rms_norm_eps, module.constant_bias,
-                                        module.groups, module.gate_first)
+                                        module.groups, module.gate_first,
+                                        1 if module.gate_activation == "sigmoid" else 0)
 
         return module
