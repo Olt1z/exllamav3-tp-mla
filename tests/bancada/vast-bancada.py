@@ -76,6 +76,7 @@ def cmd_comprar(a: argparse.Namespace) -> None:
             f"-e BASE_DEVICES={a.base_devices}",
             f"-e TOKENS={a.tokens}",
         ]
+        + [f"-e {kv}" for kv in (a.env or [])]
     )
     corpo = {
         "image": IMAGEM, "disk": a.disco, "label": f"bl4ck0ut bancada tp-mla {prova_id}", "env": env,
@@ -116,6 +117,7 @@ def main() -> None:
     c.add_argument("--corte", default="Olt1z/GLM-5.3-podado-4L-EXL3-balanced-bl4ck0ut")
     c.add_argument("--base-devices", default="0", help="'0' para corte; 'all' para modelo grande (base em autosplit)")
     c.add_argument("--tokens", type=int, default=64)
+    c.add_argument("--env", action="append", help="variável extra para o onstart, CHAVE=valor (repetível; ex.: SO_7=1)")
     lg = sub.add_parser("log"); lg.add_argument("instancia", type=int); lg.add_argument("--linhas", type=int, default=200)
     d = sub.add_parser("destruir"); d.add_argument("instancia", type=int)
     a = p.parse_args()

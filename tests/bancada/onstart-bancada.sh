@@ -70,6 +70,7 @@ du -sh /workspace/corte
 # Artefato da esteira antiga com kv_b_proj em treliça: repara antes de carregar
 python3 tests/bancada/reparar_kv_b_proj.py /workspace/corte
 
+if [ -z "${SO_7:-}" ]; then
 marco "3b. teste por bloco: original × importado por TP, bloco a bloco e filho a filho"
 env $BASE python3 tests/test_tp_block_import.py /workspace/corte 2>&1 | grep -v -E "it/s\]|━━" | tee /workspace/3b.txt
 echo "3b saiu com ${PIPESTATUS[0]}"
@@ -115,12 +116,44 @@ PY
   echo "6 saiu com ${PIPESTATUS[0]}"
 fi
 
+fi
+
+# 7. Etapa 2 do plano de desempenho: prefill pelo GERADOR (como o TabbyAPI), chunk 4096 × 8192,
+# uma placa × TP2 (NCCL e nativo), com e sem o rascunho DFlash 2, em 4k/16k/30k. ETAPA2=1 liga;
+# SO_7=1 pula 3b–6 e roda só isto.
+if [ -n "${ETAPA2:-}" ] || [ -n "${SO_7:-}" ]; then
+  marco "7. etapa 2: prefill pelo gerador"
+  DFLASH2="${DFLASH2:-incoai/GLM-5.3-Flash-DFlash2}"
+  if [ -n "$DFLASH2" ] && [ ! -d /workspace/dflash2 ]; then
+    python3 - <<PY7
+import os
+from huggingface_hub import snapshot_download
+snapshot_download("$DFLASH2", local_dir="/workspace/dflash2", token=os.environ["HF_TOKEN"])
+PY7
+  fi
+  TAM="${TAM:-4096,16384,30000}"
+  PG="python3 tests/bancada/perfil_gerador.py -m /workspace/corte --tokens $TAM --cache 32768"
+  FILTRO="prefill|aceita|aquecimento|Error|error|Traceback|FIM_PERFIL"
+  : > /workspace/7.txt
+  CUDA_VISIBLE_DEVICES=0 $PG --chunk 4096 2>&1 | grep -E "$FILTRO" | tee -a /workspace/7.txt
+  CUDA_VISIBLE_DEVICES=0 $PG --chunk 8192 2>&1 | grep -E "$FILTRO" | tee -a /workspace/7.txt
+  $PG --tp --backend nccl --chunk 4096 2>&1 | grep -E "$FILTRO" | tee -a /workspace/7.txt
+  $PG --tp --backend nccl --chunk 8192 2>&1 | grep -E "$FILTRO" | tee -a /workspace/7.txt
+  $PG --tp --backend native --chunk 4096 2>&1 | grep -E "$FILTRO" | tee -a /workspace/7.txt
+  if [ -d /workspace/dflash2 ]; then
+    CUDA_VISIBLE_DEVICES=0 $PG --chunk 4096 --dflash2 /workspace/dflash2 --draft-stats 2>&1 | grep -E "$FILTRO" | tee -a /workspace/7.txt
+    $PG --tp --backend nccl --chunk 4096 --dflash2 /workspace/dflash2 --draft-stats 2>&1 | grep -E "$FILTRO" | tee -a /workspace/7.txt
+  fi
+  echo "7 terminou"
+fi
+
 {
   echo "bancada $PROVA_ID · $(nvidia-smi --query-gpu=name --format=csv,noheader | sort | uniq -c | tr '\n' ' ')"
   echo "--- 3b"; grep -E "== bloco|vs original|Error|error" /workspace/3b.txt | head -40
   for f in 4a 4b 4c 4d-base 4d; do echo "--- $f"; grep -E "decode:|uso médio|KL média|OK|FALHOU|Error|error" /workspace/$f.txt | head -8; done
   for f in 5a 5b; do echo "--- $f"; grep -E "prefill:|decode:|Error|error" /workspace/$f.txt | head -4; done
   echo "--- 6"; grep -E "^A\.|^B\.|rascunho:|referência:|^OK|FALHOU|Error|error" /workspace/6.txt 2>/dev/null | head -12
+  echo "--- 7"; cat /workspace/7.txt 2>/dev/null
   echo "--- 5a tabelas"; sed -n '/PREFILL por módulo/,/FIM_PERFIL/p' /workspace/5a.txt | head -60
 } | tee /workspace/resumo.txt
 publicar
