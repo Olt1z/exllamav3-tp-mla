@@ -97,7 +97,7 @@ def main():
     model = Model.from_config(config)
     cache = Cache(model, max_num_tokens = args.cache)
     model.load(tensor_p = args.tp, progressbar = True, tp_backend = args.backend,
-               reserve_per_device = args.reserva_gb * 2**30 if args.reserva_gb else None)
+               reserve_per_device = args.reserva_gb or None)  # em GB, como model.load documenta
     tokenizer = Tokenizer.from_config(config)
     perfil = Perfil()
     if not args.tp:
