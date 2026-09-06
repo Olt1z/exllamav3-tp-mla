@@ -68,8 +68,9 @@ _im.__enter__()                # a referência fica viva; um temporário sairia 
 for i, blk in enumerate(model.modules):
     if not hasattr(blk, "attn") or not hasattr(blk, "mlp"):
         continue
-    d = blk.device
-    dev = d.index if isinstance(d, torch.device) else (0 if d is None else int(d))
+    d = blk.device   # torch.device ou string "cuda:N", conforme o carregador
+    dev = torch.device(d).index if d is not None else 0
+    dev = 0 if dev is None else dev
     local = contexto(dev)
     # Blocos com hyper-connections recebem a pilha de fluxos (b, s, hc_mult, D); os filhos, o fluxo colapsado
     hc = getattr(blk, "attn_hc", None)
