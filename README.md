@@ -122,6 +122,44 @@ layers directly ... the output all-reduce runs after the captured block returns"
 MLP, MoE, KDA e DSv4 já decodificam em grafo dentro do rank. A MLA passa a fazer o mesmo depois de
 dfc2ad8; o all-reduce fica fora do grafo, como nos outros. Ainda não provado nem medido (bancada).
 
+## Bancada de desempenho (06/09/2026, 03:00Z, 2× RTX 3090, corte de 4 camadas do TR3)
+
+Instância 50023236 ($0,28/h, ~40 min), commits 7b77298 a 68c7df3, logs em
+`Olt1z/quantizacao-bl4ck0ut/saidas/tp-mla/20260906T024850Z/`. Teste por bloco idêntico ao de
+00:45Z. O 4c caiu no primeiro prefill com `Synchronization timeout`: um rank compilando Triton
+passou dos 90 s do coletivo nativo (a bancada agora exporta `EXLLAMA_TP_SYNC_TIMEOUT=600`); o 4d,
+com o cache do Triton quente, passou com KL 0,00002 e top-1 igual em 100 %.
+
+**O grafo CUDA não entra no TR3, com ou sem TP.** Com `EXL3_BC_ATTN_TRACE=1`, `build_bc_mla` diz
+`DECLINED layer 3` também numa placa só. A causa não é a guarda `has_split_cache` (tirada em
+7b77298; A/B na mesma máquina: 118 tok/s com e 117 sem), é o artefato: no
+`brandonmusic/GLM-5.3-Flash-tr3-4bpw` só os experts estão em EXL3 (37.152 tensores `trellis`,
+zero na atenção). KDA, MLA, MLPs densos, hyper-connections e embeddings estão em 16 bits
+(`.weight`), e `_proj_ok` / `is_quantized_kda` exigem projeções EXL3 com classe BC. Logo os 45
+blocos de atenção decodificam em modo eager, em qualquer arranjo. Nos artefatos EXL3 da nossa
+esteira (`Olt1z/GLM-5.3-podado-4L-EXL3-balanced-bl4ck0ut`) `q_a/q_b/o_proj` são trellis, mas
+`kv_a_proj_with_mqa` (576 colunas, não múltiplo de 128) fica em 16 bits, e `_proj_ok` o exige em
+EXL3: o BC-MLA recusa a família GLM-5.3 inteira. O caminho para o grafo é o BC-MLA e o BC-KDA
+aceitarem projeções fp16 (GEMM cuBLAS dentro da captura, como o `bc_attn` já faz para o gate
+headwise), não o TP.
+
+**Perfil do corte, aquecido, `perfil_prefill.py` (4 camadas: 3 KDA + 1 MLA/MoE; o prefill para no
+último módulo com cache, então o MoE da camada 3 não roda no prefill):**
+
+| Medida | 1× 3090 | TP2 (2× 3090) |
+| --- | --- | --- |
+| prefill 3.990 tokens | 219 ms (18,2k tok/s) | 218 ms (18,3k tok/s) |
+| decode, por token | 13,5 ms (74 tok/s) | 9,6 ms (104 tok/s) |
+
+Prefill numa placa, por módulo: GatedDeltaNet 35 % (`qkv_proj` fp16 sozinho 15 %), MLAttention
+25 %, GatedMLP 24 % (as três projeções fp16, 8 % cada), embeddings e hyper-connections 9 %. TP2 não
+ganha nada no prefill do corte. Decode numa placa, por token e camada: KDA 1,3 ms, MLA 3,0 ms,
+GatedMLP 0,5 ms, `lm_head` 1,5 ms; a soma dos módulos fecha com o total, e cada projeção fp16 de
+GEMV gasta ~0,3 ms onde a banda de memória daria 0,05 ms: é lançamento de kernel, não cálculo. É o
+retrato de um decode eager, e o que o grafo resolveria. O primeiro perfil, sem aquecimento no mesmo
+tamanho, marcou 10,6 s de "prefill" que eram compilação Triton do scan do KDA em 4k tokens; a
+lição está no script.
+
 ## Régua de desempenho
 
 Três prompts fixos, sempre os mesmos, e uma linha por prompt. É o "antes" e o "depois" de toda
