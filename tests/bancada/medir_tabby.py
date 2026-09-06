@@ -88,7 +88,7 @@ def chat(url, chave, prompt, max_tokens):
 
 
 RE_METRICS = re.compile(r"Metrics \(ID: (\S+)\): (\d+) tokens generated in ([\d.]+) seconds \((.*)\)")
-RE_INICIO_DE_LINHA = re.compile(r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d")
+RE_INICIO_DE_LINHA = re.compile(r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d|^(INFO|WARNING|ERROR|DEBUG|CRITICAL):")
 
 
 def desquebrar(texto):
