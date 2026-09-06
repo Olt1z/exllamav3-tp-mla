@@ -78,11 +78,12 @@ def chat(url, chave, prompt, max_tokens):
             if ev.get("usage"):
                 uso = ev["usage"]
             for c in ev.get("choices", []):
-                d = c.get("delta", {}).get("content")
-                if d:
-                    if t_primeiro is None:
-                        t_primeiro = time.time()
-                    texto.append(d)
+                d = c.get("delta", {})
+                # o GLM começa em raciocínio: os primeiros deltas vêm em reasoning_content
+                if (d.get("content") or d.get("reasoning_content")) and t_primeiro is None:
+                    t_primeiro = time.time()
+                if d.get("content"):
+                    texto.append(d["content"])
     return "".join(texto), uso or {}, (t_primeiro or time.time()) - t0, time.time() - t0
 
 
