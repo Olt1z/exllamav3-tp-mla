@@ -89,12 +89,15 @@ def main():
     p.add_argument("--decode", type = int, default = 8, help = "passos de decode perfilados depois do prefill")
     p.add_argument("--cache", type = int, default = 8192)
     p.add_argument("--backend", default = "native", help = "backend do TP: native ou nccl (o hub usa nccl)")
+    p.add_argument("--reserva-gb", type = float, default = 0,
+                   help = "VRAM deixada livre por placa na carga (autosplit enche a placa 0 e o transiente do prefill de 4k não cabe)")
     args = p.parse_args()
 
     config = Config.from_directory(args.model_dir)
     model = Model.from_config(config)
     cache = Cache(model, max_num_tokens = args.cache)
-    model.load(tensor_p = args.tp, progressbar = True, tp_backend = args.backend)
+    model.load(tensor_p = args.tp, progressbar = True, tp_backend = args.backend,
+               reserve_per_device = args.reserva_gb * 2**30 if args.reserva_gb else None)
     tokenizer = Tokenizer.from_config(config)
     perfil = Perfil()
     if not args.tp:
