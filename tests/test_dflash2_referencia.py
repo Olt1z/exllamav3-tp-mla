@@ -91,8 +91,13 @@ def main():
     with torch.inference_mode():
         out_ref = ref(target_hidden = th, noise_embedding = emb.to(torch.bfloat16), position_ids = pos,
                       past_key_values = past, use_cache = True)
-        lm = target.modules[target.logit_layer_idx]
-        cabeca = lambda h: lm.forward(h.to(torch.half), {})[..., :cfg_t.vocab_size].float()
+        if args.tp:
+            # em TP o lm_head mora nos ranks; a referência usa o peso cru (head_bits 16 no TR3)
+            w_head = cfg_t.stc.get_tensor("lm_head.weight", dev, no_defer = True).to(torch.half)
+            cabeca = lambda h: (h.to(torch.half) @ w_head.T)[..., :cfg_t.vocab_size].float()
+        else:
+            lm = target.modules[target.logit_layer_idx]
+            cabeca = lambda h: lm.forward(h.to(torch.half), {})[..., :cfg_t.vocab_size].float()
         tok_ref, cands_ref, _ = ref.propose(out_ref[:, 1:], bloco[:, 0].to(dev), cabeca, 0.0)
 
     a, b = state[:, 1:].float(), out_ref[:, 1:].float()
