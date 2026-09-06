@@ -8,6 +8,11 @@ para o filho `mlp` sozinho. O plano sai do próprio make_tp_allocation do bloco,
 vale para qualquer arquitetura.
 
     python3 tests/test_tp_block_import.py /workspace/corte
+    python3 tests/test_tp_block_import.py /workspace/modelo-inteiro --autosplit   # não cabe numa placa
+
+Com `--autosplit` o modelo é repartido por camadas entre todas as placas (o carregador padrão), e
+cada bloco é exportado e reimportado na placa onde já vive: serve para o modelo inteiro, como o
+TR3 do Flash (163 GiB em 4× 96 GB), sem precisar de corte.
 """
 import sys, os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -19,7 +24,11 @@ torch.manual_seed(0)
 config = Config.from_directory(sys.argv[1])
 model = Model.from_config(config)
 cache = Cache(model, max_num_tokens = 4096)
-model.load(device = "cuda:0")
+autosplit = "--autosplit" in sys.argv[2:]
+if autosplit:
+    model.load(progressbar = True)
+else:
+    model.load(device = "cuda:0")
 dev = 0
 
 def dif(a, b):
@@ -39,8 +48,13 @@ def planos(mod):
     return cheio, a, b
 
 producer = SMProducer()
-consumer = SMConsumer(producer, device = dev)
-local = {"device": dev, "consumer": consumer, "output_device": dev, "recurrent_modules": []}
+consumidores = {}
+
+def contexto(d):
+    """Consumidor e contexto local da placa `d`, criados uma vez por placa."""
+    if d not in consumidores:
+        consumidores[d] = SMConsumer(producer, device = d)
+    return {"device": d, "consumer": consumidores[d], "output_device": d, "recurrent_modules": []}
 
 class BackendDeUmRank:
     """Um rank só: difusão e all-reduce são identidade."""
@@ -54,6 +68,9 @@ _im.__enter__()                # a referência fica viva; um temporário sairia 
 for i, blk in enumerate(model.modules):
     if not hasattr(blk, "attn") or not hasattr(blk, "mlp"):
         continue
+    d = blk.device
+    dev = d.index if isinstance(d, torch.device) else (0 if d is None else int(d))
+    local = contexto(dev)
     x = torch.randn(1, 8, config.hidden_size, dtype = torch.half, device = dev)
     ref = blk.forward(x.clone(), params())
     cheio, pa, pb = planos(blk)
@@ -83,3 +100,6 @@ for i, blk in enumerate(model.modules):
         print(f"  {sub}: importado cheio vs original:", dif(f.forward(xi.clone(), params()), r))
         print(f"  {sub}: soma das metades vs original:", dif(a.forward(xi.clone(), params()) + b.forward(xi.clone(), params()), r))
     producer.clear()
+    del b_full, b_a, b_b, exported
+    torch.cuda.empty_cache()   # as três cópias do bloco não podem se acumular no modelo inteiro
+print("FIM_TESTE")
