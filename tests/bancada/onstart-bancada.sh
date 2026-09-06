@@ -141,8 +141,8 @@ PY7
   $PG --tp --backend nccl --chunk 8192 2>&1 | grep -E "$FILTRO" | tee -a /workspace/7.txt
   $PG --tp --backend native --chunk 4096 2>&1 | grep -E "$FILTRO" | tee -a /workspace/7.txt
   if [ -d /workspace/dflash2 ]; then
-    CUDA_VISIBLE_DEVICES=0 $PG --chunk 4096 --dflash2 /workspace/dflash2 --draft-stats 2>&1 | grep -E "$FILTRO" | tee -a /workspace/7.txt
-    $PG --tp --backend nccl --chunk 4096 --dflash2 /workspace/dflash2 --draft-stats 2>&1 | grep -E "$FILTRO" | tee -a /workspace/7.txt
+    CUDA_VISIBLE_DEVICES=0 $PG --chunk 4096 --dflash2 /workspace/dflash2 --taps "${TAPS:-0,1,2,3,3}" --draft-stats 2>&1 | grep -E "$FILTRO" | tee -a /workspace/7.txt
+    $PG --tp --backend nccl --chunk 4096 --dflash2 /workspace/dflash2 --taps "${TAPS:-0,1,2,3,3}" --draft-stats 2>&1 | grep -E "$FILTRO" | tee -a /workspace/7.txt
   fi
   echo "7 terminou"
 fi

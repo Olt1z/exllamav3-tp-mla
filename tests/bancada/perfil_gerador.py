@@ -36,6 +36,8 @@ def rodar(gen, ids, novos):
         for r in gen.iterate():
             if r.get("eos"):
                 fim = r
+    if fim is None or fim.get("stage") == "error":
+        raise RuntimeError(f"job falhou: {fim.get('error') if fim else 'sem resultado'}")
     return fim, job
 
 
@@ -75,6 +77,8 @@ def main():
     p.add_argument("--cache", type = int, default = 32768)
     p.add_argument("--dflash2", help = "pasta do rascunho DFlash 2; vazio = sem rascunho")
     p.add_argument("--draft-stats", action = "store_true", help = "aceitação por posição do bloco")
+    p.add_argument("--taps", help = "sobrescreve target_layer_ids do rascunho (ex.: 0,1,2,3,3 no corte de 4 camadas, "
+                                    "onde os taps reais 5..42 não existem; a numérica vira lixo, o custo do encanamento não)")
     p.add_argument("--reserva-gb", type = float, default = 0)
     p.add_argument("--rotulo", default = "")
     args = p.parse_args()
@@ -86,6 +90,9 @@ def main():
     draft = dcache = None
     if args.dflash2:
         cfg_d = Config.from_directory(args.dflash2)
+        if args.taps:
+            cfg_d.target_layer_ids = [int(t) for t in args.taps.split(",")]
+            print(f"taps sobrescritos: {cfg_d.target_layer_ids}")
         draft = Model.from_config(cfg_d)
         dcache = Cache(draft, max_num_tokens = args.cache)
         draft.load(device = torch.device("cuda:0"), progressbar = True)
