@@ -83,7 +83,12 @@ def main():
     ref_ids = getattr(ref, "target_layer_ids")
     print(f"referência: taps {ref_ids} (crus) → fork usa {cfg_d.target_layer_ids}")
     bloco = torch.cat((ancora, torch.full((1, cfg_d.block_size - 1), cfg_d.mask_token_id, dtype = torch.long)), dim = 1)
-    emb = target.modules[0].forward(bloco, {}).to(dev)  # o embedding do fork mora na CPU (caps x_cpu)
+    if args.tp:
+        # em TP o embedding mora nos ranks; a referência lê o peso cru pela chave do módulo
+        w_emb = cfg_t.stc.get_tensor(target.modules[0].key + ".weight", dev, no_defer = True).to(torch.half)
+        emb = torch.nn.functional.embedding(bloco.to(dev), w_emb)
+    else:
+        emb = target.modules[0].forward(bloco, {}).to(dev)  # o embedding do fork mora na CPU (caps x_cpu)
     th = torch.cat(taps, dim = -1).to(torch.bfloat16)
     pos = torch.arange(L + cfg_d.block_size, device = dev)[None]
     from transformers import DynamicCache
