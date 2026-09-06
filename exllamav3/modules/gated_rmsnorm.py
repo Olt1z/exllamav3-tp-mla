@@ -161,6 +161,9 @@ class GatedRMSNorm(Module):
                 "constant_bias": self.constant_bias,
                 "groups": self.groups,
                 "gate_first": self.gate_first,
+                # KDA (GLM-5.3-Flash) gates with sigmoid; without the flag the imported norm falls
+                # back to silu and every linear-attention layer diverges (measured: 73-91 % rel)
+                "gate_activation": self.gate_activation,
             },
             "weight": producer.send(self.weight),
             "device": self.device,
