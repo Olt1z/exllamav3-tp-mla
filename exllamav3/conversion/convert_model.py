@@ -557,6 +557,24 @@ def quantize_linears_single(args, linears, config, strategy, idx, devices, devic
             print_quantized_linear(config, linear, quant_args, proxy_err, f"  [{t.interval:4.2f} s]")
 
 
+def dispatch_quantize(args, linears, config, strategy, idx, devices, ratios_thread, ratios_tiles, capture_H, state):
+    """
+    Linears kept at 16 bpw are only announced and skipped, so they must not decide the dispatch: a
+    single 16 in a MoE layer would otherwise push hundreds of experts down the single-thread,
+    tile-split path (recipes routinely pin a few attention tensors at 16)
+    """
+    kept = [l for l in linears if strategy[l.key] == 16]
+    todo = [l for l in linears if strategy[l.key] <= 8]
+    if kept:
+        quantize_linears_single(args, kept, config, strategy, idx, devices, ratios_tiles, capture_H, state)
+    if not todo:
+        return
+    if len(todo) >= len(devices):
+        quantize_linears_parallel(args, todo, config, strategy, idx, devices, ratios_thread, capture_H, state)
+    else:
+        quantize_linears_single(args, todo, config, strategy, idx, devices, ratios_tiles, capture_H, state)
+
+
 def quantize_linears_parallel(args, linears, config, strategy, idx, devices, device_ratios, capture_H, state):
     assert not args["image_dump"], "Parallel mode is incompatible with --image_dump"
     global curr_progress, max_progress
@@ -1290,13 +1308,7 @@ def main(args, job_state):
             # Quantize: one linear per device in parallel when the layer has enough
             # tensors to occupy every device, else tile-split each tensor across devices
             # (single large tensors, e.g. lm_head)
-            if (
-                len(linears) >= len(devices) and
-                all(strategy[l.key] <= 8 for l in linears)
-            ):
-                quantize_linears_parallel(args, linears, config, strategy, idx, devices, eff_ratios("quant_thread"), capture_H, state)
-            else:
-                quantize_linears_single(args, linears, config, strategy, idx, devices, eff_ratios("quant_tiles"), capture_H, state)
+            dispatch_quantize(args, linears, config, strategy, idx, devices, eff_ratios("quant_thread"), eff_ratios("quant_tiles"), capture_H, state)
 
             # Collect converted module tensors
             for m in module:
@@ -1465,13 +1477,7 @@ def main(args, job_state):
                 linear.inner.swap_cpu()
 
             # Quantize (same dispatch as the main loop)
-            if (
-                len(linears) >= len(devices) and
-                all(strategy[l.key] <= 8 for l in linears)
-            ):
-                quantize_linears_parallel(args, linears, config, strategy, idx, devices, eff_ratios("quant_thread"), None, None)
-            else:
-                quantize_linears_single(args, linears, config, strategy, idx, devices, eff_ratios("quant_tiles"), None, None)
+            dispatch_quantize(args, linears, config, strategy, idx, devices, eff_ratios("quant_thread"), eff_ratios("quant_tiles"), None, None)
 
             # Collect converted module tensors
             for m in module:

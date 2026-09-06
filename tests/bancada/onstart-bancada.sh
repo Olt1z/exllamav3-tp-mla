@@ -35,7 +35,7 @@ publicar() {
 import os
 from huggingface_hub import HfApi
 api = HfApi(token=os.environ["HF_TOKEN"])
-for f in ("bancada.log", "resumo.txt", "build.log"):
+for f in ("bancada.log", "resumo.txt", "build.log", "10.txt", "10-cobertura.txt", "10-convert.txt"):
     p = f"/workspace/{f}"
     if os.path.exists(p):
         api.upload_file(path_or_fileobj=p, path_in_repo=f"saidas/tp-mla/$PROVA_ID/{f}", repo_id="$REPO_SAIDAS")
@@ -70,7 +70,7 @@ du -sh /workspace/corte
 # Artefato da esteira antiga com kv_b_proj em treliça: repara antes de carregar
 python3 tests/bancada/reparar_kv_b_proj.py /workspace/corte
 
-if [ -z "${SO_7:-}" ] && [ -z "${SO_8:-}" ] && [ -z "${SO_9:-}" ]; then
+if [ -z "${SO_7:-}" ] && [ -z "${SO_8:-}" ] && [ -z "${SO_9:-}" ] && [ -z "${SO_10:-}" ]; then
 marco "3b. teste por bloco: original × importado por TP, bloco a bloco e filho a filho"
 env $BASE python3 tests/test_tp_block_import.py /workspace/corte 2>&1 | grep -v -E "it/s\]|━━" | tee /workspace/3b.txt
 echo "3b saiu com ${PIPESTATUS[0]}"
@@ -186,6 +186,60 @@ if [ -n "${ETAPA8:-}" ] || [ -n "${SO_9:-}" ]; then
   echo "9 terminou"
 fi
 
+# 10. Etapa 9 do plano: conversor nativo (convert.py --recipe) no corte, contra o artefato da esteira
+# GPTQModel ($CORTE) e contra o BF16 de origem ($ORIGEM), mesma receita e mesmo corpus do repositório
+# privado da quantização. Mede tempo por camada, manifest e KL. SO_10=1 roda só isto; uma placa.
+if [ -n "${ETAPA9:-}" ] || [ -n "${SO_10:-}" ]; then
+  marco "10. etapa 9: conversor nativo no corte"
+  ORIGEM="${ORIGEM:-Olt1z/GLM-5.3-Flash-podado-4L-BF16}"
+  REPO_QUANT="${REPO_QUANT:-Olt1z/quantizacao-bl4ck0ut}"
+  RECEITA_ID="${RECEITA_ID:-cmtqbp54o006c1jgr2mi3ux0p}"
+  SAIDA_NATIVO="${SAIDA_NATIVO:-Olt1z/GLM-5.3-Flash-podado-4L-EXL3-nativo-4bpw-bl4ck0ut}"
+  pip install -q pyyaml
+  free -g | head -2; df -h /workspace | tail -1
+  python3 - <<PY
+import os
+from huggingface_hub import snapshot_download, hf_hub_download
+snapshot_download("$ORIGEM", local_dir="/workspace/origem", token=os.environ["HF_TOKEN"])
+d = "/workspace/quantizacao"
+for f in ["scripts/receita_para_nativo.py", "scripts/manifest_exl3.py", "cal_bl4ck0ut.safetensors", "saidas/$RECEITA_ID/receita.json"]:
+    hf_hub_download("$REPO_QUANT", f, local_dir=d, token=os.environ["HF_TOKEN"])
+PY
+  Q=/workspace/quantizacao; mkdir -p /workspace/work
+  python3 $Q/scripts/receita_para_nativo.py --autoteste
+  python3 $Q/scripts/receita_para_nativo.py --receita $Q/saidas/$RECEITA_ID/receita.json --modelo /workspace/origem --saida /workspace/work/recipe.yaml 2>&1 | tee /workspace/10-cobertura.txt | tail -12
+  source /workspace/work/motor.env
+  marco "10b. convert.py"
+  T0=$(date +%s)
+  CUDA_VISIBLE_DEVICES=0 TERM=dumb COLUMNS=200 python3 convert.py -i /workspace/origem -w /workspace/work -o /workspace/exl3 \
+    --recipe /workspace/work/recipe.yaml --codebook mul1 --devices 0 --cal_data $Q/cal_bl4ck0ut.safetensors \
+    -cr 503 -cc 2048 -hb "$HEAD_BITS" -mb "$MTP_BITS" -vb "$VISION_BITS" -cpi 900 2>&1 | tee /workspace/10-convert.txt | grep -E "layers\.[0-9]+ +bpw|Unquantized|Estimated|!!|##|Error|error|All done"
+  echo "convert.py: $(( $(date +%s) - T0 )) s no total" | tee -a /workspace/10.txt
+  du -sh /workspace/exl3 | tee -a /workspace/10.txt
+  marco "10c. manifest"
+  python3 $Q/scripts/manifest_exl3.py --artefato /workspace/exl3 --origem /workspace/origem --receita $Q/saidas/$RECEITA_ID/receita.json --saida /workspace/exl3/manifest.json 2>&1 | tail -15 | tee -a /workspace/10.txt
+  marco "10d. KL: BF16 → nativo e → esteira GPTQModel"
+  python3 tests/bancada/reparar_nomes.py /workspace/corte || true
+  python3 tests/bancada/reparar_qkv_kda.py /workspace/corte "$ORIGEM" || true
+  T10="${T10:-128}"
+  CUDA_VISIBLE_DEVICES=0 python3 tests/tp_mla_smoke.py -m /workspace/origem --tokens $T10 --cache 8192 --save /workspace/bf16.pt 2>&1 | grep -E "decode:|KL|OK|FALHOU|Error|error" | tee -a /workspace/10.txt
+  echo "--- nativo vs BF16" | tee -a /workspace/10.txt
+  CUDA_VISIBLE_DEVICES=0 python3 tests/tp_mla_smoke.py -m /workspace/exl3 --tokens $T10 --cache 8192 --compare /workspace/bf16.pt --save /workspace/nativo.pt 2>&1 | grep -E "decode:|KL|OK|FALHOU|Error|error" | tee -a /workspace/10.txt
+  echo "--- esteira GPTQModel vs BF16" | tee -a /workspace/10.txt
+  CUDA_VISIBLE_DEVICES=0 python3 tests/tp_mla_smoke.py -m /workspace/corte --tokens $T10 --cache 8192 --compare /workspace/bf16.pt 2>&1 | grep -E "decode:|KL|OK|FALHOU|Error|error" | tee -a /workspace/10.txt
+  echo "--- esteira GPTQModel vs nativo" | tee -a /workspace/10.txt
+  CUDA_VISIBLE_DEVICES=0 python3 tests/tp_mla_smoke.py -m /workspace/corte --tokens $T10 --cache 8192 --compare /workspace/nativo.pt 2>&1 | grep -E "decode:|KL|OK|FALHOU|Error|error" | tee -a /workspace/10.txt
+  marco "10e. publicar $SAIDA_NATIVO"
+  python3 - <<PY
+import os
+from huggingface_hub import HfApi
+api = HfApi(token=os.environ["HF_TOKEN"])
+api.create_repo("$SAIDA_NATIVO", exist_ok=True)
+api.upload_folder(folder_path="/workspace/exl3", repo_id="$SAIDA_NATIVO", commit_message="corte 4L do Flash em EXL3 mul1 pelo convert.py nativo, receita do hub, prova da etapa 9 ($PROVA_ID)")
+PY
+  echo "10 terminou"
+fi
+
 {
   echo "bancada $PROVA_ID · $(nvidia-smi --query-gpu=name --format=csv,noheader | sort | uniq -c | tr '\n' ' ')"
   echo "--- 3b"; grep -E "== bloco|vs original|Error|error" /workspace/3b.txt | head -40
@@ -195,6 +249,7 @@ fi
   echo "--- 7"; cat /workspace/7.txt 2>/dev/null
   echo "--- 8"; cat /workspace/8.txt 2>/dev/null
   echo "--- 9"; cat /workspace/9.txt 2>/dev/null
+  echo "--- 10"; cat /workspace/10.txt 2>/dev/null
   echo "--- 5a tabelas"; sed -n '/PREFILL por módulo/,/FIM_PERFIL/p' /workspace/5a.txt | head -60
 } | tee /workspace/resumo.txt
 publicar
