@@ -30,7 +30,8 @@ class Perfil:
             # os eventos vão no stream do dispositivo do módulo: em autosplit cada camada mora
             # numa placa, e um evento gravado na placa errada mede o vazio
             dev = getattr(obj, "device", None)
-            ctx = torch.cuda.device(dev) if dev is not None else contextlib.nullcontext()
+            em_placa = dev is not None and (isinstance(dev, int) or "cuda" in str(dev))
+            ctx = torch.cuda.device(dev) if em_placa else contextlib.nullcontext()
             with ctx:
                 e0, e1 = torch.cuda.Event(enable_timing = True), torch.cuda.Event(enable_timing = True)
                 e0.record()
