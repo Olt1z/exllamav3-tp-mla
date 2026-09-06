@@ -61,6 +61,9 @@ class GroupedDynamicCausalConv(Module):
         self.register_submodule(self.kernel_projection)
         self.base_kernel = None
 
+    def optimizer_targets(self):
+        raise NotImplementedError()
+
     def load(self, device: torch.device, **kwargs):
         super().load(device, **kwargs)
         self.base_kernel = self.config.stc.get_tensor(f"{self.key}.base_kernel", device, no_defer = True).float().contiguous()
@@ -99,6 +102,9 @@ class ConvSandwich(Module):
         self.register_submodule(inner)
         self.register_submodule(conv)
 
+    def optimizer_targets(self):
+        raise NotImplementedError()
+
     def forward(self, x: torch.Tensor, params: dict, out_dtype: torch.dtype | None = None):
         y, dyn = self.conv.prepare(x, params)
         y = self.inner.forward(y, params)
@@ -125,6 +131,9 @@ class CandidateSelector(Module):
         # checkpoint: <key>.predecessor_codebook / <key>.successor_codebook (vocab, rank), no ".weight" suffix
         self.predecessor_codebook = None
         self.successor_codebook = None
+
+    def optimizer_targets(self):
+        raise NotImplementedError()
 
     def load(self, device: torch.device, **kwargs):
         super().load(device, **kwargs)
