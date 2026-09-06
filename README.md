@@ -160,6 +160,50 @@ retrato de um decode eager, e o que o grafo resolveria. O primeiro perfil, sem a
 tamanho, marcou 10,6 s de "prefill" que eram compilação Triton do scan do KDA em 4k tokens; a
 lição está no script.
 
+## Etapa 4 do plano de desempenho (06/09/2026, 04:00–05:05Z): o inteiro medido
+
+Logs em `Olt1z/quantizacao-bl4ck0ut/saidas/tp-mla/20260906T035300Z-etapa4/`. Duas máquinas de
+4× RTX PRO 6000 S pelo hub (a primeira, em leilão, foi tomada por outro locatário no meio; a
+segunda a preço fixo). Mesma placa, mesmo software, hosts diferentes, e é isso que aparece:
+
+| Host | CPU | decode curto | prefill 5,4k | prefill 30k | decode 30k |
+| --- | --- | --- | --- | --- | --- |
+| 148856 (EPYC 9555, 4,4 GHz) | Turin 64c | 73–75 tok/s | 4.223 T/s | 4.837 T/s | 92 tok/s |
+| 81589 (EPYC 9754 Bergamo) | Zen4c 128c | 42 tok/s | 3.342 T/s | 1.338 T/s | 52 tok/s |
+
+**O decode é limitado pela CPU e pelo barramento, não pela placa.** O motor cru em TP4 gasta 26
+ms por passo (38 tok/s sem rascunho) no host rápido, contra um piso de banda de ~2,5 ms: é eager
+(atenção em 16 bits, grafo recusado) e faz 90 all-reduces por token por PCIe. Um núcleo Zen4c
+de clock baixo derruba 40 % do tok/s com a mesma GPU. Para o hub, `cpu_name`/`cpu_ghz` da oferta
+pesam tanto quanto a placa neste motor.
+
+**TP2 basta e não perde (host lento, mesma máquina, TabbyAPI relançado à mão com
+`CUDA_VISIBLE_DEVICES=0,1`, contexto 256k):** carga em 140 s, 91,2 + 89,9 GB de 95,6 ocupados.
+
+| Arranjo | decode curto | prefill 5,4k | decode 5,4k | prefill 30k | decode 30k |
+| --- | --- | --- | --- | --- | --- |
+| TP4, 1M | 42 tok/s | 3.342 T/s | 47 tok/s | 1.338 T/s | 52 tok/s |
+| TP2, 256k | 46–47 tok/s | 3.044 T/s | 54 tok/s | 3.382 T/s | 56 tok/s |
+
+Metade dos all-reduces vale mais do que o dobro de placas: decode +7 a +14 %, prefill igual
+(−9 % em 5k, e o 30k em TP4 neste host foi anômalo). Duas PRO 6000 servem o TR3 a 256k.
+
+**Onde o tempo vai no inteiro** (`perfil_prefill.py`, autosplit, host lento, 3.990 tokens em
+1.417 ms; decode 62,8 ms/token):
+
+| Módulo | prefill | decode |
+| --- | --- | --- |
+| BlockSparseMLP (MoE, 41 camadas) | 58 % | 19 % |
+| GatedDeltaNet (KDA, 34) | 20 % | 34 % |
+| MLAttention (11, com indexador DSA) | 12 % | 28 % (1,6 ms por camada por token) |
+| HyperConnection mix+apply, RMSNorm | 7 % | 10 % |
+
+Em TP4 NCCL o mesmo prefill de 3.990 tokens fez 743 ms (5,4k tok/s no motor cru, host rápido).
+
+**O que o card do TR3 faz de diferente:** 145 tok/s com 5,4 tokens aceitos por passo são ~27
+passos de forward por segundo; nós fazemos 73 tok/s com ~2 aceitos, ~36 passos por segundo. O
+forward do ExLlamaV3 em TP4 é mais rápido que o do vLLM do card; a diferença é o drafter.
+
 ## Régua de desempenho
 
 Três prompts fixos, sempre os mesmos, e uma linha por prompt. É o "antes" e o "depois" de toda
