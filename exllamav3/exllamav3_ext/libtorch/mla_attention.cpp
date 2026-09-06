@@ -309,7 +309,8 @@ void BC_MLAttention::configure_slot_dsa
             s.qidx = qidx.value();
             TORCH_CHECK(!idx_wq_b_fp16 || (s.qidx.size(0) == MAX(bsz * q_len, 8) && s.q_a.size(0) == MAX(bsz * q_len, 8)),
                         "BC_MLAttention: fp16 idx_wq_b requires R_pad rows in q_a and qidx");
-            s.qidx4 = s.qidx.view({bsz, q_len, index_n_heads, index_head_dim})
+            // qidx may carry R_pad rows (fp16 wq_b); the rope view covers the leading R only
+            s.qidx4 = s.qidx.narrow(0, 0, bsz * q_len).view({bsz, q_len, index_n_heads, index_head_dim})
                 .narrow(3, 0, qk_rope_head_dim);
             s.wts = wts.value();
             s.scores = scores.value();

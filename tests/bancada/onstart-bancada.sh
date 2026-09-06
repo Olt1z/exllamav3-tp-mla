@@ -56,7 +56,7 @@ CAP=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -1)
 NUCLEOS=$(nproc); export MAX_JOBS=$(( NUCLEOS > 8 ? 8 : (NUCLEOS < 2 ? 2 : NUCLEOS) ))
 export TORCH_CUDA_ARCH_LIST="$CAP"
 marco "compilando a extensão para sm $CAP com MAX_JOBS=$MAX_JOBS"
-pip install -q --no-build-isolation -e . > /workspace/build.log 2>&1; grep -E -i "error|warning: unused|FAILED" /workspace/build.log | grep -v -i "warning" | head -20; tail -2 /workspace/build.log
+pip install -q --no-build-isolation -e . > /workspace/build.log 2>&1; { grep -E -i "error|FAILED" /workspace/build.log | grep -v -i "warning" | head -20; tail -2 /workspace/build.log; } || true
 # o torch vem antes: a extensão liga em libc10.so, que só entra no processo com ele importado
 python3 -c "import torch, exllamav3_ext; from exllamav3.version import __version__ as v; print('exllamav3', v, 'ext ok')"
 
