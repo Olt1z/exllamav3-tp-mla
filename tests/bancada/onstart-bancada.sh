@@ -98,11 +98,29 @@ env $BASE python3 tests/bancada/perfil_prefill.py -m /workspace/corte --prefill-
 python3 tests/bancada/perfil_prefill.py -m /workspace/corte --tp --prefill-tokens ${PERFIL_TOKENS:-4096} 2>&1 | grep -v -E "it/s\]|━━" | tee /workspace/5b.txt
 echo "5 saiu com $?"
 
+# 6. DFlash 2: leitor do fork contra a referência (z-lab/dflash) e mecânica no gerador. DFLASH2 é o
+# repositório do rascunho do MESMO alvo do corte; vazio pula a etapa.
+DFLASH2="${DFLASH2:-incoai/GLM-5.3-Flash-DFlash2}"
+if [ -n "$DFLASH2" ]; then
+  marco "6. DFlash 2 ($DFLASH2) contra a referência"
+  pip install -q -U "transformers>=4.51" 2>&1 | tail -1
+  python3 - <<PY
+import os
+from huggingface_hub import snapshot_download
+snapshot_download("$DFLASH2", local_dir="/workspace/dflash2", token=os.environ["HF_TOKEN"])
+PY
+  mkdir -p /workspace/dflash-ref/dflash && curl -sL https://raw.githubusercontent.com/z-lab/dflash/main/dflash/model.py -o /workspace/dflash-ref/dflash/model.py
+  env $BASE python3 tests/test_dflash2_referencia.py --alvo /workspace/corte --dflash2 /workspace/dflash2 \
+    --referencia /workspace/dflash-ref/dflash/model.py 2>&1 | grep -v -E "it/s\]|━━" | tee /workspace/6.txt
+  echo "6 saiu com ${PIPESTATUS[0]}"
+fi
+
 {
   echo "bancada $PROVA_ID · $(nvidia-smi --query-gpu=name --format=csv,noheader | sort | uniq -c | tr '\n' ' ')"
   echo "--- 3b"; grep -E "== bloco|vs original|Error|error" /workspace/3b.txt | head -40
   for f in 4a 4b 4c 4d-base 4d; do echo "--- $f"; grep -E "decode:|uso médio|KL média|OK|FALHOU|Error|error" /workspace/$f.txt | head -8; done
   for f in 5a 5b; do echo "--- $f"; grep -E "prefill:|decode:|Error|error" /workspace/$f.txt | head -4; done
+  echo "--- 6"; grep -E "^A\.|^B\.|rascunho:|referência:|^OK|FALHOU|Error|error" /workspace/6.txt 2>/dev/null | head -12
   echo "--- 5a tabelas"; sed -n '/PREFILL por módulo/,/FIM_PERFIL/p' /workspace/5a.txt | head -60
 } | tee /workspace/resumo.txt
 publicar

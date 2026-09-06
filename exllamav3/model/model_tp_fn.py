@@ -331,6 +331,60 @@ def mp_model_forward_lm_head_argmax(
     return (out_v, out_i) if device == output_device else None
 
 
+def mp_model_forward_lm_head_topk(
+    local_context: dict,
+    shared_input: dict,
+    params: dict,
+    offset: int,
+    gather_devices: list[int] | None,
+    ldims: list[int] | None,
+    k: int,
+):
+    """Same as mp_model_forward_lm_head_argmax with the k largest logits of the local shard
+    instead of one: (values (..., k), global indices (..., k)). The output device merges the
+    shards' partial top-k lists (DFlash 2 candidate selector)."""
+    consumer = local_context["inf_consumer"]
+    device = local_context["device"]
+    output_device = local_context["output_device"]
+    backend = local_context["backend"]
+
+    x = consumer.recv(shared_input)
+
+    if offset >= 0:
+        module = local_context["logits_module"]
+        x = module.prepare_for_device(x, params)
+        x = module.forward(x, params)
+        kk = min(k, x.shape[-1])
+        v, i = x.topk(kk, dim = -1)
+        if kk < k:
+            pad = k - kk
+            v = torch.cat((v, torch.full((*v.shape[:-1], pad), float("-inf"), dtype = v.dtype, device = v.device)), dim = -1)
+            i = torch.cat((i, torch.zeros((*i.shape[:-1], pad), dtype = i.dtype, device = i.device)), dim = -1)
+        i = i + offset
+    else:
+        v = torch.empty(*x.shape[:-1], 0, dtype = x.dtype, device = x.device)
+        i = torch.empty(*x.shape[:-1], 0, dtype = torch.long, device = x.device)
+
+    if gather_devices is None:
+        return v, i
+
+    if device == output_device:
+        out_v_shape = list(v.shape)
+        out_i_shape = list(i.shape)
+        out_v_shape[-1] = sum(ldims)
+        out_i_shape[-1] = sum(ldims)
+        out_v = torch.empty(*out_v_shape, dtype = v.dtype, device = v.device)
+        out_i = torch.empty(*out_i_shape, dtype = i.dtype, device = i.device)
+    else:
+        out_v = None
+        out_i = None
+
+    backend.gather_small(v.contiguous(), out_v, gather_devices, output_device, ldims)
+    backend.gather_small(i.contiguous(), out_i, gather_devices, output_device, ldims)
+
+    return (out_v, out_i) if device == output_device else None
+
+
 # def mp_model_forward_lm_head_argmax_old(
 #     local_context: dict,
 #     shared_input: dict,

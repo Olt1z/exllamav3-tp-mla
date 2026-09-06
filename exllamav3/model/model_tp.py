@@ -410,6 +410,56 @@ class Model_TPMixin:
         return argmax
 
 
+    def tp_dispatch_lm_head_topk(self, args, k: int):
+        """
+        The k largest logits over a tensor-parallel sharded LM head: (values (..., k), token ids (..., k)),
+        on the output device. Each shard's local top-k is gathered and merged; mirrors
+        tp_dispatch_lm_head_argmax. Used by the DFlash 2 drafter's candidate selector.
+        """
+        ad = {}
+        for device in self.active_devices:
+            a, b, _ = self.plan[device]["lm_head"]
+            if b > a:
+                ad[device] = a
+
+        if len(ad) == 1 and self.tp_output_device in ad:
+            v, i = self.tp_worker_dispatch_single(
+                self.tp_output_device,
+                mp_model_forward_lm_head_topk,
+                args + (ad[self.tp_output_device], None, None, k)
+            )
+            return v, i
+
+        gd = sorted(set(ad.keys()) | {self.tp_output_device})
+        ldims = [k if d in ad else 0 for d in gd]
+
+        dispatched = []
+        for device in self.active_devices:
+            if device in gd:
+                self.tp_worker_dispatch(
+                    device,
+                    mp_model_forward_lm_head_topk,
+                    args + (ad.get(device, -1), gd, ldims, k)
+                )
+                dispatched.append(device)
+
+        results = []
+        for device in dispatched:
+            r = self.tp_worker_result(device)
+            if r is not None:
+                results.append((device, r))
+
+        assert len(results) == 1 and results[0][0] == self.tp_output_device, \
+            "TP logic error"
+
+        device = self.tp_output_device
+        all_vals, all_inds = results[0][1]
+        all_vals = all_vals.to(device)
+        all_inds = all_inds.to(device)
+        v, sel = all_vals.topk(k, dim = -1)
+        i = all_inds.gather(-1, sel)
+        return v, i
+
     # def tp_dispatch_lm_head_argmax_old(self, args):
     #     ad = []
     #     for device in self.active_devices:
