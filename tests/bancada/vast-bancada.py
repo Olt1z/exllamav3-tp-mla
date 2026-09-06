@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import subprocess
 import sys
 import time
 import urllib.request
@@ -66,7 +67,19 @@ def cmd_buscar(a: argparse.Namespace) -> None:
 
 
 def cmd_comprar(a: argparse.Namespace) -> None:
-    onstart = (Path(__file__).parent / "onstart-bancada.sh").read_text()
+    # A Vast limita o onstart a 16 KiB e o roteiro passou disso: o onstart vira um bootstrap que
+    # clona o fork (o mesmo FORK@BRANCH que o roteiro instala) e roda o roteiro de lá. Ou seja: o
+    # que a máquina executa é o onstart-bancada.sh COMMITADO E ENVIADO, não o da árvore local.
+    local = (Path(__file__).parent / "onstart-bancada.sh").read_text()
+    onstart = (
+        "#!/bin/bash\nset -e\ncd /workspace\n"
+        "command -v git >/dev/null || { apt-get update -qq && apt-get install -y -qq git >/dev/null; }\n"
+        f"rm -rf /tmp/fork-boot && git clone -q --depth 1 -b \"{a.branch}\" \"{a.fork}\" /tmp/fork-boot\n"
+        "cp /tmp/fork-boot/tests/bancada/onstart-bancada.sh /workspace/onstart-bancada.sh && rm -rf /tmp/fork-boot\n"
+        "exec bash /workspace/onstart-bancada.sh\n"
+    )
+    if subprocess.run(["git", "-C", str(Path(__file__).parent), "status", "--porcelain", "onstart-bancada.sh"], capture_output=True, text=True).stdout.strip():
+        raise SystemExit("onstart-bancada.sh tem mudança local não commitada: a máquina roda o do GitHub")
     prova_id = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     env = " ".join(
         [
