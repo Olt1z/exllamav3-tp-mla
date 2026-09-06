@@ -117,6 +117,33 @@ KDA, 93,3 de 95 GiB ocupados); em TP4 o mesmo prompt entra a 312 tok/s, porque c
 se dividem pelas quatro placas. A carga é mais rápida sem TP (50 s contra 65 s). O decode em grafo
 CUDA no rank TP (`has_split_cache`) segue desligado: é a parte da etapa 6d que ainda falta.
 
+## Régua de desempenho
+
+Três prompts fixos, sempre os mesmos, e uma linha por prompt. É o "antes" e o "depois" de toda
+mudança de desempenho. Roda de dentro da máquina (o proxy corta pedidos acima de 100 s); com
+`--log` lê a linha `Metrics` que o TabbyAPI escreve por pedido, que é a única fonte da aceitação
+do draft:
+
+```sh
+python tests/bancada/medir_tabby.py http://127.0.0.1:5000 $TABBY_API_TOKEN --log /caminho/do/stdout.log
+```
+
+Linha de base, 06/09/2026, TR3 do Flash, 4× RTX PRO 6000 S, TP4, NCCL, `--draft-mode mtp`,
+commit dfc2ad8 (medida à mão com os mesmos prompts, antes do script existir):
+
+| Prompt | Entrada | Saída | Prefill | Decode | Draft aceito |
+| --- | --- | --- | --- | --- | --- |
+| curto (2ª rodada) | 52 tok | 596 tok | – | 63,8 tok/s | 48 % |
+| longo | 5.321 tok | 200 tok | 312 tok/s | 45 tok/s | – |
+| difícil (1.000 registros) | ~31k tok | ~20k tok | 552 tok/s (com cache de prompt) | 31–87 tok/s | 85–91 % |
+
+Referência a bater (card do TR3, vLLM customizado, 2× PRO 6000 WS, DFlash2, grafos CUDA):
+145–151 tok/s de decode e 6,2k tok/s de prefill.
+
+O perfil por módulo (`tests/bancada/perfil_prefill.py`, etapa 5 da bancada) diz onde o prefill
+e o decode gastam o tempo no corte, numa placa; em TP só o total vale, porque os módulos rodam
+nos ranks.
+
 ## Timeout dos coletivos nativos
 
 O backend nativo aborta o grupo inteiro quando um rank espera mais que o prazo num coletivo

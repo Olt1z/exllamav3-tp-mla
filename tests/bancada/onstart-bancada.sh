@@ -84,11 +84,17 @@ marco "4d. TP com contexto longo (DSA esparso)"
 env $BASE python3 tests/tp_mla_smoke.py -m /workspace/corte --simular-fio-bf16 --prefill-tokens 3000 --save /workspace/base-longo.pt | tee /workspace/4d-base.txt
 python3 tests/tp_mla_smoke.py -m /workspace/corte --tp --compare /workspace/base-longo.pt --prefill-tokens 3000 | tee /workspace/4d.txt
 echo "4d saiu com $?"
+marco "5. perfil do prefill por módulo (uma placa) e total em TP"
+env $BASE python3 tests/bancada/perfil_prefill.py -m /workspace/corte --prefill-tokens ${PERFIL_TOKENS:-4096} 2>&1 | grep -v -E "it/s\]|━━" | tee /workspace/5a.txt
+python3 tests/bancada/perfil_prefill.py -m /workspace/corte --tp --prefill-tokens ${PERFIL_TOKENS:-4096} 2>&1 | grep -v -E "it/s\]|━━" | tee /workspace/5b.txt
+echo "5 saiu com $?"
 
 {
   echo "bancada $PROVA_ID · $(nvidia-smi --query-gpu=name --format=csv,noheader | sort | uniq -c | tr '\n' ' ')"
   echo "--- 3b"; grep -E "== bloco|vs original|Error|error" /workspace/3b.txt | head -40
   for f in 4a 4b 4c 4d-base 4d; do echo "--- $f"; grep -E "decode:|uso médio|KL média|OK|FALHOU|Error|error" /workspace/$f.txt | head -8; done
+  for f in 5a 5b; do echo "--- $f"; grep -E "prefill:|decode:|Error|error" /workspace/$f.txt | head -4; done
+  echo "--- 5a tabelas"; sed -n '/PREFILL por módulo/,/FIM_PERFIL/p' /workspace/5a.txt | head -60
 } | tee /workspace/resumo.txt
 publicar
 marco "FIM"
