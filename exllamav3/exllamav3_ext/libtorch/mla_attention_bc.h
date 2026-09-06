@@ -29,7 +29,11 @@ py::class_<BC_MLAttention, std::shared_ptr<BC_MLAttention>>(m, "BC_MLAttention")
         at::Tensor,
         c10::optional<at::Tensor>,
         at::Tensor,
-        at::Tensor
+        at::Tensor,
+        std::shared_ptr<BC_LinearFP16>,
+        std::shared_ptr<BC_LinearFP16>,
+        std::shared_ptr<BC_LinearFP16>,
+        std::shared_ptr<BC_LinearFP16>
     >(),
     py::arg("num_q_heads"),
     py::arg("hidden_size"),
@@ -59,7 +63,11 @@ py::class_<BC_MLAttention, std::shared_ptr<BC_MLAttention>>(m, "BC_MLAttention")
     py::arg("cache_kpe"),
     py::arg("cache_scales"),
     py::arg("xh"),
-    py::arg("h32")
+    py::arg("h32"),
+    py::arg("q_proj_fp16") = py::none(),
+    py::arg("q_a_proj_fp16") = py::none(),
+    py::arg("kv_a_proj_fp16") = py::none(),
+    py::arg("o_proj_fp16") = py::none()
 )
 .def("set_indexer", &BC_MLAttention::set_indexer,
     py::arg("mode"),
@@ -76,7 +84,8 @@ py::class_<BC_MLAttention, std::shared_ptr<BC_MLAttention>>(m, "BC_MLAttention")
     py::arg("kpool_tail") = true,
     py::arg("gate_w") = py::none(),
     py::arg("kpool_ape") = py::none(),
-    py::arg("kpool_plane") = py::none()
+    py::arg("kpool_plane") = py::none(),
+    py::arg("wq_b_fp16") = py::none()
 )
 .def("needs_configure", &BC_MLAttention::needs_configure)
 .def("configure_slot", &BC_MLAttention::configure_slot,
@@ -107,7 +116,9 @@ py::class_<BC_MLAttention, std::shared_ptr<BC_MLAttention>>(m, "BC_MLAttention")
     py::arg("programs"),
     py::arg("absorb_gx"),
     py::arg("absorb_gy"),
-    py::arg("unfold_gx")
+    py::arg("unfold_gx"),
+    py::arg("x_st") = py::none(),
+    py::arg("y_st") = py::none()
 )
 .def("configure_slot_dsa", &BC_MLAttention::configure_slot_dsa,
     py::arg("bsz"),
@@ -133,8 +144,8 @@ py::class_<BC_MLAttention, std::shared_ptr<BC_MLAttention>>(m, "BC_MLAttention")
     py::arg("fewq_gy"),
     py::arg("gidx") = py::none(),
     py::arg("pool_idx") = py::none(),
-    py::arg("k_gate_append") = nullptr,
-    py::arg("k_pool_update") = nullptr,
-    py::arg("k_pool_expand") = nullptr
+    py::arg("k_gate_append") = py::none(),
+    py::arg("k_pool_update") = py::none(),
+    py::arg("k_pool_expand") = py::none()
 )
 .def("run", &BC_MLAttention::run);

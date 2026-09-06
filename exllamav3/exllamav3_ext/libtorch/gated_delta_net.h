@@ -113,6 +113,11 @@ struct BC_GatedDeltaNetSplit
     std::shared_ptr<BC_LinearEXL3> qkv_proj;
     std::shared_ptr<BC_LinearEXL3> z_proj;
     std::shared_ptr<BC_LinearEXL3> o_proj;
+    // KDA only: fp16 alternatives for qkv_proj / o_proj (exactly one of exl3/fp16 is set per
+    // projection). An fp16 projection is a cuBLAS node with no patchable sites, so its input and
+    // output are staged through per-slot statics (xp / qkv_pad, caof_pad / yp) with copy2d_gr
+    std::shared_ptr<BC_LinearFP16> qkv_proj_fp16;
+    std::shared_ptr<BC_LinearFP16> o_proj_fp16;
     at::Tensor ba_weight_t;       // (2*Nv, hidden) half
     c10::optional<at::Tensor> ba_bias;
     at::Tensor dt_bias;
@@ -161,6 +166,14 @@ struct BC_GatedDeltaNetSplit
         // Hadamard scratch for the bypassed exl3_gemm_gr calls (qkv_proj/z_proj/o_proj), shaped
         // like each projection's own input
         at::Tensor qkv_xh, z_xh, o_xh;
+
+        // fp16 projection staging (KDA). Rows are padded to R_pad = max(bsz*seqlen, 8): cuBLASLt
+        // picks a ~13x slower kernel below M = 8. Pad rows are zeroed once and never read: qkv /
+        // core_attn_out_f above are narrow(0, 0, R) views of the padded buffers in that case
+        at::Tensor xp;                // (R_pad, hidden) half, x copied in at the graph head
+        at::Tensor qkv_pad;           // (R_pad, F) float, qkv_proj_fp16 output
+        at::Tensor caof_pad;          // (R_pad, Nv*Hv) half, o_proj_fp16 input
+        at::Tensor yp;                // (R_pad, hidden) y dtype, o_proj_fp16 output, copied out to y
 
         // State-buffer geometry baked into this slot's captured graph (scalar kernel args can't
         // be patched): set on the slot's first eager run, checked before every replay
@@ -237,11 +250,15 @@ struct BC_GatedDeltaNetSplit
         at::Tensor _conv1d_weight,
         c10::optional<at::Tensor> _conv1d_bias,
         std::shared_ptr<BC_GatedRMSNorm> _norm,
-        const float _beta_scale
+        const float _beta_scale,
+        std::shared_ptr<BC_LinearFP16> _qkv_proj_fp16 = nullptr,
+        std::shared_ptr<BC_LinearFP16> _o_proj_fp16 = nullptr
     ) :
         qkv_proj        (_qkv_proj),
         z_proj          (nullptr),
         o_proj          (_o_proj),
+        qkv_proj_fp16   (_qkv_proj_fp16),
+        o_proj_fp16     (_o_proj_fp16),
         dt_bias         (std::move(_dt_bias)),
         a_log           (std::move(_a_log)),
         num_k_heads     (_num_k_heads),
@@ -260,6 +277,10 @@ struct BC_GatedDeltaNetSplit
         g_a_weight_t    (std::move(_g_a_weight_t)),
         g_b_weight_t    (std::move(_g_b_weight_t))
     {
+        TORCH_CHECK((qkv_proj != nullptr) != (qkv_proj_fp16 != nullptr),
+                    "BC_GatedDeltaNetSplit (KDA): exactly one of qkv_proj/qkv_proj_fp16 must be set");
+        TORCH_CHECK((o_proj != nullptr) != (o_proj_fp16 != nullptr),
+                    "BC_GatedDeltaNetSplit (KDA): exactly one of o_proj/o_proj_fp16 must be set");
         slots.resize(MAX_BSZ * MAX_QLEN);
         slots_hist.resize(MAX_BSZ * MAX_QLEN);
     }
@@ -284,7 +305,9 @@ struct BC_GatedDeltaNetSplit
         at::Tensor core_attn_out,
         at::Tensor core_attn_out_f,
         at::Tensor qkv_xh,
-        at::Tensor o_xh
+        at::Tensor o_xh,
+        c10::optional<at::Tensor> xp = c10::nullopt,
+        c10::optional<at::Tensor> yp = c10::nullopt
     );
 
     void configure_slot

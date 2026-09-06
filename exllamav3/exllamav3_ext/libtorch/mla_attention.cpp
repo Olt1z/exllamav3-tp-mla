@@ -43,7 +43,11 @@ BC_MLAttention::BC_MLAttention
     at::Tensor _cache_kpe,
     c10::optional<at::Tensor> _cache_scales,
     at::Tensor _xh,
-    at::Tensor _h32
+    at::Tensor _h32,
+    std::shared_ptr<BC_LinearFP16> _q_proj_fp16,
+    std::shared_ptr<BC_LinearFP16> _q_a_proj_fp16,
+    std::shared_ptr<BC_LinearFP16> _kv_a_proj_fp16,
+    std::shared_ptr<BC_LinearFP16> _o_proj_fp16
 ) :
     num_q_heads         (_num_q_heads),
     hidden_size         (_hidden_size),
@@ -55,10 +59,14 @@ BC_MLAttention::BC_MLAttention
     v_head_dim          (_v_head_dim),
     q_lora_rank         (_q_lora_rank),
     q_proj              (_q_proj),
+    q_proj_fp16         (_q_proj_fp16),
     q_a_proj            (_q_a_proj),
+    q_a_proj_fp16       (_q_a_proj_fp16),
     q_a_norm_w          (std::move(_q_a_norm_w)),
     kv_a_proj           (_kv_a_proj),
+    kv_a_proj_fp16      (_kv_a_proj_fp16),
     o_proj              (_o_proj),
+    o_proj_fp16         (_o_proj_fp16),
     kv_norm_w           (std::move(_kv_norm_w)),
     norm_eps            (_norm_eps),
     inv_freq            (std::move(_inv_freq)),
@@ -76,7 +84,11 @@ BC_MLAttention::BC_MLAttention
     xh                  (std::move(_xh)),
     h32                 (std::move(_h32))
 {
-    TORCH_CHECK((q_lora_rank > 0) == (q_a_proj != nullptr), "BC_MLAttention: q_a_proj iff q_lora");
+    TORCH_CHECK((q_proj != nullptr) != (q_proj_fp16 != nullptr), "BC_MLAttention: q_proj must be EXL3 or fp16");
+    TORCH_CHECK((kv_a_proj != nullptr) != (kv_a_proj_fp16 != nullptr), "BC_MLAttention: kv_a_proj must be EXL3 or fp16");
+    TORCH_CHECK((o_proj != nullptr) != (o_proj_fp16 != nullptr), "BC_MLAttention: o_proj must be EXL3 or fp16");
+    TORCH_CHECK(!(q_a_proj && q_a_proj_fp16), "BC_MLAttention: q_a_proj must be EXL3 or fp16");
+    TORCH_CHECK((q_lora_rank > 0) == (q_a_proj || q_a_proj_fp16), "BC_MLAttention: q_a_proj iff q_lora");
     TORCH_CHECK(!quant_cache || cache_scales, "BC_MLAttention: quantized cache requires scales");
     slots.resize(2 * MAX_BSZ * MAX_QLEN);
 }
@@ -97,16 +109,20 @@ void BC_MLAttention::set_indexer
     bool kpool_tail,
     c10::optional<at::Tensor> gate_w,
     c10::optional<at::Tensor> kpool_ape,
-    c10::optional<at::Tensor> kpool_plane
+    c10::optional<at::Tensor> kpool_plane,
+    std::shared_ptr<BC_LinearFP16> wq_b_fp16
 )
 {
     TORCH_CHECK(mode == 1 || mode == 2, "BC_MLAttention: indexer mode must be 1 (full) or 2 (shared)");
-    TORCH_CHECK(mode != 1 || (wq_b && wk_w && k_norm_w && k_norm_b && weights_w && kidx),
+    TORCH_CHECK(mode != 1 || (wk_w && k_norm_w && k_norm_b && weights_w && kidx),
                 "BC_MLAttention: full indexer requires all indexer tensors");
+    TORCH_CHECK(mode != 1 || ((wq_b != nullptr) != (wq_b_fp16 != nullptr)),
+                "BC_MLAttention: full indexer wq_b must be EXL3 or fp16");
     TORCH_CHECK(!kpool || mode != 1 || (gate_w && kpool_ape && kpool_plane),
                 "BC_MLAttention: kpool full indexer requires gate weight, APE and pooled plane");
     idx_mode = mode;
     idx_wq_b = std::move(wq_b);
+    idx_wq_b_fp16 = std::move(wq_b_fp16);
     idx_wk_w = std::move(wk_w);
     idx_k_norm_w = std::move(k_norm_w);
     idx_k_norm_b = std::move(k_norm_b);
@@ -158,11 +174,14 @@ void BC_MLAttention::configure_slot
     int programs,
     int absorb_gx,
     int absorb_gy,
-    int unfold_gx
+    int unfold_gx,
+    c10::optional<at::Tensor> x_st,
+    c10::optional<at::Tensor> y_st
 )
 {
     Slot& s = slot(bsz, q_len, regime);
     int R = bsz * q_len;
+    int R_pad = MAX(R, 8);   // cuBLASLt height of the fp16 projection operands
 
     s.q_full = std::move(q_full);
     if (q_a) s.q_a = q_a.value();
@@ -177,6 +196,8 @@ void BC_MLAttention::configure_slot
     s.partial_ml = std::move(partial_ml);
     if (qtmp) s.qtmp = qtmp.value();
     if (stmp) s.stmp = stmp.value();
+    if (x_st) s.x_st = x_st.value();
+    if (y_st) s.y_st = y_st.value();
     s.k_stage = k_stage;
     s.k_absorb = k_absorb;
     s.k_append = k_append;
@@ -196,6 +217,17 @@ void BC_MLAttention::configure_slot
     TORCH_CHECK(quant_cache == (qtmp && stmp), "BC_MLAttention: quant temporaries iff quantized cache");
     TORCH_CHECK(!(q_lora_rank > 0) || q_a, "BC_MLAttention: q_a static required for the LoRA q path");
     TORCH_CHECK(s.q_pe.numel() == (int64_t) R * num_q_heads * qk_rope_head_dim, "BC_MLAttention: bad q_pe shape");
+
+    // fp16 projections run over the full height of their operands (no patchable sites), so
+    // both sides of each one must be R_pad-row statics
+    TORCH_CHECK(!stages_x() || (x_st && s.x_st.size(0) == R_pad && s.x_st.size(1) == hidden_size),
+                "BC_MLAttention: fp16 input projection requires the (R_pad, hidden) x_st static");
+    TORCH_CHECK(!q_proj_fp16 || s.q_full.size(0) == R_pad, "BC_MLAttention: fp16 q_proj requires R_pad rows in q_full");
+    TORCH_CHECK(!(q_a_proj_fp16 || (q_lora_rank > 0 && q_proj_fp16)) || s.q_a.size(0) == R_pad,
+                "BC_MLAttention: fp16 q LoRA projection requires R_pad rows in q_a");
+    TORCH_CHECK(!kv_a_proj_fp16 || s.ckv_kpe.size(0) == R_pad, "BC_MLAttention: fp16 kv_a_proj requires R_pad rows in ckv_kpe");
+    TORCH_CHECK(!o_proj_fp16 || (y_st && s.o.size(0) == R_pad && s.y_st.size(0) == R_pad && s.y_st.size(1) == hidden_size),
+                "BC_MLAttention: fp16 o_proj requires R_pad rows in o and the (R_pad, hidden) y_st static");
 
     s.q_pe4 = s.q_pe.view({bsz, q_len, num_q_heads, qk_rope_head_dim});
     s.kpe4 = s.kpe.view({bsz, q_len, 1, qk_rope_head_dim});
@@ -275,6 +307,8 @@ void BC_MLAttention::configure_slot_dsa
         {
             TORCH_CHECK(qidx && wts && scores, "BC_MLAttention: scoring statics missing");
             s.qidx = qidx.value();
+            TORCH_CHECK(!idx_wq_b_fp16 || (s.qidx.size(0) == MAX(bsz * q_len, 8) && s.q_a.size(0) == MAX(bsz * q_len, 8)),
+                        "BC_MLAttention: fp16 idx_wq_b requires R_pad rows in q_a and qidx");
             s.qidx4 = s.qidx.view({bsz, q_len, index_n_heads, index_head_dim})
                 .narrow(3, 0, qk_rope_head_dim);
             s.wts = wts.value();
@@ -343,22 +377,39 @@ void BC_MLAttention::run_gr
     at::Tensor xh_flat = xh.view({-1});
     at::Tensor x2 = x.view({R, hidden_size});
 
+    // Projection operands. EXL3 GEMMs read/write exactly R rows (patchable A/C sites, so they
+    // may take the per-step x/y directly); fp16 projections are cuBLAS nodes with no patchable
+    // sites, so they run over the full R_pad-row height of the statics (cuBLASLt M >= 8) with x
+    // staged into x_st once at the head of the graph. Consumers only ever read R rows
+    auto rows = [&](const at::Tensor& t, bool fp16) -> at::Tensor { return fp16 ? t : t.narrow(0, 0, R); };
+    auto xh_for = [&](const std::shared_ptr<BC_LinearEXL3>& p, int w) -> at::Tensor
+        { return p ? xh_flat.narrow(0, 0, (int64_t) R * w).view({R, w}) : xh_flat; };
+    bool stage_x = stages_x();
+    if (stage_x)
+    {
+        at::Tensor x_rows = s.x_st.narrow(0, 0, R);
+        copy2d_gr(x2, x_rows, graph);
+    }
+
     dbg("entry");
 
     // Q projections into the static buffers (direct, or LoRA down/norm/up)
-    if (q_a_proj)
+    if (q_lora_rank > 0)
     {
-        at::Tensor xh_x = xh_flat.narrow(0, 0, (int64_t) R * hidden_size).view({R, hidden_size});
-        exl3_gemm_gr(x2, q_a_proj->trellis, s.q_a, q_a_proj->suh, xh_x, q_a_proj->svh, -1, q_a_proj->mcg, q_a_proj->mul1, 0, graph);
+        bool fa = q_a_proj_fp16 != nullptr;
+        bool fb = q_proj_fp16 != nullptr;
+        at::Tensor q_a = rows(s.q_a, fa);
+        linear_gr(q_a_proj, q_a_proj_fp16, fa ? s.x_st : x2, q_a, xh_for(q_a_proj, hidden_size), graph);
         rms_norm_gr(s.q_a, q_a_norm_w, s.q_a, norm_eps, 0.0f, 1.0f, graph);
         int rank = (int) s.q_a.size(1);
-        at::Tensor xh_a = xh_flat.narrow(0, 0, (int64_t) R * rank).view({R, rank});
-        exl3_gemm_gr(s.q_a, q_proj->trellis, s.q_full, q_proj->suh, xh_a, q_proj->svh, -1, q_proj->mcg, q_proj->mul1, 0, graph);
+        at::Tensor q_full = rows(s.q_full, fb);
+        linear_gr(q_proj, q_proj_fp16, rows(s.q_a, fb), q_full, xh_for(q_proj, rank), graph);
     }
     else
     {
-        at::Tensor xh_x = xh_flat.narrow(0, 0, (int64_t) R * hidden_size).view({R, hidden_size});
-        exl3_gemm_gr(x2, q_proj->trellis, s.q_full, q_proj->suh, xh_x, q_proj->svh, -1, q_proj->mcg, q_proj->mul1, 0, graph);
+        bool fb = q_proj_fp16 != nullptr;
+        at::Tensor q_full = rows(s.q_full, fb);
+        linear_gr(q_proj, q_proj_fp16, fb ? s.x_st : x2, q_full, xh_for(q_proj, hidden_size), graph);
     }
 
     // Llama-4 position scale on the full query (Mistral-Small-4): one per-token scalar over
@@ -374,8 +425,9 @@ void BC_MLAttention::run_gr
 
     // Latent projection
     {
-        at::Tensor xh_x = xh_flat.narrow(0, 0, (int64_t) R * hidden_size).view({R, hidden_size});
-        exl3_gemm_gr(x2, kv_a_proj->trellis, s.ckv_kpe, kv_a_proj->suh, xh_x, kv_a_proj->svh, -1, kv_a_proj->mcg, kv_a_proj->mul1, 0, graph);
+        bool f = kv_a_proj_fp16 != nullptr;
+        at::Tensor ckv_kpe = rows(s.ckv_kpe, f);
+        linear_gr(kv_a_proj, kv_a_proj_fp16, f ? s.x_st : x2, ckv_kpe, xh_for(kv_a_proj, hidden_size), graph);
     }
 
     // Staging: kv_a norm into ckv, rope key split, per-head rope-query gather. All operands are
@@ -467,12 +519,13 @@ void BC_MLAttention::run_gr
     }
 
     // DSA indexer keys (full-indexer layers, both regimes): stage x for the unquantized
-    // GEMMs, project + biased-LayerNorm + partial rope the chunk's keys, and append them to
-    // the paged side plane so the selection has complete history once it activates
+    // GEMMs (unless the head of the graph already did), project + biased-LayerNorm + partial
+    // rope the chunk's keys, and append them to the paged side plane so the selection has
+    // complete history once it activates
     if (idx_mode == 1)
     {
         at::Tensor x_rows = s.x_st.narrow(0, 0, R);
-        copy2d_gr(x2, x_rows, graph);
+        if (!stage_x) copy2d_gr(x2, x_rows, graph);
         at::Tensor kidx_rows = s.kidx.narrow(0, 0, R);
         hgemm_gr(x_rows, idx_wk_w.value(), kidx_rows, graph);
         {
@@ -592,9 +645,9 @@ void BC_MLAttention::run_gr
         }
         if (idx_mode == 1)
         {
-            exl3_gemm_gr(s.q_a, idx_wq_b->trellis, s.qidx, idx_wq_b->suh,
-                         xh.view({-1}).narrow(0, 0, (int64_t) R * q_lora_rank).view({R, q_lora_rank}),
-                         idx_wq_b->svh, -1, idx_wq_b->mcg, idx_wq_b->mul1, 0, graph);
+            bool f = idx_wq_b_fp16 != nullptr;
+            at::Tensor qidx = rows(s.qidx, f);
+            linear_gr(idx_wq_b, idx_wq_b_fp16, rows(s.q_a, f), qidx, xh_for(idx_wq_b, q_lora_rank), graph);
             if (qk_rope_head_dim > 0)
             {
                 c10::optional<at::Tensor> no_k = {};
@@ -804,10 +857,18 @@ void BC_MLAttention::run_gr
     }
     dbg("unfold");
 
-    // Output projection
+    // Output projection: EXL3 writes y directly (patched C site); fp16 lands in the y_st
+    // static and is copied out (patched copy destination)
     at::Tensor y2 = y.view({R, hidden_size});
-    at::Tensor xh_o = xh_flat.narrow(0, 0, (int64_t) R * num_q_heads * v_head_dim).view({R, num_q_heads * v_head_dim});
-    exl3_gemm_gr(s.o, o_proj->trellis, y2, o_proj->suh, xh_o, o_proj->svh, -1, o_proj->mcg, o_proj->mul1, 0, graph);
+    bool fo = o_proj_fp16 != nullptr;
+    TORCH_CHECK(!fo || s.y_st.dtype() == y.dtype(), "BC_MLAttention: y_st dtype must match y for the fp16 o_proj");
+    at::Tensor y_out = fo ? s.y_st : y2;
+    linear_gr(o_proj, o_proj_fp16, rows(s.o, fo), y_out, xh_for(o_proj, num_q_heads * v_head_dim), graph);
+    if (fo)
+    {
+        at::Tensor y_rows = s.y_st.narrow(0, 0, R);
+        copy2d_gr(y_rows, y2, graph);
+    }
     dbg("o_proj");
 }
 
@@ -859,11 +920,17 @@ void BC_MLAttention::run
     std::vector<PPTR> params;
     params.reserve(20);
 
-    // Q / latent projections. The q_b GEMM of the LoRA path reads the q_a static -- its entry is
-    // a no-op that keeps the sequential patcher aligned (two same-id sites in a row)
-    params.emplace_back(GP_gemm_A, (void*) x.data_ptr());
+    // Input staging (some projection reads x through cuBLAS): one copy at the head of the graph
+    bool stage_x = stages_x();
+    if (stage_x)
+        params.emplace_back(GP_copy2d_src, (void*) x.data_ptr());
+
+    // Q projections. Only EXL3 GEMMs have sites; the q_b GEMM of the LoRA path reads the q_a
+    // static -- its entry is a no-op that keeps the sequential patcher aligned past that site
     if (q_a_proj)
-        params.emplace_back(GP_gemm_A, (void*) s.q_a.data_ptr());
+        params.emplace_back(GP_gemm_A, (void*) x.data_ptr());
+    if (q_proj)
+        params.emplace_back(GP_gemm_A, q_lora_rank > 0 ? (void*) s.q_a.data_ptr() : (void*) x.data_ptr());
 
     int pid_stride = (position_ids && position_ids.value().dim() == 3) ? rotate_dims : 1;
     if (l4_scaling_beta > 0.0f)
@@ -875,7 +942,8 @@ void BC_MLAttention::run
     }
 
     // Latent projection
-    params.emplace_back(GP_gemm_A, (void*) x.data_ptr());
+    if (kv_a_proj)
+        params.emplace_back(GP_gemm_A, (void*) x.data_ptr());
 
     // RoPE position sources (NoPE models never captured the stage)
     if (qk_rope_head_dim > 0)
@@ -894,10 +962,12 @@ void BC_MLAttention::run
     params.emplace_back(GP_attn_seqlens, (void*) cache_seqlens.data_ptr());
     params.emplace_back(GP_attn_num_pages, (void*) (uintptr_t) bt_width);
 
-    // DSA indexer-key stages (full-indexer layers): x staging, key rope and the plane append
+    // DSA indexer-key stages (full-indexer layers): x staging (unless done at the head), key
+    // rope and the plane append
     if (idx_mode == 1)
     {
-        params.emplace_back(GP_copy2d_src, (void*) x.data_ptr());
+        if (!stage_x)
+            params.emplace_back(GP_copy2d_src, (void*) x.data_ptr());
         if (qk_rope_head_dim > 0)
         {
             params.emplace_back(GP_rope_inv_freq, (void*) inv_freq.data_ptr());
@@ -977,8 +1047,11 @@ void BC_MLAttention::run
         params.emplace_back(GP_attn_num_splits, (void*) (uintptr_t) num_splits);   // combine kernel
     }
 
-    // Output projection
-    params.emplace_back(GP_gemm_C, (void*) y.data_ptr());
+    // Output projection: the C site (EXL3) or the copy-out destination (fp16)
+    if (o_proj_fp16)
+        params.emplace_back(GP_copy2d_dst, (void*) y.data_ptr());
+    else
+        params.emplace_back(GP_gemm_C, (void*) y.data_ptr());
 
     s.graph->launch(params, stream);
 }

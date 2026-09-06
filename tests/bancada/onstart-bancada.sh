@@ -35,7 +35,7 @@ publicar() {
 import os
 from huggingface_hub import HfApi
 api = HfApi(token=os.environ["HF_TOKEN"])
-for f in ("bancada.log", "resumo.txt"):
+for f in ("bancada.log", "resumo.txt", "build.log"):
     p = f"/workspace/{f}"
     if os.path.exists(p):
         api.upload_file(path_or_fileobj=p, path_in_repo=f"saidas/tp-mla/$PROVA_ID/{f}", repo_id="$REPO_SAIDAS")
@@ -56,7 +56,7 @@ CAP=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -1)
 NUCLEOS=$(nproc); export MAX_JOBS=$(( NUCLEOS > 8 ? 8 : (NUCLEOS < 2 ? 2 : NUCLEOS) ))
 export TORCH_CUDA_ARCH_LIST="$CAP"
 marco "compilando a extensão para sm $CAP com MAX_JOBS=$MAX_JOBS"
-pip install -q --no-build-isolation -e . 2>&1 | tail -3
+pip install -q --no-build-isolation -e . > /workspace/build.log 2>&1; grep -E -i "error|warning: unused|FAILED" /workspace/build.log | grep -v -i "warning" | head -20; tail -2 /workspace/build.log
 # o torch vem antes: a extensão liga em libc10.so, que só entra no processo com ele importado
 python3 -c "import torch, exllamav3_ext; from exllamav3.version import __version__ as v; print('exllamav3', v, 'ext ok')"
 
@@ -70,7 +70,7 @@ du -sh /workspace/corte
 # Artefato da esteira antiga com kv_b_proj em treliça: repara antes de carregar
 python3 tests/bancada/reparar_kv_b_proj.py /workspace/corte
 
-if [ -z "${SO_7:-}" ]; then
+if [ -z "${SO_7:-}" ] && [ -z "${SO_8:-}" ]; then
 marco "3b. teste por bloco: original × importado por TP, bloco a bloco e filho a filho"
 env $BASE python3 tests/test_tp_block_import.py /workspace/corte 2>&1 | grep -v -E "it/s\]|━━" | tee /workspace/3b.txt
 echo "3b saiu com ${PIPESTATUS[0]}"
@@ -147,6 +147,27 @@ PY7
   echo "7 terminou"
 fi
 
+# 8. Etapa 3 do plano de desempenho: decode em grafo CUDA com projeções fp16 (BC-MLA e BC-KDA).
+# A/B no corte, numa placa e em TP2: base eager (grafo desligado) gravada, depois o mesmo decode com o
+# grafo ligado e o rastro de montagem, comparado por teacher forcing (KL) e por tok/s. SO_8=1 roda só isto.
+if [ -n "${ETAPA3:-}" ] || [ -n "${SO_8:-}" ]; then
+  marco "8. etapa 3: grafo CUDA com projeções fp16"
+  T8="${TOKENS8:-128}"
+  F8="decode:|KL média|OK|FALHOU|Error|error|Traceback|bc_mla|bc_gdn|BC_|build|declin|graph"
+  : > /workspace/8.txt
+  echo "--- 8a. uma placa, eager (base)" | tee -a /workspace/8.txt
+  CUDA_VISIBLE_DEVICES=0 EXL3_BC_ATTN=0 EXL3_BC_GDN=0 python3 tests/tp_mla_smoke.py -m /workspace/corte --tokens $T8 --cache 8192 --save /workspace/eager.pt 2>&1 | grep -E "$F8" | tee -a /workspace/8.txt
+  echo "--- 8b. uma placa, grafo ligado, rastro" | tee -a /workspace/8.txt
+  CUDA_VISIBLE_DEVICES=0 EXL3_BC_ATTN_TRACE=1 EXL3_BC_GDN_TRACE=1 python3 tests/tp_mla_smoke.py -m /workspace/corte --tokens $T8 --cache 8192 --compare /workspace/eager.pt 2>&1 | grep -E "$F8" | tee -a /workspace/8.txt
+  echo "--- 8c. uma placa, grafo, contexto longo (DSA esparso)" | tee -a /workspace/8.txt
+  CUDA_VISIBLE_DEVICES=0 EXL3_BC_ATTN=0 EXL3_BC_GDN=0 python3 tests/tp_mla_smoke.py -m /workspace/corte --tokens $T8 --cache 8192 --prefill-tokens 3000 --save /workspace/eager-longo.pt 2>&1 | grep -E "$F8" | tee -a /workspace/8.txt
+  CUDA_VISIBLE_DEVICES=0 EXL3_BC_ATTN_TRACE=1 python3 tests/tp_mla_smoke.py -m /workspace/corte --tokens $T8 --cache 8192 --prefill-tokens 3000 --compare /workspace/eager-longo.pt 2>&1 | grep -E "$F8" | tee -a /workspace/8.txt
+  echo "--- 8d. TP2 NCCL, eager e grafo" | tee -a /workspace/8.txt
+  EXL3_BC_ATTN=0 EXL3_BC_GDN=0 python3 tests/tp_mla_smoke.py -m /workspace/corte --tp --tokens $T8 --cache 8192 --save /workspace/eager-tp.pt 2>&1 | grep -E "$F8" | tee -a /workspace/8.txt
+  EXL3_BC_ATTN_TRACE=1 EXL3_BC_GDN_TRACE=1 python3 tests/tp_mla_smoke.py -m /workspace/corte --tp --tokens $T8 --cache 8192 --compare /workspace/eager-tp.pt 2>&1 | grep -E "$F8" | tee -a /workspace/8.txt
+  echo "8 terminou"
+fi
+
 {
   echo "bancada $PROVA_ID · $(nvidia-smi --query-gpu=name --format=csv,noheader | sort | uniq -c | tr '\n' ' ')"
   echo "--- 3b"; grep -E "== bloco|vs original|Error|error" /workspace/3b.txt | head -40
@@ -154,6 +175,7 @@ fi
   for f in 5a 5b; do echo "--- $f"; grep -E "prefill:|decode:|Error|error" /workspace/$f.txt | head -4; done
   echo "--- 6"; grep -E "^A\.|^B\.|rascunho:|referência:|^OK|FALHOU|Error|error" /workspace/6.txt 2>/dev/null | head -12
   echo "--- 7"; cat /workspace/7.txt 2>/dev/null
+  echo "--- 8"; cat /workspace/8.txt 2>/dev/null
   echo "--- 5a tabelas"; sed -n '/PREFILL por módulo/,/FIM_PERFIL/p' /workspace/5a.txt | head -60
 } | tee /workspace/resumo.txt
 publicar

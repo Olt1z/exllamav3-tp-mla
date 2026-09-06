@@ -106,7 +106,9 @@ py::class_<BC_GatedDeltaNetSplit, std::shared_ptr<BC_GatedDeltaNetSplit>>(m, "BC
         at::Tensor,
         c10::optional<at::Tensor>,
         std::shared_ptr<BC_GatedRMSNorm>,
-        float
+        float,
+        std::shared_ptr<BC_LinearFP16>,
+        std::shared_ptr<BC_LinearFP16>
     >(),
     py::arg("qkv_proj"),
     py::arg("o_proj"),
@@ -125,7 +127,9 @@ py::class_<BC_GatedDeltaNetSplit, std::shared_ptr<BC_GatedDeltaNetSplit>>(m, "BC
     py::arg("conv1d_weight"),
     py::arg("conv1d_bias"),
     py::arg("norm"),
-    py::arg("beta_scale")
+    py::arg("beta_scale"),
+    py::arg("qkv_proj_fp16") = py::none(),
+    py::arg("o_proj_fp16") = py::none()
 )
 .def("needs_configure", &BC_GatedDeltaNetSplit::needs_configure)
 .def("configure_slot_kda", &BC_GatedDeltaNetSplit::configure_slot_kda,
@@ -145,7 +149,9 @@ py::class_<BC_GatedDeltaNetSplit, std::shared_ptr<BC_GatedDeltaNetSplit>>(m, "BC
     py::arg("core_attn_out"),
     py::arg("core_attn_out_f"),
     py::arg("qkv_xh"),
-    py::arg("o_xh")
+    py::arg("o_xh"),
+    py::arg("xp") = py::none(),
+    py::arg("yp") = py::none()
 )
 .def("configure_slot", &BC_GatedDeltaNetSplit::configure_slot,
     py::arg("bsz"),

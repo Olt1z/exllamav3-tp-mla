@@ -57,12 +57,18 @@ struct BC_MLAttention
     int v_head_dim;
     int q_lora_rank;        // 0 = direct q projection
 
-    // Projections. q_proj is q_b_proj when q_lora_rank > 0
+    // Projections. q_proj is q_b_proj when q_lora_rank > 0. Each one is EXL3 (kernel node with
+    // patchable A/C sites) or fp16 (cuBLAS node with no patchable sites, run between the padded
+    // statics: x staged into x_st, output through y_st -- see run_gr), never both
     std::shared_ptr<BC_LinearEXL3> q_proj;
+    std::shared_ptr<BC_LinearFP16> q_proj_fp16;
     std::shared_ptr<BC_LinearEXL3> q_a_proj;
+    std::shared_ptr<BC_LinearFP16> q_a_proj_fp16;
     c10::optional<at::Tensor> q_a_norm_w;
     std::shared_ptr<BC_LinearEXL3> kv_a_proj;
+    std::shared_ptr<BC_LinearFP16> kv_a_proj_fp16;
     std::shared_ptr<BC_LinearEXL3> o_proj;
+    std::shared_ptr<BC_LinearFP16> o_proj_fp16;
     at::Tensor kv_norm_w;   // kv_a_layernorm weight, applied inside the staging kernel
     float norm_eps;
 
@@ -95,7 +101,8 @@ struct BC_MLAttention
 
     // DSA lightning indexer (set_indexer): 0 = none, 1 = full, 2 = shared
     int idx_mode = 0;
-    std::shared_ptr<BC_LinearEXL3> idx_wq_b;   // full only, quantized (q_lora_rank -> H_i * D_i)
+    std::shared_ptr<BC_LinearEXL3> idx_wq_b;   // full only, EXL3 or fp16 (q_lora_rank -> H_i * D_i)
+    std::shared_ptr<BC_LinearFP16> idx_wq_b_fp16;
     c10::optional<at::Tensor> idx_wk_w;        // (hidden, D_i) fp16, full only
     c10::optional<at::Tensor> idx_k_norm_w;    // (D_i,) fp16
     c10::optional<at::Tensor> idx_k_norm_b;    // (D_i,) fp16
@@ -124,16 +131,18 @@ struct BC_MLAttention
         int absorb_gy = 0;
         int unfold_gx = 0;
 
-        // Static intermediates (python tensor cache) and precomputed views
-        at::Tensor q_full;    // (R, q_proj out width) fp16
-        at::Tensor q_a;       // (R, q_a out width) fp16, q_lora only
-        at::Tensor ckv_kpe;   // (R, kv_a out width) fp16
+        // Static intermediates (python tensor cache) and precomputed views. Operands of an fp16
+        // projection carry R_pad rows (cuBLASLt M >= 8); everything else reads/writes R rows
+        at::Tensor q_full;    // (R | R_pad, q_proj out width) fp16
+        at::Tensor q_a;       // (R | R_pad, q_a out width) fp16, q_lora only
+        at::Tensor ckv_kpe;   // (R | R_pad, kv_a out width) fp16
         at::Tensor ckv;       // (R, D_c) fp16, normalized latent
         at::Tensor kpe;       // (R, D_r) fp16
         at::Tensor q_pe;      // (R, H, D_r) fp16 token-major
         at::Tensor q_lat;     // (H, R, D_c) fp16 head-major
         at::Tensor o_lat;     // (H, R, D_c) fp16 head-major
-        at::Tensor o;         // (R, H * D_v) fp16
+        at::Tensor o;         // (R | R_pad, H * D_v) fp16
+        at::Tensor y_st;      // (R_pad, hidden) o_proj dtype, fp16 o_proj only: copied out to y
         at::Tensor partial_o, partial_ml;
         at::Tensor qtmp, stmp;   // quant append temporaries
         at::Tensor q_pe4, kpe4;  // rope views (bsz, q_len, heads, D_r)
@@ -147,7 +156,8 @@ struct BC_MLAttention
 
         // DSA statics (idx_mode > 0). Full-indexer slots carry the key stages in both
         // regimes; sparse slots add scoring/selection (full) and the gathered attention
-        at::Tensor x_st;      // (R_pad, hidden) staged input, zero-padded rows for cuBLASLt
+        at::Tensor x_st;      // (R_pad, hidden) staged input, zero-padded rows for cuBLASLt;
+                              // also fed to the fp16 input projections (configure_slot)
         at::Tensor kidx;      // (R_pad, D_i) raw wk output
         at::Tensor kidx_n;    // (R, D_i) normed keys, roped in place on the leading D_r dims
         at::Tensor kidx4;     // rope view (bsz, q_len, 1, D_r)
@@ -202,7 +212,11 @@ struct BC_MLAttention
         at::Tensor cache_kpe,
         c10::optional<at::Tensor> cache_scales,
         at::Tensor xh,
-        at::Tensor h32
+        at::Tensor h32,
+        std::shared_ptr<BC_LinearFP16> q_proj_fp16 = nullptr,
+        std::shared_ptr<BC_LinearFP16> q_a_proj_fp16 = nullptr,
+        std::shared_ptr<BC_LinearFP16> kv_a_proj_fp16 = nullptr,
+        std::shared_ptr<BC_LinearFP16> o_proj_fp16 = nullptr
     );
 
     void set_indexer
@@ -221,7 +235,8 @@ struct BC_MLAttention
         bool kpool_tail = true,
         c10::optional<at::Tensor> gate_w = {},
         c10::optional<at::Tensor> kpool_ape = {},
-        c10::optional<at::Tensor> kpool_plane = {}
+        c10::optional<at::Tensor> kpool_plane = {},
+        std::shared_ptr<BC_LinearFP16> wq_b_fp16 = nullptr
     );
 
     bool needs_configure(int bsz, int q_len, int regime);
@@ -255,7 +270,9 @@ struct BC_MLAttention
         int programs,
         int absorb_gx,
         int absorb_gy,
-        int unfold_gx
+        int unfold_gx,
+        c10::optional<at::Tensor> x_st = {},   // required when stages_x()
+        c10::optional<at::Tensor> y_st = {}    // required when o_proj is fp16
     );
 
     // Attaches the DSA statics/kernels to an already-configured slot. Sparse-only pieces are
@@ -323,6 +340,11 @@ struct BC_MLAttention
         const c10::optional<at::Tensor>& ext_indices,
         Graph* graph
     );
+
+    // True when some projection reads x through cuBLAS, i.e. x is copied into x_st once at the
+    // head of the graph (the DSA indexer then reuses that copy)
+    bool stages_x() const
+        { return q_a_proj_fp16 || (q_lora_rank == 0 && q_proj_fp16) || kv_a_proj_fp16; }
 
 private:
     Slot& slot(int bsz, int q_len, int regime)

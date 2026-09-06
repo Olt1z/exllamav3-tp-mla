@@ -1,5 +1,6 @@
 from __future__ import annotations
 from typing_extensions import override
+import os
 import torch
 import torch.nn.functional as F
 from ..model.config import Config
@@ -20,6 +21,31 @@ from ..cache.recurrent import (
 )
 from ..util import profile_opt
 from .attention_fn.bc_attn import MAX_BSZ as _BC_MAX_BSZ, MAX_QLEN as _BC_MAX_QLEN
+
+# Enabled by default; EXL3_BC_GDN=0 disables the fused BC_GatedDeltaNetSplit decode path (both the
+# split and the KDA variant), the module then runs the torch path. EXL3_BC_GDN_TRACE=1 prints one
+# build/decline line per module with the qkv/o projection formats (activation check for A/B tests)
+_bc_gdn_enable = os.environ.get("EXL3_BC_GDN", "1") != "0"
+_bc_gdn_trace = os.environ.get("EXL3_BC_GDN_TRACE", "0") != "0"
+
+
+def _bc_kda_proj_ok(lin) -> bool:
+    """qkv_proj / o_proj usable inside the KDA graph: EXL3, or a plain device-resident contiguous
+    fp16 weight (captured as a cuBLAS node reading the weight pointer directly; a pinned host
+    alias would go through a different pointer than the one BC_LinearFP16 holds)"""
+    if lin is None:
+        return False
+    if lin.quant_type == "exl3":
+        return True
+    if lin.quant_type != "fp16":
+        return False
+    inner = lin.inner
+    return (
+        inner.bc is not None and
+        inner.weight.dtype == torch.half and
+        inner.weight.is_contiguous() and
+        getattr(inner, "_pinned_store", None) is None
+    )
 
 
 def _collect_rewind_jobs(layers, slot: int, last_history: int, num_tokens: int):
@@ -649,7 +675,7 @@ class GatedDeltaNet(Module):
             self.conv1d_weight_flat = self.conv1d_weight.squeeze(1).contiguous()
 
         is_quantized_split = (
-            device != torch.device("cpu") and
+            _bc_gdn_enable and device != torch.device("cpu") and
             self.qkvz_proj is None and self.ba_proj is None and
             self.qkv_proj is not None and self.qkv_proj.quant_type == "exl3" and
             self.z_proj is not None and self.z_proj.quant_type == "exl3" and
@@ -694,10 +720,12 @@ class GatedDeltaNet(Module):
             )
             self.bc_split = True
 
+        # qkv_proj / o_proj may be EXL3 or fp16 (GLM-5.3-Flash keeps both in fp16); an fp16
+        # o_proj writes y through cuBLAS, which only takes half/float outputs
         is_quantized_kda = (
-            device != torch.device("cpu") and self.kda and
-            self.qkv_proj is not None and self.qkv_proj.quant_type == "exl3" and
-            self.o_proj is not None and self.o_proj.quant_type == "exl3" and
+            _bc_gdn_enable and device != torch.device("cpu") and self.kda and
+            _bc_kda_proj_ok(self.qkv_proj) and _bc_kda_proj_ok(self.o_proj) and
+            (self.o_proj.quant_type == "exl3" or (self.out_dtype or torch.half) in (torch.half, torch.float)) and
             all(p is not None and p.quant_type == "fp16" for p in
                 (self.b_proj, self.f_a_proj, self.f_b_proj, self.g_a_proj, self.g_b_proj)) and
             self.conv1d_weight_flat is not None and
@@ -724,9 +752,11 @@ class GatedDeltaNet(Module):
             self.kda_gb_t = torch.empty((nv * hv, hv), dtype = torch.half, device = device)
             self.ba_weight_filled = False
 
+            qkv_exl3 = self.qkv_proj.quant_type == "exl3"
+            o_exl3 = self.o_proj.quant_type == "exl3"
             self.bc = ext.BC_GatedDeltaNetSplit(
-                self.qkv_proj.inner.bc,
-                self.o_proj.inner.bc,
+                self.qkv_proj.inner.bc if qkv_exl3 else None,
+                self.o_proj.inner.bc if o_exl3 else None,
                 self.kda_b_t,
                 self.kda_fa_t,
                 self.kda_fb_t,
@@ -742,9 +772,17 @@ class GatedDeltaNet(Module):
                 self.conv1d_weight_flat,
                 self.conv1d_bias,
                 self.norm.bc,
-                self.beta_scale
+                self.beta_scale,
+                None if qkv_exl3 else self.qkv_proj.inner.bc,
+                None if o_exl3 else self.o_proj.inner.bc,
             )
             self.bc_split = True
+
+        if _bc_gdn_trace:
+            proj = (f" qkv_proj {self.qkv_proj.quant_type} o_proj {self.o_proj.quant_type}"
+                    if self.bc_split else "")
+            print(f" -- BC-GDN{'-KDA' if self.kda else ''}: {'built' if self.bc_split else 'DECLINED'}"
+                  f" layer {self.layer_idx} device {device}{proj}")
 
 
     @override
@@ -836,8 +874,33 @@ class GatedDeltaNet(Module):
     def _bc_configure_slot_kda(self, bsz: int, seqlen: int, history: bool):
         device = self.device
         f = self.fdim_qkv
+        hs = self.hidden_size
         nv, hk, hv = self.num_v_heads, self.k_head_dim, self.v_head_dim
-        qkv             = g_tensor_cache.get(device, (bsz, seqlen, f), torch.float, "s_qkv")
+        # fp16 projections stage through padded 2D statics: cuBLAS nodes have no patchable sites
+        # and cuBLASLt picks a ~13x slower kernel below M = 8 (bc_mla pattern). Pad rows are zeroed
+        # once here and never written or read afterwards
+        R_pad = max(bsz * seqlen, 8)
+        qkv_fp16 = self.qkv_proj.quant_type == "fp16"
+        o_fp16 = self.o_proj.quant_type == "fp16"
+        none = torch.empty((0,), dtype = torch.half, device = device)
+        if qkv_fp16:
+            xp     = g_tensor_cache.get(device, (R_pad, hs), torch.half, "s_kxp")
+            qkv    = g_tensor_cache.get(device, (R_pad, f), torch.float, "s_kqkvp")
+            qkv_xh = none
+            xp.zero_()
+        else:
+            xp     = None
+            qkv    = g_tensor_cache.get(device, (bsz, seqlen, f), torch.float, "s_qkv")
+            qkv_xh = g_tensor_cache.get(device, (bsz, seqlen, hs), torch.half, "s_qkv_xh")
+        if o_fp16:
+            core_attn_out_f = g_tensor_cache.get(device, (R_pad, nv * hv), torch.half, "s_kcaofp")
+            yp   = g_tensor_cache.get(device, (R_pad, hs), self.out_dtype or torch.half, "s_kyp")
+            o_xh = none
+            core_attn_out_f.zero_()
+        else:
+            core_attn_out_f = g_tensor_cache.get(device, (bsz, seqlen, nv * hv), torch.half, "s_caof")
+            yp   = None
+            o_xh = g_tensor_cache.get(device, (bsz, seqlen, nv * hv), torch.half, "s_o_xh")
         z               = g_tensor_cache.get(device, (bsz, seqlen, nv, hv), torch.float, "s_z")
         b_out           = g_tensor_cache.get(device, (bsz, seqlen, nv), torch.float, "s_kb")
         fa_out          = g_tensor_cache.get(device, (bsz, seqlen, hk), torch.float, "s_kfa")
@@ -848,13 +911,10 @@ class GatedDeltaNet(Module):
         mixed_qkv       = g_tensor_cache.get(device, (bsz, f, seqlen), torch.bfloat16, "s_mqkv")
         conv_out        = g_tensor_cache.get(device, (bsz, seqlen, f), torch.bfloat16, "s_conv")
         core_attn_out   = g_tensor_cache.get(device, (bsz, seqlen, nv, hv), torch.bfloat16, "s_cao")
-        core_attn_out_f = g_tensor_cache.get(device, (bsz, seqlen, nv * hv), torch.half, "s_caof")
-        qkv_xh = g_tensor_cache.get(device, (bsz, seqlen, self.hidden_size), torch.half, "s_qkv_xh")
-        o_xh   = g_tensor_cache.get(device, (bsz, seqlen, nv * hv), torch.half, "s_o_xh")
         self.bc.configure_slot_kda(
             bsz, seqlen, history,
             qkv, z, b_out, fa_out, fb_out, ga_out, beta, g, mixed_qkv, conv_out,
-            core_attn_out, core_attn_out_f, qkv_xh, o_xh,
+            core_attn_out, core_attn_out_f, qkv_xh, o_xh, xp, yp,
         )
 
     def _bc_configure_slot(self, bsz: int, seqlen: int, history: bool):

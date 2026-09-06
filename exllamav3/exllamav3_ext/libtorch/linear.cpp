@@ -69,3 +69,27 @@ at::Tensor BC_LinearEXL3::run_alloc(const at::Tensor& x, int64_t out_features, b
     run(x_flat, y_flat);
     return y;
 }
+
+void linear_gr
+(
+    const std::shared_ptr<BC_LinearEXL3>& exl3,
+    const std::shared_ptr<BC_LinearFP16>& fp16,
+    const at::Tensor& x,
+    at::Tensor& y,
+    const at::Tensor& xh,
+    Graph* graph
+)
+{
+    TORCH_CHECK((exl3 != nullptr) != (fp16 != nullptr), "linear_gr: exactly one of exl3/fp16 must be set");
+    if (exl3)
+    {
+        // bypass BC_LinearEXL3::run_gr, which hard-refuses graph capture above one row
+        exl3_gemm_gr(x, exl3->trellis, y, exl3->suh, xh, exl3->svh, -1, exl3->mcg, exl3->mul1, 0, graph);
+        if (exl3->bias) add_gr(y, exl3->bias.value(), y, graph);
+    }
+    else
+    {
+        hgemm_gr(x, fp16->weight, y, graph);
+        if (fp16->bias) add_gr(y, fp16->bias.value(), y, graph);
+    }
+}

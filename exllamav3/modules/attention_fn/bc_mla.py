@@ -17,6 +17,14 @@ pointers patched. The Triton kernels are the same ones the dispatch path JITs, c
 of time with the slot shapes baked as constexprs; the block-table width and split configuration
 are runtime kernel arguments patched per call, so context growth never recaptures.
 
+Projections may be EXL3 or plain fp16 (checkpoints with 16-bit attention, e.g. GLM-5.3 with
+a raw kv_a_proj or all-fp16 attention): an EXL3 GEMM is a kernel node whose A/C pointers patch
+per step; an fp16 one is a cuBLAS node with no patchable sites, so it runs between statics --
+x is copied once into the padded x_st at the head of the graph, and an fp16 o_proj lands in
+y_st and is copied out (bc_attn / bc_dsa staging pattern). Operands of fp16 projections carry
+R_pad = max(R, 8) rows (cuBLASLt picks a much slower kernel below M = 8); every consumer still
+reads only the leading R.
+
 Follows bc_attn.py; shares its enable flag (EXL3_BC_ATTN=0 disables both). Unsupported
 module/cache configurations fall back to the dispatch path by design (build_bc_mla returns
 None); unexpected failures while building raise.
@@ -45,7 +53,28 @@ class BCMLA:
         self.v_head_dim = m.v_head_dim
         self.q_lora_rank = m.q_lora_rank or 0
         self.sm_scale = m.sm_scale
-        self.o_dtype = m.o_proj.inner.default_out_dtype
+        oi = m.o_proj.inner
+        self.o_dtype = getattr(oi, "default_out_dtype", None) or getattr(oi, "out_dtype", None) \
+            or torch.half
+
+        # Per-projection format (see module docstring): (exl3 BC, fp16 BC), one of them None.
+        # LinearFP16.unswap_cpu rebinds inner.bc to the device weight after a sliced load
+        idx = m.idx_wq_b if m.indexer_mode == "full" else None
+        def split(p):
+            if p is None: return None, None
+            return (p.inner.bc, None) if p.quant_type == "exl3" else (None, p.inner.bc)
+        q_proj, q_proj_fp16 = split(m.q_proj)
+        q_a_proj, q_a_proj_fp16 = split(m.q_a_proj)
+        kv_a_proj, kv_a_proj_fp16 = split(m.kv_a_proj_with_mqa)
+        o_proj, o_proj_fp16 = split(m.o_proj)
+        idx_wq_b, idx_wq_b_fp16 = split(idx)
+        self.fp16 = dict(q = q_proj_fp16 is not None, q_a = q_a_proj_fp16 is not None,
+                         kv_a = kv_a_proj_fp16 is not None, o = o_proj_fp16 is not None,
+                         idx = idx_wq_b_fp16 is not None)
+        self.any_fp16 = any(self.fp16.values())
+        # x staged through x_st when some projection reads it through cuBLAS (mirrors stages_x)
+        self.stage_x = self.fp16["q_a"] or (not self.q_lora_rank and self.fp16["q"]) \
+            or self.fp16["kv_a"]
 
         # Padded projection widths: the statics carry the projections' actual N, the staging and
         # absorb kernels read at the true offsets (Q_STRIDE/CKV_STRIDE)
@@ -63,8 +92,10 @@ class BCMLA:
             h32 = g_tensor_cache.get(self.device, (1,), torch.half, "bcm_dummy")
         self.h32 = h32
 
-        # Hadamard scratch for the EXL3 GEMMs, sized for the widest input among them
-        w = max(self.hidden_size, self.q_lora_rank, self.num_q_heads * self.v_head_dim)
+        # Hadamard scratch for the EXL3 GEMMs, sized for the widest input among them (fp16
+        # projections need none; the ext object still takes a tensor)
+        w = max((p.in_features for p in (m.q_proj, m.q_a_proj, m.kv_a_proj_with_mqa, m.o_proj, idx)
+                 if p is not None and p.quant_type == "exl3"), default = 1)
         xh = g_tensor_cache.get(self.device, (MAX_BSZ * MAX_QLEN * w,), torch.half, "bcm_xh")
 
         # The staging kernel reads the norm weight as fp16; checkpoints usually store it bf16
@@ -92,11 +123,11 @@ class BCMLA:
             qk_nope_head_dim = self.qk_nope_head_dim,
             v_head_dim = self.v_head_dim,
             q_lora_rank = self.q_lora_rank,
-            q_proj = m.q_proj.inner.bc,
-            q_a_proj = m.q_a_proj.inner.bc if m.q_a_proj is not None else None,
+            q_proj = q_proj,
+            q_a_proj = q_a_proj,
             q_a_norm_w = m.q_a_layernorm.weight.data if m.q_a_proj is not None else None,
-            kv_a_proj = m.kv_a_proj_with_mqa.inner.bc,
-            o_proj = m.o_proj.inner.bc,
+            kv_a_proj = kv_a_proj,
+            o_proj = o_proj,
             kv_norm_w = kv_norm_w,
             norm_eps = m.norm_eps,
             inv_freq = rope_inv_freq,
@@ -116,6 +147,10 @@ class BCMLA:
             cache_scales = self.cache_scales,
             xh = xh,
             h32 = h32,
+            q_proj_fp16 = q_proj_fp16,
+            q_a_proj_fp16 = q_a_proj_fp16,
+            kv_a_proj_fp16 = kv_a_proj_fp16,
+            o_proj_fp16 = o_proj_fp16,
         )
 
         # DSA lightning indexer (GLM-5.2). Full layers project/norm/rope/append keys every
@@ -137,7 +172,8 @@ class BCMLA:
                 self.cache_kpool = self.idx_gate_w = None
             self.bc.set_indexer(
                 mode = 1,
-                wq_b = m.idx_wq_b.inner.bc,
+                wq_b = idx_wq_b,
+                wq_b_fp16 = idx_wq_b_fp16,
                 wk_w = m.idx_wk.inner.weight,
                 k_norm_w = m.idx_k_norm.weight.data.half().contiguous(),
                 k_norm_b = m.idx_k_norm.bias.data.half().contiguous(),
@@ -283,15 +319,26 @@ class BCMLA:
             n = 1
             for s in shape: n *= s
             return g_tensor_cache.get_bucketed(dev, n, dtype, tag).view(*shape)
-        q_full = sbuf("bcm_qfull", R, self.w_q)
-        q_a = sbuf("bcm_qa", R, self.q_lora_rank) if self.q_lora_rank else None
-        ckv_kpe = sbuf("bcm_ckvkpe", R, self.w_kv)
+        # Operands of an fp16 projection carry R_pad rows (cuBLAS runs over the full static
+        # height, cuBLASLt M >= 8); q_a feeds the LoRA q_b and the indexer wq_b as well
+        R_pad = max(R, 8)
+        f = self.fp16
+        def rows(*keys): return R_pad if any(f[k] for k in keys) else R
+        q_full = sbuf("bcm_qfull", rows("q"), self.w_q)
+        q_a = sbuf("bcm_qa", rows("q_a", "q", "idx"), self.q_lora_rank) if self.q_lora_rank else None
+        ckv_kpe = sbuf("bcm_ckvkpe", rows("kv_a"), self.w_kv)
         ckv = sbuf("bcm_ckv", R, D_c)
         kpe = sbuf("bcm_kpe", R, D_r)
         q_pe = sbuf("bcm_qpe", R, H, D_r)
         q_lat = sbuf("bcm_qlat", H, R, D_c)
         o_lat = sbuf("bcm_olat", H, R, D_c)
-        o = sbuf("bcm_o", R, H * D_v)
+        o = sbuf("bcm_o", rows("o"), H * D_v)
+        # Staged input (same buffer the DSA indexer stages into) and fp16 o_proj output
+        x_st = sbuf("bcm_xst", R_pad, self.hidden_size) if self.stage_x else None
+        y_st = sbuf("bcm_yst", R_pad, self.hidden_size, dtype = self.o_dtype) if f["o"] else None
+        if self.any_fp16:
+            for t in (q_full, q_a, ckv_kpe, o, x_st, y_st):
+                if t is not None: t.zero_()
         partial_o = sbuf("bcm_po", programs * splits_cap * block_rows * D_c, dtype = torch.float)
         partial_ml = sbuf("bcm_ml", programs * splits_cap * block_rows * 2, dtype = torch.float)
         if self.quant:
@@ -307,6 +354,7 @@ class BCMLA:
             k_stage, k_absorb, k_append, k_split, k_combine, k_unfold,
             block_n, splits_cap, programs,
             triton.cdiv(R, absorb_bm), D_c // 128, triton.cdiv(R, unfold_bm),
+            x_st, y_st,
         )
 
         if self.indexer_mode is not None:
@@ -390,7 +438,8 @@ class BCMLA:
         if regime == 1:
             if full:
                 Hi, Di = m.index_n_heads, m.index_head_dim
-                qidx = sbuf("bcm_qidx", R, Hi * Di)
+                qidx = sbuf("bcm_qidx", R_pad if self.fp16["idx"] else R, Hi * Di)
+                if self.fp16["idx"]: qidx.zero_()
                 wts = sbuf("bcm_wts", R_pad, Hi)
                 wts.zero_()
                 # Scoring covers the full plane capacity every step (bounds written -inf in
@@ -548,11 +597,23 @@ class BCMLA:
 
 
 def _proj_ok(p, in_features = None, out_features = None):
-    """Quantized projection usable inside the graph: EXL3 with a bound BC class, no bias, and
-    (where required) exact unpadded widths."""
+    """Projection usable inside the graph: EXL3 with a bound BC class, or a plain fp16 weight
+    the graph runs through cuBLAS between staged statics (contiguous (in, out) half on the
+    device, not a pinned-host alias); no bias, and (where required) exact unpadded widths."""
+    if p is None or p.quant_type not in ("exl3", "fp16") or p.inner.bias is not None:
+        return False
+    if p.quant_type == "exl3":
+        if p.inner.bc is None:
+            return False
+    else:
+        w = getattr(p.inner, "weight", None)
+        if (
+            w is None or w.dtype != torch.half or not w.is_contiguous() or not w.is_cuda or
+            tuple(w.shape) != (p.in_features, p.out_features) or
+            getattr(p.inner, "_pinned_store", None) is not None
+        ):
+            return False
     return (
-        p is not None and p.quant_type == "exl3" and p.inner.bc is not None and
-        p.inner.bias is None and
         (in_features is None or p.in_features == in_features) and
         (out_features is None or p.out_features_unpadded == out_features == p.out_features)
     )
@@ -577,8 +638,9 @@ def build_bc_mla(module, layer):
         )) and
         # The staging/attention kernels index with tl.arange over these widths
         _is_pow2(D_c) and _is_pow2(D_v) and D_c % 128 == 0 and
-        # Projections read x directly (no padded-input staging) and write the statics; the q and
-        # kv widths may pad (the kernels read at true offsets), the rest must be exact
+        # Projections are EXL3 (read x directly, patched per step) or fp16 (cuBLAS between the
+        # staged x_st / y_st statics); the q and kv widths may pad (the kernels read at true
+        # offsets), the rest must be exact
         _proj_ok(m.q_proj, in_features = m.q_lora_rank or m.hidden_size) and
         (m.q_a_proj is None or (
             _proj_ok(m.q_a_proj, in_features = m.hidden_size, out_features = m.q_lora_rank) and
@@ -588,7 +650,7 @@ def build_bc_mla(module, layer):
         _proj_ok(m.o_proj, in_features = H * D_v, out_features = m.hidden_size) and
         m.kv_a_layernorm.weight is not None and
         m.w_uk_flat is not None and
-        # DSA indexer layers (GLM-5.2): full layers need the quantized wq_b, the fp16 key/
+        # DSA indexer layers (GLM-5.2): full layers need wq_b (EXL3 or fp16), the fp16 key/
         # weight heads, the biased key norm and the paged key plane on this cache layer
         (m.indexer_mode is None or (
             _is_pow2(m.index_head_dim) and m.qk_rope_head_dim <= m.index_head_dim and

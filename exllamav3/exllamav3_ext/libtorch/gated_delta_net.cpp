@@ -132,12 +132,61 @@ void BC_GatedDeltaNetSplit::configure_slot_kda
     at::Tensor core_attn_out,
     at::Tensor core_attn_out_f,
     at::Tensor qkv_xh,
-    at::Tensor o_xh
+    at::Tensor o_xh,
+    c10::optional<at::Tensor> xp,
+    c10::optional<at::Tensor> yp
 )
 {
     Slot& s = slot(bsz, seqlen, history);
+    int R = bsz * seqlen;
 
-    s.qkv             = std::move(qkv);
+    // fp16 qkv_proj: qkv arrives as the padded 2D buffer (R_pad, F) together with xp; the
+    // consumers keep reading the exact (bsz, seqlen, F) view of its first R rows
+    if (qkv_proj_fp16)
+    {
+        int64_t hidden = qkv_proj_fp16->weight.size(0);
+        int64_t f = qkv_proj_fp16->weight.size(1);
+        TORCH_CHECK(xp.has_value(), "BC_GatedDeltaNetSplit (KDA): fp16 qkv_proj needs xp");
+        TORCH_CHECK(xp->dim() == 2 && xp->dtype() == at::kHalf && xp->is_contiguous() &&
+                    xp->size(0) >= R && xp->size(1) == hidden,
+                    "BC_GatedDeltaNetSplit (KDA): xp must be (R_pad >= R, hidden) half");
+        TORCH_CHECK(qkv.dim() == 2 && qkv.dtype() == at::kFloat && qkv.is_contiguous() &&
+                    qkv.size(0) == xp->size(0) && qkv.size(1) == f,
+                    "BC_GatedDeltaNetSplit (KDA): qkv must be (R_pad, F) float for fp16 qkv_proj");
+        s.xp = std::move(xp.value());
+        s.qkv_pad = std::move(qkv);
+        s.qkv = s.qkv_pad.narrow(0, 0, R).view({bsz, seqlen, f});
+    }
+    else
+    {
+        TORCH_CHECK(!xp.has_value(), "BC_GatedDeltaNetSplit (KDA): xp only applies to fp16 qkv_proj");
+        s.qkv = std::move(qkv);
+    }
+
+    // fp16 o_proj: core_attn_out_f arrives as the padded 2D buffer (R_pad, Nv*Hv) together with
+    // yp; the norm writes the exact view, the GEMM reads/writes the padded buffers
+    if (o_proj_fp16)
+    {
+        int64_t vdim = o_proj_fp16->weight.size(0);
+        int64_t hidden = o_proj_fp16->weight.size(1);
+        TORCH_CHECK(yp.has_value(), "BC_GatedDeltaNetSplit (KDA): fp16 o_proj needs yp");
+        TORCH_CHECK(core_attn_out_f.dim() == 2 && core_attn_out_f.is_contiguous() &&
+                    core_attn_out_f.size(0) >= R && core_attn_out_f.size(1) == vdim,
+                    "BC_GatedDeltaNetSplit (KDA): core_attn_out_f must be (R_pad >= R, Nv*Hv) for fp16 o_proj");
+        TORCH_CHECK(yp->dim() == 2 && yp->is_contiguous() &&
+                    (yp->dtype() == at::kHalf || yp->dtype() == at::kFloat) &&
+                    yp->size(0) == core_attn_out_f.size(0) && yp->size(1) == hidden,
+                    "BC_GatedDeltaNetSplit (KDA): yp must be (R_pad, hidden) half/float");
+        s.yp = std::move(yp.value());
+        s.caof_pad = std::move(core_attn_out_f);
+        s.core_attn_out_f = s.caof_pad.narrow(0, 0, R).view({bsz, seqlen, vdim});
+    }
+    else
+    {
+        TORCH_CHECK(!yp.has_value(), "BC_GatedDeltaNetSplit (KDA): yp only applies to fp16 o_proj");
+        s.core_attn_out_f = std::move(core_attn_out_f);
+    }
+
     s.z               = std::move(z);
     s.b_out           = std::move(b_out);
     s.fa_out          = std::move(fa_out);
@@ -148,7 +197,6 @@ void BC_GatedDeltaNetSplit::configure_slot_kda
     s.mixed_qkv       = std::move(mixed_qkv);
     s.conv_out        = std::move(conv_out);
     s.core_attn_out   = std::move(core_attn_out);
-    s.core_attn_out_f = std::move(core_attn_out_f);
     s.qkv_xh          = std::move(qkv_xh);
     s.o_xh            = std::move(o_xh);
     s.z_flat = s.z.view({bsz, seqlen, -1});
@@ -176,12 +224,26 @@ void BC_GatedDeltaNetSplit::run_bszN_gr
     Graph* graph
 )
 {
-    // qkv/z projections: bypass BC_LinearEXL3::run_gr, which hard-refuses graph capture above 1
-    // row -- call exl3_gemm_gr directly with this slot's own xh scratch instead, exactly like
-    // BC_GatedMLP::run_bszN_gr does for shared-expert projections
-    exl3_gemm_gr(x, qkv_proj->trellis, s.qkv, qkv_proj->suh, s.qkv_xh, qkv_proj->svh, -1, qkv_proj->mcg, qkv_proj->mul1, 0, graph);
-    if (qkv_proj->bias)
-        add_gr(s.qkv, qkv_proj->bias.value(), s.qkv, graph);
+    int bsz = (int) x.size(0);
+    int seqlen = (int) x.size(1);
+    int R = bsz * seqlen;
+
+    // qkv/z projections: linear_gr bypasses BC_LinearEXL3::run_gr, which hard-refuses graph
+    // capture above 1 row, and calls exl3_gemm_gr with this slot's own xh scratch instead, exactly
+    // like BC_GatedMLP::run_bszN_gr does for shared-expert projections. An fp16 qkv_proj is a
+    // cuBLAS node with no patchable sites: x is copied into the static xp at the graph head
+    // (patched GP_copy2d_src) and the GEMM runs over all R_pad rows of the statics
+    if (qkv_proj_fp16)
+    {
+        TORCH_CHECK(s.xp.defined() && x.size(2) == s.xp.size(1),
+                    "BC_GatedDeltaNetSplit: slot not configured for fp16 qkv_proj");
+        at::Tensor x2 = x.view({R, -1});
+        at::Tensor xp2 = s.xp.narrow(0, 0, R);
+        copy2d_gr(x2, xp2, graph);
+        linear_gr(nullptr, qkv_proj_fp16, s.xp, s.qkv_pad, at::Tensor(), graph);
+    }
+    else
+        linear_gr(qkv_proj, nullptr, x, s.qkv, s.qkv_xh, graph);
 
     if (kda)
     {
@@ -250,9 +312,19 @@ void BC_GatedDeltaNetSplit::run_bszN_gr
 
     norm->run_gr(s.core_attn_out, s.core_attn_out_f, s.z, graph);
 
-    exl3_gemm_gr(s.core_attn_out_f, o_proj->trellis, y, o_proj->suh, s.o_xh, o_proj->svh, -1, o_proj->mcg, o_proj->mul1, 0, graph);
-    if (o_proj->bias)
-        add_gr(y, o_proj->bias.value(), y, graph);
+    // fp16 o_proj: same staging in reverse, the GEMM writes the static yp and the exact rows copy
+    // out to y at the graph tail (patched GP_copy2d_dst)
+    if (o_proj_fp16)
+    {
+        TORCH_CHECK(s.yp.defined() && y.size(2) == s.yp.size(1) && y.dtype() == s.yp.dtype(),
+                    "BC_GatedDeltaNetSplit: slot not configured for fp16 o_proj / y dtype mismatch");
+        linear_gr(nullptr, o_proj_fp16, s.caof_pad, s.yp, at::Tensor(), graph);
+        at::Tensor yp2 = s.yp.narrow(0, 0, R);
+        at::Tensor y2 = y.view({R, -1});
+        copy2d_gr(yp2, y2, graph);
+    }
+    else
+        linear_gr(o_proj, nullptr, s.core_attn_out_f, y, s.o_xh, graph);
 }
 
 void BC_GatedDeltaNetSplit::run_bszN
@@ -304,18 +376,26 @@ void BC_GatedDeltaNetSplit::run_bszN
 
     std::vector<PPTR> args;
     if (kda)
-        args = std::vector<PPTR>
-        {
-            PPTR(GP_gemm_A,         (void*) x.data_ptr()),          // qkv_proj input
-            PPTR(GP_gdn_ba_x,       (void*) x.data_ptr()),          // b_proj input
-            PPTR(GP_gdn_ba_x,       (void*) x.data_ptr()),          // f_a input
-            PPTR(GP_gdn_ba_x,       (void*) x.data_ptr()),          // g_a input
-            PPTR(GP_conv1d_state,   (void*) conv_state.data_ptr()),
-            PPTR(GP_conv1d_slots,   (void*) slots.data_ptr()),
-            PPTR(GP_gdn_rule_state, (void*) recurrent_state.data_ptr()),
-            PPTR(GP_gdn_rule_slots, (void*) slots.data_ptr()),
-            PPTR(GP_gemm_C,         (void*) y.data_ptr())           // o_proj output
-        };
+    {
+        // Sites in emission order (see run_bszN_gr). An fp16 projection contributes no gemm
+        // site; its staging copy is patched instead
+        args.reserve(9);
+        if (qkv_proj_fp16)
+            args.emplace_back(GP_copy2d_src, (void*) x.data_ptr());     // x -> xp
+        else
+            args.emplace_back(GP_gemm_A,     (void*) x.data_ptr());     // qkv_proj input
+        args.emplace_back(GP_gdn_ba_x,       (void*) x.data_ptr());     // b_proj input
+        args.emplace_back(GP_gdn_ba_x,       (void*) x.data_ptr());     // f_a input
+        args.emplace_back(GP_gdn_ba_x,       (void*) x.data_ptr());     // g_a input
+        args.emplace_back(GP_conv1d_state,   (void*) conv_state.data_ptr());
+        args.emplace_back(GP_conv1d_slots,   (void*) slots.data_ptr());
+        args.emplace_back(GP_gdn_rule_state, (void*) recurrent_state.data_ptr());
+        args.emplace_back(GP_gdn_rule_slots, (void*) slots.data_ptr());
+        if (o_proj_fp16)
+            args.emplace_back(GP_copy2d_dst, (void*) y.data_ptr());     // yp -> y
+        else
+            args.emplace_back(GP_gemm_C,     (void*) y.data_ptr());     // o_proj output
+    }
     else
         args = std::vector<PPTR>
         {

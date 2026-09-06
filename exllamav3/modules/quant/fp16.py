@@ -124,6 +124,10 @@ class LinearFP16:
         if self.bias is not None:
             self.bias = self.bias.to(self.swap_device)
         self.swap_device = None
+        # The BC object was bound to the host copy in __init__; rebind it to the device weight,
+        # or every captured graph reading bc->weight (BC-MLA / BC-KDA fp16 projections) would
+        # dereference host memory on TP shards (sliced loads go through the CPU)
+        self.bc = ext.BC_LinearFP16(self.weight, self.bias)
 
     def tp_export(self, plan, producer):
         return {
