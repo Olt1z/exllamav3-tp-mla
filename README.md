@@ -204,6 +204,48 @@ Em TP4 NCCL o mesmo prefill de 3.990 tokens fez 743 ms (5,4k tok/s no motor cru,
 passos de forward por segundo; nós fazemos 73 tok/s com ~2 aceitos, ~36 passos por segundo. O
 forward do ExLlamaV3 em TP4 é mais rápido que o do vLLM do card; a diferença é o drafter.
 
+## Etapa 5 do plano de desempenho (06/09/2026, 16:36–17:09Z): DFlash 2 no inteiro
+
+Logs e JSONs em `tests/bancada/saidas/20260906T1636Z-etapa5/`. Uma 4× RTX PRO 6000 S pelo hub
+(instância 50077792, Texas, Xeon 6767P, $7,01/h a preço fixo, 33 min, ~$4), TR3 do Flash a 1M,
+TabbyAPI do hub com `--draft-mode model` (rascunho `incoai/GLM-5.3-Flash-DFlash2`), depois
+relançado à mão na MESMA máquina para os outros arranjos. Régua `medir_tabby.py`, temperatura 0,
+linha `Metrics` do servidor:
+
+| Arranjo | curto (decode · aceito) | longo 5,4k (prefill · decode · aceito) | difícil 30k (prefill · decode · aceito) |
+| --- | --- | --- | --- |
+| DFlash 2, TP4 (hub, tap_shift 1) | 45–52 tok/s · 27–29 % | 2.852 T/s · 79 tok/s · 65 % | 1.199 T/s · 68 tok/s · 49 % |
+| DFlash 2, TP4, tap_shift 0 | 50–57 tok/s · 28–33 % | 2.781 T/s · 72 tok/s · 65 % | – |
+| DFlash 2, autosplit (sem TP) | 42 tok/s · 25–26 % | 2.110 T/s · 76 tok/s · 63 % | – |
+| MTP, TP4 | 41–49 tok/s · 59–60 % | 2.780 T/s · 48 tok/s · 86 % | 2.801 T/s · 53 tok/s · 96 % |
+
+**O rascunho carrega e funciona de ponta a ponta pelo hub** (primeira carga real pelo TabbyAPI:
+"Loading draft modules 7/7", 7 tokens rascunhados por rodada) e **ganha do MTP em todos os
+prompts nesta máquina**: +10–15 % no curto, +50–65 % no longo, +29 % no difícil. Mas não chega
+nem perto do card (145 tok/s): aceita 2,9 tokens por rodada no curto e 4,4 no difícil (o card
+diz 5,4 + 1), e cada rodada custa ~65 ms contra 26 ms do passo cru, porque verificar 8 tokens
+no MoE eager lê ~6× mais experts. Prompt de código sem raciocínio não foi medido: o template
+ignorou `enable_thinking: false` e as duas leituras (700 e 800 tokens de raciocínio) deram 32 %
+e 45 % — a variação entre leituras idênticas é grande.
+
+**Este host é lento para o decode** (Xeon 6767P, 3,9 GHz de turbo): o MTP fez 41–53 tok/s
+aqui contra 73–92 no EPYC 9555 da etapa 4, mesma placa. A comparação vale dentro da máquina.
+
+**Três hipóteses de integração testadas e descartadas:** (1) TP: sem TP a aceitação é a mesma;
+(2) índice dos taps: tap_shift 0 e 1 aceitam igual — o fork fica com 0, que é o que a referência
+(`hidden_states[layer_id + 1]`) e a captura do SGLang para o glm5_next (PR 36708: entrada da
+camada `layer_id + 1`, média dos 4 fluxos mHC) descrevem, e é o que `export_state_layers` já
+exporta; (3) representação: a média dos fluxos é a mesma do SGLang. O que a prova com taps
+aleatórios não cobre e ainda não foi comparado: o caminho do gerador com taps reais (KV do
+rascunho atualizado por rodada, posições, janela bilateral do `is_causal: false`).
+
+**Achado extra:** com o DFlash 2 o prefill de 30k caiu para 1.199 T/s (MTP na mesma máquina:
+2.801; em 5k os dois empatam). Superlinear no contexto — a exportação de estados ou o
+`update_kv_from_target` sobre 30k tokens; medir com `perfil_prefill.py --export`.
+
+**A exatidão do difícil (soma e agulha) falhou nos dois arranjos**: é do modelo a 4 bpw com 30k
+de contexto, não do rascunho (o alvo verifica, o decode é lossless).
+
 ## Régua de desempenho
 
 Três prompts fixos, sempre os mesmos, e uma linha por prompt. É o "antes" e o "depois" de toda

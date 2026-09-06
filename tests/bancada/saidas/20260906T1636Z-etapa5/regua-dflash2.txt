@@ -1,0 +1,9 @@
+=== régua dflash2 · 16:46:10Z
+aquecimento (compila Triton, não conta)…
+curto/1   entrada     67 tok · saída   600 tok · prefill   446.7 tok/s · decode   45.3 tok/s · draft  27 % · 13.4 s (servidor)
+curto/2   entrada     68 tok · saída   600 tok · prefill   523.1 tok/s · decode   51.9 tok/s · draft  29 % · 11.7 s (servidor)
+longo     entrada   5447 tok · saída   200 tok · prefill  2851.8 tok/s · decode   78.7 tok/s · draft  65 % · 4.5 s (servidor)
+dificil   entrada  30134 tok · saída  2000 tok · prefill  1198.7 tok/s · decode   68.0 tok/s · draft  49 % · 54.7 s (servidor)
+          exatidão: soma ERRADA (esperado 5774297) · agulha ERRADA (esperado CHAVE-07E7E4)
+gravado: /workspace/regua-dflash2.json
+=== fim dflash2 · 16:49:41Z

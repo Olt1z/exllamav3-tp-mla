@@ -1,0 +1,50 @@
+[
+ {
+  "prompt": "curto/1",
+  "entrada_tok": 67,
+  "saida_tok": 600,
+  "prefill_tps": 446.67,
+  "decode_tps": 45.33,
+  "draft_pct": 27.32,
+  "fonte": "servidor",
+  "segundos": 13.4,
+  "cache_tok": 0.0
+ },
+ {
+  "prompt": "curto/2",
+  "entrada_tok": 68,
+  "saida_tok": 600,
+  "prefill_tps": 523.08,
+  "decode_tps": 51.91,
+  "draft_pct": 28.57,
+  "fonte": "servidor",
+  "segundos": 11.7,
+  "cache_tok": 0.0
+ },
+ {
+  "prompt": "longo",
+  "entrada_tok": 5447,
+  "saida_tok": 200,
+  "prefill_tps": 2851.83,
+  "decode_tps": 78.7,
+  "draft_pct": 65.08,
+  "fonte": "servidor",
+  "segundos": 4.5,
+  "cache_tok": 0.0
+ },
+ {
+  "prompt": "dificil",
+  "entrada_tok": 30134,
+  "saida_tok": 2000,
+  "prefill_tps": 1198.65,
+  "decode_tps": 67.96,
+  "draft_pct": 48.51,
+  "fonte": "servidor",
+  "segundos": 54.7,
+  "cache_tok": 0.0,
+  "exato": {
+   "soma": false,
+   "agulha": false
+  }
+ }
+]

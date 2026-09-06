@@ -15,15 +15,19 @@ from ..modules.arch_specific.dflash2 import GroupedDynamicCausalConv, ConvSandwi
 #     path through them (replaces the per-position argmax of sample_from_state);
 #   - `is_causal: false` in the config: the sliding-window layers attend both ways inside the
 #     block (the reference builds a two-sided window mask), so the window here is (sw, sw).
-# Everything else -- target taps (+1 like the original release; the reference reads
-# hidden_states[layer_id + 1]), block size, vocab, hidden sizes -- comes from the checkpoint's
-# config.json, which is what makes one reader serve every DFlash 2 target.
+# Everything else -- target taps, block size, vocab, hidden sizes -- comes from the checkpoint's
+# config.json, which is what makes one reader serve every DFlash 2 target. Taps use the raw ids:
+# the reference reads hidden_states[layer_id + 1] (output of layer layer_id), and SGLang's
+# glm5_next capture (PR 36708) takes the layer input at index layer_id + 1, i.e. the same
+# tensor, as the unweighted mean of the mHC streams -- exactly what export_state_layers[layer_id]
+# yields here. Measured on the TR3 (06/09/2026): shift 0 and 1 accept alike (28-33 % short,
+# 65 % at 5k), so the index is set by the reference, not by the number.
 # The generator is untouched: it still gets one sequence per block and verifies it as before.
 
 
 class DFlash2Config(DFlashConfig):
     arch_string = "DFlash2DraftModel"
-    tap_shift = 1
+    tap_shift = 0
 
     def __init__(self, directory: str, **kwargs):
         super().__init__(directory, {"text": DFlash2Model}, **kwargs)

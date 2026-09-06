@@ -1,0 +1,35 @@
+[
+ {
+  "prompt": "curto/1",
+  "entrada_tok": 65,
+  "saida_tok": 600,
+  "prefill_tps": 101.56,
+  "decode_tps": 56.65,
+  "draft_pct": 33.33,
+  "fonte": "servidor",
+  "segundos": 11.3,
+  "cache_tok": 0.0
+ },
+ {
+  "prompt": "curto/2",
+  "entrada_tok": 68,
+  "saida_tok": 600,
+  "prefill_tps": 485.71,
+  "decode_tps": 50.06,
+  "draft_pct": 28.36,
+  "fonte": "servidor",
+  "segundos": 12.2,
+  "cache_tok": 0.0
+ },
+ {
+  "prompt": "longo",
+  "entrada_tok": 5450,
+  "saida_tok": 200,
+  "prefill_tps": 2780.61,
+  "decode_tps": 71.99,
+  "draft_pct": 65.08,
+  "fonte": "servidor",
+  "segundos": 4.8,
+  "cache_tok": 0.0
+ }
+]
