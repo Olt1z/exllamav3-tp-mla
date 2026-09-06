@@ -102,6 +102,11 @@ def main():
     # --- B. gerador de ponta a ponta -------------------------------------------------------------
     del ref, past, out_ref
     torch.cuda.empty_cache()
+    if max(cfg_d.target_layer_ids) >= cfg_t.num_hidden_layers:
+        print(f"B. pulado: o rascunho lê as camadas {cfg_d.target_layer_ids} e o alvo tem {cfg_t.num_hidden_layers}; "
+              "a mecânica no gerador e a aceitação só se medem no modelo inteiro")
+        print("OK" if ok_a else "FALHOU: estado ou caminho divergem da referência")
+        sys.exit(0 if ok_a else 1)
     prompt = "Explique em três frases por que o céu é azul."
     from exllamav3.generator.sampler.presets import ArgmaxSampler
     gen = Generator(model = target, cache = tcache, tokenizer = tokenizer, draft_model = draft, draft_cache = dcache,
