@@ -247,6 +247,15 @@ compila os kernels Triton dos caminhos MLA e KDA em cada rank, e o rank mestre a
 draft MTP, então um rank atrasado pode estourar 90 s numa máquina sã. O backend NCCL só usa esse
 prazo nos coletivos que caem no fallback nativo (broadcast e gather).
 
+**Travamento conhecido, ainda sem causa:** o primeiro processo TP numa máquina recém-instalada
+trava de vez em quando no primeiro prefill, com os dois ranks girando em `pg_all_reduce_cpu_kernel`
+e o auxiliar em `CPU reduce wait timeout`, até o prazo estourar. Visto em 06/09/2026 duas vezes
+(hosts e commits diferentes, v1.4.6 e v1.4.7); nas duas o processo TP seguinte, na mesma máquina,
+passou com KL normal. A hipótese é a primeira compilação Triton dentro de um forward em TP: uma
+alocação bloqueante na CPU de um rank enquanto o kernel de espera do outro gira na GPU. A bancada
+contorna com prazo curto e até três tentativas no 4c. O hub, com NCCL, carregou o TR3 inteiro
+três vezes no mesmo dia sem travar.
+
 ## Branches e upstream
 
 - `tp-mla`: o trabalho, sobre a tag `v1.4.7` do upstream desde 06/09/2026 (nasceu na `v1.4.6`;

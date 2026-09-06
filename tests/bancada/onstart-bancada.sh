@@ -81,8 +81,14 @@ marco "4b. base com o fio bf16 simulado (régua justa para saída fp32)"
 env $BASE python3 tests/tp_mla_smoke.py -m /workspace/corte --simular-fio-bf16 --compare /workspace/base.pt --save /workspace/sim.pt | tee /workspace/4b.txt
 set +e
 marco "4c. TP, todas as placas"
-python3 tests/tp_mla_smoke.py -m /workspace/corte --tp --compare /workspace/sim.pt --save /workspace/tp.pt | tee /workspace/4c.txt
-echo "4c saiu com $?"
+# O primeiro processo TP da máquina trava de vez em quando num coletivo do backend nativo (visto
+# em 06/09 duas vezes, em hosts e commits diferentes; o segundo processo passa sempre). Prazo
+# curto e até três tentativas: o cache do Triton no disco sobrevive entre elas.
+for tentativa in 1 2 3; do
+  EXLLAMA_TP_SYNC_TIMEOUT=180 python3 tests/tp_mla_smoke.py -m /workspace/corte --tp --compare /workspace/sim.pt --save /workspace/tp.pt | tee /workspace/4c.txt
+  RC=${PIPESTATUS[0]}; echo "4c tentativa $tentativa saiu com $RC"
+  [ "$RC" -eq 0 ] && break
+done
 marco "4d. TP com contexto longo (DSA esparso)"
 env $BASE python3 tests/tp_mla_smoke.py -m /workspace/corte --simular-fio-bf16 --prefill-tokens 3000 --save /workspace/base-longo.pt | tee /workspace/4d-base.txt
 python3 tests/tp_mla_smoke.py -m /workspace/corte --tp --compare /workspace/base-longo.pt --prefill-tokens 3000 | tee /workspace/4d.txt
