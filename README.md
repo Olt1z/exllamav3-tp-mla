@@ -52,7 +52,7 @@ Custo aceito: cada rank guarda o latente inteiro (576 valores por token por cama
 - [x] 4. `forward`: all-reduce depois do `o_proj` e cache por rank
 - [x] 5. `supports_tp: True` no `glm_moe_dsa` (escrito; só conta como provado depois do 6)
 - [x] 6. Teste de fumaça com 2 placas no corte de 4 camadas do GLM-5.3 (05/09, 2× RTX 3090; ver "Resultado da bancada")
-- [ ] 6b. Corte do Flash (3 KDA + 1 MLA), mesmo teste, flag no `glm5_next`
+- [x] 6b. Corte do Flash (3 KDA + 1 MLA), mesmo teste, flag no `glm5_next` (06/09, 2× RTX 3090; ver "Resultado da bancada, Flash")
 - [ ] 6c. DeepSeek V3 e Mistral-4: corte, mesmo teste, flag
 - [ ] 6d. Decode em grafo CUDA no rank TP (hoje desligado por `has_split_cache`) e tokens/s antes/depois
 - [ ] 7. PR para o upstream (fase 1)
@@ -85,6 +85,22 @@ grandes são provados por um corte de poucas camadas quantizado pelo hub.
   tensor fp16 (classe `kv-b`). O corte publicado já está reparado.
 - Velocidade no corte não diz nada útil (4 camadas, latência de lançamento): 180 tok/s numa placa,
   230 em duas. A medida que vale é no modelo inteiro, etapa 7.
+
+## Resultado da bancada, Flash (06/09/2026, 2× RTX 3090, corte de 4 camadas do TR3)
+
+Corte por bytes do `brandonmusic/GLM-5.3-Flash-tr3-4bpw`, sem requantizar: camadas 0–3 (3 KDA
+densas + 1 MLA NoPE com k-pool e MoE de 288 experts), publicado em
+`Olt1z/GLM-5.3-Flash-tr3-4bpw-corte-4L`. `tests/test_tp_block_import.py` apontou o defeito em
+minutos: a atenção KDA importada com o plano cheio diferia do original em 73–91 % relativo, MLA e
+MoE eram exatos. Causa: `GatedRMSNorm.tp_export` não levava `gate_activation`, e a norma de saída
+do KDA (sigmoid) virava silu no rank. Com a flag, KDA importado exato (rel ≤ 2,6e-6) e o TP em 2
+placas contra a base: KL 0,00009 no prompt curto, 0,00002 com 2.974 tokens, top-1 igual em 100 %.
+
+Antes disso, no modelo inteiro em 4× RTX PRO 6000 (TabbyAPI pelo hub), a carga e a geração em TP4
+só chegaram ao fim depois de mais três consertos: `ulimit -n` (120 shards abertos), `HyperHead`
+em modo de média (GLM-5.3 colapsa os fluxos por média, sem tensores) e as cabeças MTP do GLM-5.3 e
+do Flash amostrando pelo `lm_head` dos ranks (`tp_dispatch_lm_head_argmax`). A velocidade em TP4
+ainda não foi medida com a saída correta: etapa 7.
 
 ## Timeout dos coletivos nativos
 
