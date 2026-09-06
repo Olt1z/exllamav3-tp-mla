@@ -10,7 +10,7 @@ netos (projeções, experts) com eventos CUDA e soma o tempo por classe. Sai uma
 processos dos ranks, então o perfil por módulo fica vazio e só o total vale: a diferença entre
 o total em TP e o total numa placa é o que a comunicação e a divisão custam.
 """
-import sys, os, argparse, time, collections
+import sys, os, argparse, time, collections, contextlib
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import torch
@@ -27,10 +27,16 @@ class Perfil:
     def envolver(self, obj, metodo, rotulo):
         orig = getattr(obj, metodo)
         def f(*a, **k):
-            e0, e1 = torch.cuda.Event(enable_timing = True), torch.cuda.Event(enable_timing = True)
-            e0.record()
+            # os eventos vão no stream do dispositivo do módulo: em autosplit cada camada mora
+            # numa placa, e um evento gravado na placa errada mede o vazio
+            dev = getattr(obj, "device", None)
+            ctx = torch.cuda.device(dev) if dev is not None else contextlib.nullcontext()
+            with ctx:
+                e0, e1 = torch.cuda.Event(enable_timing = True), torch.cuda.Event(enable_timing = True)
+                e0.record()
             y = orig(*a, **k)
-            e1.record()
+            with ctx:
+                e1.record()
             self.eventos[rotulo].append((e0, e1))
             return y
         setattr(obj, metodo, f)
