@@ -99,8 +99,15 @@ placas contra a base: KL 0,00009 no prompt curto, 0,00002 com 2.974 tokens, top-
 Antes disso, no modelo inteiro em 4× RTX PRO 6000 (TabbyAPI pelo hub), a carga e a geração em TP4
 só chegaram ao fim depois de mais três consertos: `ulimit -n` (120 shards abertos), `HyperHead`
 em modo de média (GLM-5.3 colapsa os fluxos por média, sem tensores) e as cabeças MTP do GLM-5.3 e
-do Flash amostrando pelo `lm_head` dos ranks (`tp_dispatch_lm_head_argmax`). A velocidade em TP4
-ainda não foi medida com a saída correta: etapa 7.
+do Flash amostrando pelo `lm_head` dos ranks (`tp_dispatch_lm_head_argmax`).
+
+**Modelo inteiro, 06/09/2026, 4× RTX PRO 6000 S (sem NVLink), TabbyAPI pelo hub, commit dfc2ad8,
+backend NCCL, `--draft-mode mtp`:** saída correta (raciocínio e resposta coerentes em português).
+Carga em TP4 em 1 min 05 s. Decode de 596 tokens a 63,8 tok/s (44,1 na primeira rodada quente),
+draft MTP aceito em 48–66 %; prefill de 5.321 tokens a 312 tok/s, seguido de decode a 45 tok/s
+com a resposta certa sobre o texto. A primeira requisição gasta ~50 s compilando os kernels
+Triton. Referência do README do TR3: 145–151 tok/s em 2× PRO 6000 com DFlash2, outro drafter
+e sem TP; a comparação justa (mesma máquina, com e sem `--tensor-parallel`) fica para a etapa 6d.
 
 ## Timeout dos coletivos nativos
 
