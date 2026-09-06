@@ -1,0 +1,31 @@
+Model name:                              AMD EPYC 9654 96-Core Processor
+Mem:             117           1          98           0          17         114
+--- tudo na placa
+placa · 4096                 prefill   4096 tok em    7265 ms =    564 tok/s · decode 128 tok = 252.6 tok/s
+placa · 16384                prefill  16384 tok em     538 ms =  30465 tok/s · decode 128 tok = 254.3 tok/s
+placa · 30000                prefill  30000 tok em     949 ms =  31616 tok/s · decode 128 tok = 254.6 tok/s
+--- EXL3_MOE_CPU_OFFLOAD=1
+ -- CPU MoE worker started: 1 layers, avx512-vbmi, 24 threads
+EXL3_MOE_CPU_OFFLOAD=1 · 4096 prefill   4096 tok em     171 ms =  24005 tok/s · decode 128 tok = 214.6 tok/s
+EXL3_MOE_CPU_OFFLOAD=1 · 16384 prefill  16384 tok em     551 ms =  29762 tok/s · decode 128 tok = 215.5 tok/s
+EXL3_MOE_CPU_OFFLOAD=1 · 30000 prefill  30000 tok em    1000 ms =  29985 tok/s · decode 128 tok = 216.0 tok/s
+--- EXL3_MOE_CPU_SPLIT=64
+ -- CPU MoE worker started: 1 layers, avx512-vbmi, 24 threads
+EXL3_MOE_CPU_SPLIT=64 · 4096 prefill   4096 tok em     173 ms =  23715 tok/s · decode 128 tok = 241.8 tok/s
+EXL3_MOE_CPU_SPLIT=64 · 16384 prefill  16384 tok em     583 ms =  28126 tok/s · decode 128 tok = 251.1 tok/s
+EXL3_MOE_CPU_SPLIT=64 · 30000 prefill  30000 tok em     970 ms =  30936 tok/s · decode 128 tok = 241.7 tok/s
+--- EXL3_MOE_CPU_SPLIT=128
+ -- CPU MoE worker started: 1 layers, avx512-vbmi, 24 threads
+EXL3_MOE_CPU_SPLIT=128 · 4096 prefill   4096 tok em     157 ms =  26079 tok/s · decode 128 tok = 231.0 tok/s
+EXL3_MOE_CPU_SPLIT=128 · 16384 prefill  16384 tok em     561 ms =  29209 tok/s · decode 128 tok = 245.1 tok/s
+EXL3_MOE_CPU_SPLIT=128 · 30000 prefill  30000 tok em    1003 ms =  29899 tok/s · decode 128 tok = 235.6 tok/s
+--- EXL3_MOE_CPU_SPLIT=192
+ -- CPU MoE worker started: 1 layers, avx512-vbmi, 24 threads
+EXL3_MOE_CPU_SPLIT=192 · 4096 prefill   4096 tok em     161 ms =  25410 tok/s · decode 128 tok = 227.2 tok/s
+EXL3_MOE_CPU_SPLIT=192 · 16384 prefill  16384 tok em     574 ms =  28560 tok/s · decode 128 tok = 236.2 tok/s
+EXL3_MOE_CPU_SPLIT=192 · 30000 prefill  30000 tok em    1003 ms =  29920 tok/s · decode 128 tok = 232.7 tok/s
+--- EXL3_MOE_CPU_SPLIT=256
+ -- CPU MoE worker started: 1 layers, avx512-vbmi, 24 threads
+EXL3_MOE_CPU_SPLIT=256 · 4096 prefill   4096 tok em     159 ms =  25742 tok/s · decode 128 tok = 219.0 tok/s
+EXL3_MOE_CPU_SPLIT=256 · 16384 prefill  16384 tok em     615 ms =  26642 tok/s · decode 128 tok = 229.6 tok/s
+EXL3_MOE_CPU_SPLIT=256 · 30000 prefill  30000 tok em    1009 ms =  29722 tok/s · decode 128 tok = 223.5 tok/s

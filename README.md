@@ -312,6 +312,44 @@ e independente do fp16.
 Falta o TR3 inteiro pelo hub, com a régua: o ganho de 37–69 % no corte (4 camadas) precisa ser
 medido nas 45, onde o MoE (19 % do decode) já rodava em grafo e o custo por token era 26 ms.
 
+## Etapa 8 do plano de desempenho (06/09/2026, 22:11–22:30Z): experts na RAM, no corte em mul1
+
+Bancada de 1× RTX 6000 Ada (49 GB) num host EPYC 9654 (48 núcleos visíveis, AVX-512 VBMI, 118 GB de RAM,
+instância 50103047, $0,63/h, ~$0,25), corte de 4 camadas do Flash quantizado em EXL3 4 bpw **mul1** pela esteira
+do hub (`Olt1z/GLM-5.3-Flash-podado-4L-EXL3-4.0bpw-bl4ck0ut`, reparado na máquina: ver abaixo). Offload nativo
+do ExLlamaV3 por variável de ambiente (`EXL3_MOE_CPU_OFFLOAD=1` = camada MoE inteira na CPU;
+`EXL3_MOE_CPU_SPLIT=N` = os N experts de cauda de cada camada na CPU, colocação dinâmica), modo layer-split,
+24 threads de worker (padrão: metade dos núcleos). `perfil_gerador.py`, decode de 128 tokens.
+Saídas em `tests/bancada/saidas/20260906T2211Z-etapa8-corte/`.
+
+| Arranjo (1 camada MoE de 288 experts) | decode | prefill 16k | prefill 30k |
+| --- | --- | --- | --- |
+| tudo na placa | 254 tok/s (3,94 ms/token) | 30,5k tok/s | 31,6k tok/s |
+| 64 experts na CPU | 242–251 | 28,1k | 30,9k |
+| 128 na CPU | 231–245 | 29,2k | 29,9k |
+| 192 na CPU | 227–236 | 28,6k | 29,9k |
+| 256 na CPU | 219–230 | 26,6k | 29,7k |
+| camada MoE inteira na CPU | 215–216 (4,65 ms/token) | 29,8k | 30,0k |
+
+**O que isso diz.** (1) **O prefill não paga**: com a camada inteira na RAM ele fica em 30k tok/s contra 31,6k,
+porque o motor faz streaming dos experts pela placa no prefill em vez de calculá-los na CPU. A conta do plano
+("600–1.200 tok/s") estava errada para melhor. (2) **A camada MoE inteira na CPU custa ~0,7 ms a mais por token**
+neste host (8 de 288 experts ativos, mul1, 24 threads); descontando o que a placa gastava nela, a camada na CPU
+sai em ~1 ms por token. Extrapolando para as 41 camadas MoE do Flash: ~40 ms por token só de experts na RAM,
+ou seja, um teto de ~25 tok/s antes do resto da rede (atenção e densas na placa, ~20–30 ms num arranjo de uma
+placa) → **~15 tok/s com todos os experts na RAM, e proporcionalmente mais com `moe_cpu_split` parcial**
+(metade dos experts na CPU ≈ 0,4 ms/camada ≈ 25–30 tok/s). Um host com mais canais de memória e mais threads
+sobe isso; é a régua a repetir no inteiro. (3) A colocação dinâmica (hot/cold) já funciona: o worker anuncia
+`[160..288) of 288` e o intervalo migra conforme o roteamento.
+
+**Três defeitos achados no caminho, todos fora do offload.** O artefato da esteira para o Flash não carregava no
+motor: (a) as hyper-connections saíram com os nomes de módulo do transformers 5.16 (`attn_hc.fn`) em vez dos do
+checkpoint (`hc_attn_fn`), idem `self_attn.forget_gate.{f_a_proj,f_b_proj,A_log,dt_bias}` → `reparar_nomes.py`
+(36 tensores); (b) q/k/v do KDA foram quantizados em separado, com `suh` distintos, e o motor os funde num
+`qkv_proj` → `reparar_qkv_kda.py` restaura os 9 pesos em BF16 do corte BF16; (c) no fork, `Linear.load` tentava o
+carregador EXL3 com a `alt_key` em lista e estourava antes do fp16 → corrigido em d59e9c8. Os reparos estão no
+plano da esteira rápida (`plans/2026-09-06-esteira-de-quantizacao-rapida.md`).
+
 ## Régua de desempenho
 
 Três prompts fixos, sempre os mesmos, e uma linha por prompt. É o "antes" e o "depois" de toda

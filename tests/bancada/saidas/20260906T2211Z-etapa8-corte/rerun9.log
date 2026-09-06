@@ -1,0 +1,57 @@
+nada a reparar
+renomeados: 0 []
+módulos KDA q/k/v em EXL3: 0
+=== 9. etapa 8: experts na RAM · 2026-09-06T22:26:44Z
+CPU(s):                                  48
+Model name:                              AMD EPYC 9654 96-Core Processor
+Thread(s) per core:                      1
+Flags:                                   fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm rep_good nopl cpuid extd_apicid tsc_known_freq pni pclmulqdq ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm cmp_legacy svm cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw perfctr_core invpcid_single ssbd ibrs ibpb stibp ibrs_enhanced vmmcall fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid avx512f avx512dq rdseed adx smap avx512ifma clflushopt clwb avx512cd sha_ni avx512bw avx512vl xsaveopt xsavec xgetbv1 xsaves avx512_bf16 clzero xsaveerptr wbnoinvd arat npt lbrv nrip_save tsc_scale vmcb_clean flushbyasid pausefilter pfthreshold v_vmsave_vmload vgif avx512vbmi umip pku ospke avx512_vbmi2 gfni vaes vpclmulqdq avx512_vnni avx512_bitalg avx512_vpopcntdq la57 rdpid fsrm flush_l1d arch_capabilities
+               total        used        free      shared  buff/cache   available
+Mem:             117           1          98           0          17         114
+--- tudo na placa
+placa · 4096                 prefill   4096 tok em    7265 ms =    564 tok/s · decode 128 tok = 252.6 tok/s
+placa · 16384                prefill  16384 tok em     538 ms =  30465 tok/s · decode 128 tok = 254.3 tok/s
+placa · 30000                prefill  30000 tok em     949 ms =  31616 tok/s · decode 128 tok = 254.6 tok/s
+FIM_PERFIL_GERADOR
+--- EXL3_MOE_CPU_OFFLOAD=1
+ -- CPU-offloaded experts (worker): model.language_model.layers.3.mlp
+ -- CPU MoE worker started: 1 layers, avx512-vbmi, 24 threads
+EXL3_MOE_CPU_OFFLOAD=1: dispositivos [], cache 32768, rascunho não
+EXL3_MOE_CPU_OFFLOAD=1 · 4096 prefill   4096 tok em     171 ms =  24005 tok/s · decode 128 tok = 214.6 tok/s
+EXL3_MOE_CPU_OFFLOAD=1 · 16384 prefill  16384 tok em     551 ms =  29762 tok/s · decode 128 tok = 215.5 tok/s
+EXL3_MOE_CPU_OFFLOAD=1 · 30000 prefill  30000 tok em    1000 ms =  29985 tok/s · decode 128 tok = 216.0 tok/s
+FIM_PERFIL_GERADOR
+--- EXL3_MOE_CPU_SPLIT=64
+ -- CPU split experts (worker, dynamic): model.language_model.layers.3.mlp [224..288) of 288
+ -- CPU MoE worker started: 1 layers, avx512-vbmi, 24 threads
+EXL3_MOE_CPU_SPLIT=64: dispositivos [], cache 32768, rascunho não
+EXL3_MOE_CPU_SPLIT=64 · 4096 prefill   4096 tok em     173 ms =  23715 tok/s · decode 128 tok = 241.8 tok/s
+EXL3_MOE_CPU_SPLIT=64 · 16384 prefill  16384 tok em     583 ms =  28126 tok/s · decode 128 tok = 251.1 tok/s
+EXL3_MOE_CPU_SPLIT=64 · 30000 prefill  30000 tok em     970 ms =  30936 tok/s · decode 128 tok = 241.7 tok/s
+FIM_PERFIL_GERADOR
+--- EXL3_MOE_CPU_SPLIT=128
+ -- CPU split experts (worker, dynamic): model.language_model.layers.3.mlp [160..288) of 288
+ -- CPU MoE worker started: 1 layers, avx512-vbmi, 24 threads
+EXL3_MOE_CPU_SPLIT=128: dispositivos [], cache 32768, rascunho não
+EXL3_MOE_CPU_SPLIT=128 · 4096 prefill   4096 tok em     157 ms =  26079 tok/s · decode 128 tok = 231.0 tok/s
+EXL3_MOE_CPU_SPLIT=128 · 16384 prefill  16384 tok em     561 ms =  29209 tok/s · decode 128 tok = 245.1 tok/s
+EXL3_MOE_CPU_SPLIT=128 · 30000 prefill  30000 tok em    1003 ms =  29899 tok/s · decode 128 tok = 235.6 tok/s
+FIM_PERFIL_GERADOR
+--- EXL3_MOE_CPU_SPLIT=192
+ -- CPU split experts (worker, dynamic): model.language_model.layers.3.mlp [96..288) of 288
+ -- CPU MoE worker started: 1 layers, avx512-vbmi, 24 threads
+EXL3_MOE_CPU_SPLIT=192: dispositivos [], cache 32768, rascunho não
+EXL3_MOE_CPU_SPLIT=192 · 4096 prefill   4096 tok em     161 ms =  25410 tok/s · decode 128 tok = 227.2 tok/s
+EXL3_MOE_CPU_SPLIT=192 · 16384 prefill  16384 tok em     574 ms =  28560 tok/s · decode 128 tok = 236.2 tok/s
+EXL3_MOE_CPU_SPLIT=192 · 30000 prefill  30000 tok em    1003 ms =  29920 tok/s · decode 128 tok = 232.7 tok/s
+FIM_PERFIL_GERADOR
+--- EXL3_MOE_CPU_SPLIT=256
+ -- CPU split experts (worker, dynamic): model.language_model.layers.3.mlp [32..288) of 288
+ -- CPU MoE worker started: 1 layers, avx512-vbmi, 24 threads
+EXL3_MOE_CPU_SPLIT=256: dispositivos [], cache 32768, rascunho não
+EXL3_MOE_CPU_SPLIT=256 · 4096 prefill   4096 tok em     159 ms =  25742 tok/s · decode 128 tok = 219.0 tok/s
+EXL3_MOE_CPU_SPLIT=256 · 16384 prefill  16384 tok em     615 ms =  26642 tok/s · decode 128 tok = 229.6 tok/s
+EXL3_MOE_CPU_SPLIT=256 · 30000 prefill  30000 tok em    1009 ms =  29722 tok/s · decode 128 tok = 223.5 tok/s
+FIM_PERFIL_GERADOR
+9 terminou
+=== FIM9
