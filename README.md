@@ -249,7 +249,11 @@ prazo nos coletivos que caem no fallback nativo (broadcast e gather).
 
 ## Branches e upstream
 
-- `tp-mla`: o trabalho, criado da tag `v1.4.6` do upstream.
+- `tp-mla`: o trabalho, sobre a tag `v1.4.7` do upstream desde 06/09/2026 (nasceu na `v1.4.6`;
+  o rebase teve um conflito só, o conserto do `tp_import_split_n` do fp16 que o upstream fez
+  igual, e o `timeout.cuh` ficou com o nosso prazo configurável mais o abort pegajoso deles).
+- `tp-mla-v1.4.6`: a história anterior ao rebase, mantida porque o hub fixou commits dela
+  (dfc2ad8) e eles precisam continuar alcançáveis.
 - `master`: espelho do upstream, sem commits nossos.
 
 O fork do GitHub vem sem as tags. Antes de qualquer checkout por tag:
@@ -263,7 +267,8 @@ Rebase sobre cada tag nova do upstream até o merge do PR:
 
 ```sh
 git fetch upstream --tags
-git rebase v1.4.7 tp-mla
+git branch tp-mla-v1.4.7 tp-mla     # guarda a história que o hub fixa
+git rebase v1.4.8 tp-mla
 ```
 
 ## Instalar (bancada)
