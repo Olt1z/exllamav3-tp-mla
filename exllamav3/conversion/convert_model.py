@@ -329,7 +329,10 @@ def get_base_model(args):
     assert model.caps.get("can_quantize", True), "Cannot quantize this model type."
     print(f" -- Created model instance:")
     print(model.get_layout_tree(4))
-    mtp_model = model.from_config(config, component = "mtp") if "mtp" in config.model_classes else None
+    # Architectures register the MTP class unconditionally; a checkpoint with num_nextn_predict_layers = 0
+    # (e.g. a layer-pruned proof model) has no MTP tensors to quantize or copy
+    has_mtp = "mtp" in config.model_classes and getattr(config, "num_mtp_layers", 1) > 0
+    mtp_model = model.from_config(config, component = "mtp") if has_mtp else None
     if mtp_model:
         print(f" -- Created MTP model instance:")
         print(mtp_model.get_layout_tree(4))
