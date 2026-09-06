@@ -171,14 +171,21 @@ do draft:
 python tests/bancada/medir_tabby.py http://127.0.0.1:5000 $TABBY_API_TOKEN --log /caminho/do/stdout.log
 ```
 
-Linha de base, 06/09/2026, TR3 do Flash, 4× RTX PRO 6000 S, TP4, NCCL, `--draft-mode mtp`,
-commit dfc2ad8 (medida à mão com os mesmos prompts, antes do script existir):
+Linha de base, 06/09/2026 04:13Z, TR3 do Flash, 4× RTX PRO 6000 S (instância 50027193), TP4,
+NCCL, `--draft-mode mtp`, hub em dfc2ad8, medida pelo script com nonce por pedido e lida das
+linhas `Metrics` do servidor:
 
 | Prompt | Entrada | Saída | Prefill | Decode | Draft aceito |
 | --- | --- | --- | --- | --- | --- |
-| curto (2ª rodada) | 52 tok | 596 tok | – | 63,8 tok/s | 48 % |
-| longo | 5.321 tok | 200 tok | 312 tok/s | 45 tok/s | – |
-| difícil (1.000 registros) | ~31k tok | ~20k tok | 552 tok/s (com cache de prompt) | 31–87 tok/s | 85–91 % |
+| curto ×2 | 67–69 tok | 596 tok | – | 73–75 tok/s | 57–60 % |
+| longo | 5.448 tok | 196 tok | 4.223 tok/s | 82 tok/s | 85 % |
+| difícil (1.000 registros) | 30.135 tok | 1.996 tok | 4.837 tok/s | 92 tok/s | 97 % |
+
+Duas armadilhas que a régua aprendeu na mesma sessão: os 312 tok/s de prefill medidos à mão em
+06/09 01:46Z eram a compilação Triton dos kernels de chunk na primeira leitura longa (5.436
+tokens em 11,4 s; a segunda leitura sem cache fez 5.448 em 1,3 s), e a segunda rodada do mesmo
+prompt bate no cache de prompt do TabbyAPI (5.376 de 5.436 tokens em cache) e mede um prefill
+de 60 tokens. Por isso o script aquece com um prompt longo e prefixa cada pedido com um nonce.
 
 Referência a bater (card do TR3, vLLM customizado, 2× PRO 6000 WS, DFlash2, grafos CUDA):
 145–151 tok/s de decode e 6,2k tok/s de prefill.
