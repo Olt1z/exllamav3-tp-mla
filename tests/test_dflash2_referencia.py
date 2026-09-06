@@ -78,7 +78,7 @@ def main():
     ref_ids = getattr(ref, "target_layer_ids")
     print(f"referência: taps {ref_ids} (crus) → fork usa {cfg_d.target_layer_ids}")
     bloco = torch.cat((ancora, torch.full((1, cfg_d.block_size - 1), cfg_d.mask_token_id, dtype = torch.long)), dim = 1)
-    emb = target.modules[0].forward(bloco.to(dev), {}).to(dev)
+    emb = target.modules[0].forward(bloco, {}).to(dev)  # o embedding do fork mora na CPU (caps x_cpu)
     th = torch.cat(taps, dim = -1).to(torch.bfloat16)
     pos = torch.arange(L + cfg_d.block_size, device = dev)[None]
     from transformers import DynamicCache
