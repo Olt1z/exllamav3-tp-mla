@@ -439,7 +439,10 @@ class Linear(Module):
         keys = [self.key]
         if self.alt_key:
             keys += [self.alt_key]
-        if any(self.load_exl3(k) for k in keys): return
+        # A list key (fused q/k/v stored as separate tensors, e.g. GLM-5.3-Flash KDA quantized from
+        # a BF16 checkpoint) can only be assembled by the fp16 loader: three trellises carry three
+        # different input sign vectors and cannot be concatenated. Skip it here instead of raising
+        if any(self.load_exl3(k) for k in keys if isinstance(k, str)): return
         if any(self.load_fp16(k) for k in keys): return
         raise ValueError(f"No tensors found for {self.key} matching supported quantization format.")
 
