@@ -70,7 +70,7 @@ du -sh /workspace/corte
 # Artefato da esteira antiga com kv_b_proj em treliça: repara antes de carregar
 python3 tests/bancada/reparar_kv_b_proj.py /workspace/corte
 
-if [ -z "${SO_7:-}" ] && [ -z "${SO_8:-}" ]; then
+if [ -z "${SO_7:-}" ] && [ -z "${SO_8:-}" ] && [ -z "${SO_9:-}" ]; then
 marco "3b. teste por bloco: original × importado por TP, bloco a bloco e filho a filho"
 env $BASE python3 tests/test_tp_block_import.py /workspace/corte 2>&1 | grep -v -E "it/s\]|━━" | tee /workspace/3b.txt
 echo "3b saiu com ${PIPESTATUS[0]}"
@@ -168,6 +168,24 @@ if [ -n "${ETAPA3:-}" ] || [ -n "${SO_8:-}" ]; then
   echo "8 terminou"
 fi
 
+# 9. Etapa 8 do plano: experts na RAM (offload nativo do ExLlamaV3), no corte em mul1, uma placa,
+# modo layer-split (as flags recusam TP). Base tudo na placa; EXL3_MOE_CPU_OFFLOAD=1 (a camada MoE
+# inteira na CPU); EXL3_MOE_CPU_SPLIT=N (os N experts de cauda de cada camada na CPU). Mede prefill
+# 4k/16k/30k e decode pelo gerador. SO_9=1 roda só isto.
+if [ -n "${ETAPA8:-}" ] || [ -n "${SO_9:-}" ]; then
+  marco "9. etapa 8: experts na RAM"
+  lscpu | grep -E "Model name|^CPU\(s\)|Thread|avx512" | head -4; free -g | head -2
+  TAM9="${TAM9:-4096,16384,30000}"
+  PG9="python3 tests/bancada/perfil_gerador.py -m /workspace/corte --tokens $TAM9 --cache 32768 --novos 128"
+  F9="prefill|Error|error|Traceback|FIM_PERFIL|mul1|offload|split|CPU"
+  : > /workspace/9.txt
+  for V in "" "EXL3_MOE_CPU_OFFLOAD=1" "EXL3_MOE_CPU_SPLIT=64" "EXL3_MOE_CPU_SPLIT=128" "EXL3_MOE_CPU_SPLIT=192" "EXL3_MOE_CPU_SPLIT=256"; do
+    echo "--- ${V:-tudo na placa}" | tee -a /workspace/9.txt
+    env CUDA_VISIBLE_DEVICES=0 $V $PG9 --rotulo "${V:-placa}" 2>&1 | grep -E "$F9" | tee -a /workspace/9.txt
+  done
+  echo "9 terminou"
+fi
+
 {
   echo "bancada $PROVA_ID · $(nvidia-smi --query-gpu=name --format=csv,noheader | sort | uniq -c | tr '\n' ' ')"
   echo "--- 3b"; grep -E "== bloco|vs original|Error|error" /workspace/3b.txt | head -40
@@ -176,6 +194,7 @@ fi
   echo "--- 6"; grep -E "^A\.|^B\.|rascunho:|referência:|^OK|FALHOU|Error|error" /workspace/6.txt 2>/dev/null | head -12
   echo "--- 7"; cat /workspace/7.txt 2>/dev/null
   echo "--- 8"; cat /workspace/8.txt 2>/dev/null
+  echo "--- 9"; cat /workspace/9.txt 2>/dev/null
   echo "--- 5a tabelas"; sed -n '/PREFILL por módulo/,/FIM_PERFIL/p' /workspace/5a.txt | head -60
 } | tee /workspace/resumo.txt
 publicar

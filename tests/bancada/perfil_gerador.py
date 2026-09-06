@@ -45,8 +45,10 @@ def resumo(rotulo, r, job, com_rascunho):
     p, n = r["prompt_tokens"], r["new_tokens"]
     tp, tg = r["time_prefill"], r["time_generate"]
     linha = f"{rotulo:<28} prefill {p:>6} tok em {tp * 1000:>7.0f} ms = {p / tp:>6.0f} tok/s"
-    if n > 1 and tg > tp:
-        linha += f" · decode {n} tok = {(n - 1) / (tg - tp):>5.1f} tok/s"
+    # time_generate é a duração da geração sozinha (do primeiro ao último token, job.py), não um
+    # acumulado desde o início
+    if n > 1 and tg > 0:
+        linha += f" · decode {n} tok = {(n - 1) / tg:>5.1f} tok/s"
     if com_rascunho:
         ac, rj = r.get("accepted_draft_tokens", 0), r.get("rejected_draft_tokens", 0)
         rodadas = len(job.draft_stats) or max(1, (ac + rj) // max(1, gen_draft_len(job)))

@@ -42,7 +42,7 @@ def vast(caminho: str, metodo: str = "GET", corpo: dict | None = None) -> dict:
         return json.load(r)
 
 
-def buscar(placas: int, disco: int, placa: str | None, vram: int = 22) -> list[dict]:
+def buscar(placas: int, disco: int, placa: str | None, vram: int = 22, ram: int = 0) -> list[dict]:
     q = {
         "verified": {"eq": True}, "rentable": {"eq": True}, "rented": {"eq": False}, "type": "on-demand",
         "num_gpus": {"eq": placas}, "gpu_ram": {"gte": vram * 1024}, "disk_space": {"gte": disco},
@@ -52,15 +52,17 @@ def buscar(placas: int, disco: int, placa: str | None, vram: int = 22) -> list[d
     }
     if placa:
         q["gpu_name"] = {"eq": placa}
+    if ram:
+        q["cpu_ram"] = {"gte": ram * 1024}
     return vast("/bundles/", "POST", q).get("offers", [])
 
 
 def cmd_buscar(a: argparse.Namespace) -> None:
-    ofertas = buscar(a.placas, a.disco, a.placa, a.vram)
+    ofertas = buscar(a.placas, a.disco, a.placa, a.vram, a.ram)
     print(f"{len(ofertas)} ofertas · {a.placas} placas · disco ≥ {a.disco} GB · VRAM ≥ {a.vram} GiB por placa")
-    print(f"{'oferta':>10}  {'placas':<26} {'$/h':>6}  {'rede Mb/s':>9}  {'disco':>6}  {'conf':>5}  região")
+    print(f"{'oferta':>10}  {'placas':<26} {'$/h':>6}  {'rede Mb/s':>9}  {'disco':>6}  {'conf':>5}  {'RAM GB':>6}  cpu · região")
     for o in ofertas[:25]:
-        print(f"{o['id']:>10}  {o['num_gpus']}× {o['gpu_name']:<22} {o['dph_total']:>6.2f}  {o.get('inet_down', 0):>9.0f}  {o.get('disk_space', 0):>6.0f}  {o.get('reliability2', 0):>5.2f}  {o.get('geolocation')}")
+        print(f"{o['id']:>10}  {o['num_gpus']}× {o['gpu_name']:<22} {o['dph_total']:>6.2f}  {o.get('inet_down', 0):>9.0f}  {o.get('disk_space', 0):>6.0f}  {o.get('reliability2', 0):>5.2f}  {(o.get('cpu_ram') or 0) / 1024:>6.0f}  {(o.get('cpu_name') or '')[:26]} · {o.get('geolocation')}")
 
 
 def cmd_comprar(a: argparse.Namespace) -> None:
@@ -112,6 +114,7 @@ def main() -> None:
     sub = p.add_subparsers(dest="cmd", required=True)
     b = sub.add_parser("buscar"); b.add_argument("--placas", type=int, default=2); b.add_argument("--disco", type=int, default=60)
     b.add_argument("--placa", default=None); b.add_argument("--vram", type=int, default=22)
+    b.add_argument("--ram", type=int, default=0, help="RAM mínima do host em GB (experts na RAM)")
     c = sub.add_parser("comprar"); c.add_argument("oferta", type=int); c.add_argument("--disco", type=int, default=60)
     c.add_argument("--fork", default="https://github.com/Olt1z/exllamav3-tp-mla"); c.add_argument("--branch", default="tp-mla")
     c.add_argument("--corte", default="Olt1z/GLM-5.3-podado-4L-EXL3-balanced-bl4ck0ut")
