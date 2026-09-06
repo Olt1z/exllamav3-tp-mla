@@ -277,6 +277,41 @@ rascunho na primeira rodada), então o decode com rascunho no corte não diz nad
 **O que sobra para o prefill**: nada barato. O motor cru já faz 4,2–4,8k tok/s no inteiro em TP4;
 o card faz 6,2k com FlashInfer e DeepGEMM. O chunk, o backend e o TP não mudam isso.
 
+## Etapa 3 do plano de desempenho (06/09/2026, 18:00–19:20Z): decode em grafo CUDA com atenção fp16
+
+Antes, `build_bc_mla` e `is_quantized_kda` exigiam projeções EXL3, e todo checkpoint com atenção em
+16 bits (o TR3 do Flash inteiro; nos nossos EXL3 o `kv_a_proj` de 576) decodificava eager. Agora
+`BC_MLAttention` (q_a, q, kv_a, o, idx_wq_b) e `BC_GatedDeltaNetSplit` no modo KDA (qkv, o) aceitam
+`BC_LinearFP16`: um GEMM EXL3 é um nó de kernel com sites patcháveis (A/C), um fp16 é um nó cuBLAS
+sem site nenhum, então roda entre buffers estáticos — `x` copiado uma vez para `x_st` no topo do
+grafo (`copy2d_gr`, patchável), saída do o_proj em `y_st` copiada para `y` no fim; operandos com
+R_pad = max(R, 8) linhas (cuBLASLt escolhe kernel ~13× mais lento abaixo de M = 8). Helper
+`linear_gr(exl3, fp16, x, y, xh, graph)` em `libtorch/linear.{h,cpp}`. Interruptores novos
+`EXL3_BC_GDN=0`, `EXL3_BC_GDN_TRACE=1` e `EXL3_BC_GDN_EAGER=1`. Commits f98420d..a42908c.
+
+Bancada de 2× RTX 3090 (instância 50085313, ~$0,40), corte de 4 camadas do TR3 (3 KDA + 1
+MLA/MoE, toda a atenção fp16), `tp_mla_smoke.py` 128 tokens, eager × grafo por teacher forcing.
+Saídas em `tests/bancada/saidas/20260906T182201Z-etapa3/`:
+
+| Arranjo | eager | grafo | ganho | KL média | top-1 |
+| --- | --- | --- | --- | --- | --- |
+| 1 placa, contexto curto | 140 tok/s | 192 tok/s | +37 % | 0,00001 | 100 % |
+| 1 placa, 3000 tokens (DSA esparso) | 125 tok/s | 185 tok/s | +48 % | 0,00006 | 100 % |
+| TP2 NCCL, curto | 137 tok/s | 195 tok/s | +42 % | 0,00007 | 100 % |
+| TP2 NCCL, 3000 tokens | 117 tok/s | 198 tok/s | +69 % | 0,00002 | 100 % |
+
+**Dois defeitos achados e consertados no caminho.** (1) `LinearFP16.unswap_cpu` trocava o peso
+pela cópia na placa e deixava `inner.bc` apontando para a cópia do host (carga fatiada): agora
+religa o BC. (2) O import TP do `GatedRMSNorm` construía o BC do norm com cinco argumentos, sem a
+flag do gate sigmoid do KDA que o `load()` passa: no rank, o caminho fundido do KDA aplicava silu
+e toda camada linear divergia (KL 1,37, top-1 0 %), com estados recorrentes certos e todos os GEMMs
+certos — achado por instrumentação estágio a estágio, porque o BC-KDA em TP nunca tinha rodado (a
+fork só ganhou TP no glm5_next em 05/09 e os artefatos fp16 eram sempre recusados). É preexistente
+e independente do fp16.
+
+Falta o TR3 inteiro pelo hub, com a régua: o ganho de 37–69 % no corte (4 camadas) precisa ser
+medido nas 45, onde o MoE (19 % do decode) já rodava em grafo e o custo por token era 26 ms.
+
 ## Régua de desempenho
 
 Três prompts fixos, sempre os mesmos, e uma linha por prompt. É o "antes" e o "depois" de toda

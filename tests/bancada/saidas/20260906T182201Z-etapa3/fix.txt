@@ -1,0 +1,10 @@
+(reconstruído da sessão; a máquina foi destruída antes do scp — números idênticos aos lidos)
+--- f1. TP1, tudo em grafo, contra eager de uma placa
+decode: 112 tokens (após 16 de aquecimento) em 0.67 s = 168.18 tok/s
+KL média 0.00001  KL máx 0.00003  |dif| máx 0.031  top-1 igual 100.0%
+--- f2. TP2 NCCL, tudo em grafo, contra eager TP2
+decode: 112 tokens (após 16 de aquecimento) em 0.57 s = 194.83 tok/s
+KL média 0.00007  KL máx 0.00495  |dif| máx 0.518  top-1 igual 100.0%
+--- f3. TP2 NCCL, eager
+decode: 112 tokens (após 16 de aquecimento) em 0.82 s = 137.22 tok/s
+--- f4. TP2, contexto longo 3000: eager 117.11 tok/s; grafo 198.45 tok/s, KL média 0.00002 KL máx 0.00004 top-1 100%

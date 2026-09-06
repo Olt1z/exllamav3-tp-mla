@@ -1,0 +1,10 @@
+(reconstruído da sessão)
+8a uma placa eager: 139.50 / 140.17 tok/s
+8b uma placa grafo: 191.51 tok/s, KL 0.00001, top-1 100%
+8c uma placa 3000 tokens: eager 124.66 (primeira leitura 82.74 com compilação), grafo 185.08, KL 0.00006
+8d TP2 antes do conserto do norm: eager 131.74, grafo 196.46 com KL 1.37 top-1 0%
+diag: d1 só KDA em grafo TP2 KL 1.37; d2 só MLA em grafo TP2 KL 0.00004 (151 tok/s); d3 TP1 tudo KL 1.37
+eager: BC-KDA eager (EXL3_BC_GDN_EAGER=1) em TP1 KL 1.37; sem TP KL 0.00001 -> não era o replay
+dbg2 (TP1): x-xp 0, qkv 0, o(caof)-yp 0, y-yp 0, estados iguais; y_torch-y_bc 0.02-0.07 com |y| 0.01-0.05 -> norm com gate
+causa: import TP do GatedRMSNorm sem a flag do gate sigmoid (load() passa 1 se sigmoid)
+trace: BC-GDN-KDA built layers 0-2 qkv_proj fp16 o_proj fp16; BC-mla built layer 3

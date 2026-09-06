@@ -153,7 +153,7 @@ fi
 if [ -n "${ETAPA3:-}" ] || [ -n "${SO_8:-}" ]; then
   marco "8. etapa 3: grafo CUDA com projeções fp16"
   T8="${TOKENS8:-128}"
-  F8="decode:|KL média|OK|FALHOU|Error|error|Traceback|bc_mla|bc_gdn|BC_|build|declin|graph"
+  F8="decode:|KL média|OK|FALHOU|Error|error|Traceback|BC-|Graph update"
   : > /workspace/8.txt
   echo "--- 8a. uma placa, eager (base)" | tee -a /workspace/8.txt
   CUDA_VISIBLE_DEVICES=0 EXL3_BC_ATTN=0 EXL3_BC_GDN=0 python3 tests/tp_mla_smoke.py -m /workspace/corte --tokens $T8 --cache 8192 --save /workspace/eager.pt 2>&1 | grep -E "$F8" | tee -a /workspace/8.txt
