@@ -71,7 +71,11 @@ for i, blk in enumerate(model.modules):
     d = blk.device
     dev = d.index if isinstance(d, torch.device) else (0 if d is None else int(d))
     local = contexto(dev)
-    x = torch.randn(1, 8, config.hidden_size, dtype = torch.half, device = dev)
+    # Blocos com hyper-connections recebem a pilha de fluxos (b, s, hc_mult, D); os filhos, o fluxo colapsado
+    hc = getattr(blk, "attn_hc", None)
+    forma = (1, 8, hc.hc_mult, config.hidden_size) if hc is not None else (1, 8, config.hidden_size)
+    # a pilha de fluxos do mHC corre em fp32 no tronco (o mix converte para half só na entrada da atenção)
+    x = torch.randn(*forma, dtype = torch.float if hc is not None else torch.half, device = dev)
     ref = blk.forward(x.clone(), params())
     cheio, pa, pb = planos(blk)
     exported = blk.tp_export(cheio, producer)
