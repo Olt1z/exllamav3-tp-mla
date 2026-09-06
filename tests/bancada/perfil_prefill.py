@@ -87,12 +87,13 @@ def main():
     p.add_argument("--prefill-tokens", type = int, default = 4096)
     p.add_argument("--decode", type = int, default = 8, help = "passos de decode perfilados depois do prefill")
     p.add_argument("--cache", type = int, default = 8192)
+    p.add_argument("--backend", default = "native", help = "backend do TP: native ou nccl (o hub usa nccl)")
     args = p.parse_args()
 
     config = Config.from_directory(args.model_dir)
     model = Model.from_config(config)
     cache = Cache(model, max_num_tokens = args.cache)
-    model.load(tensor_p = args.tp, progressbar = True)
+    model.load(tensor_p = args.tp, progressbar = True, tp_backend = args.backend)
     tokenizer = Tokenizer.from_config(config)
     perfil = Perfil()
     if not args.tp:
