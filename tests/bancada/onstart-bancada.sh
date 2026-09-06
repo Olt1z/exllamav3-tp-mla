@@ -22,6 +22,9 @@ BASE_DEVICES="${BASE_DEVICES:-0}"
 TOKENS="${TOKENS:-64}"
 if [ "$BASE_DEVICES" = "all" ]; then BASE=""; else BASE="CUDA_VISIBLE_DEVICES=$BASE_DEVICES"; fi
 REPO_SAIDAS="${REPO_SAIDAS:-Olt1z/quantizacao-bl4ck0ut}"
+# O primeiro forward compila Triton em cada rank; num host lento um rank passa dos 90 s padrão
+# do coletivo nativo e o grupo aborta ("Synchronization timeout", visto em 06/09 no 4c)
+export EXLLAMA_TP_SYNC_TIMEOUT="${EXLLAMA_TP_SYNC_TIMEOUT:-600}"
 PROVA_ID="${PROVA_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 nvidia-smi --query-gpu=name,memory.total,compute_cap --format=csv
 python3 -c "import torch; print('torch', torch.__version__, 'cuda', torch.version.cuda, 'gpus', torch.cuda.device_count())"

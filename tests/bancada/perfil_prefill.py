@@ -97,17 +97,29 @@ def main():
     assert ids.shape[-1] + args.decode + 8 <= args.cache
     print(f"prompt: {ids.shape[-1]} tokens · dispositivos {model.active_devices}")
 
-    def params(past_len):
-        return {"attn_mode": "flash_attn", "cache": cache, "past_len": past_len, "batch_shape": (1, args.cache)}
+    # o prefill devolve os estados recorrentes (KDA) em params; o decode precisa deles
+    def params(past_len, rs = None):
+        p = {"attn_mode": "flash_attn", "cache": cache, "past_len": past_len, "batch_shape": (1, args.cache)}
+        if rs is not None:
+            p["recurrent_states"] = rs
+        return p
+
+    def liberar(rs):
+        for r in rs or []:
+            r.free()
 
     # aquecimento: compila Triton e grava grafos; não conta
-    model.prefill(input_ids = ids[:, :64], params = params(0))
-    model.forward(input_ids = ids[:, 64:65], params = params(64))
-    torch.cuda.synchronize(); perfil.zerar()
+    p = params(0)
+    model.prefill(input_ids = ids[:, :64], params = p)
+    rs = p.get("recurrent_states")
+    model.forward(input_ids = ids[:, 64:65], params = params(64, rs))
+    torch.cuda.synchronize(); liberar(rs); perfil.zerar()
 
+    p = params(0)
     t0 = time.time()
-    model.prefill(input_ids = ids[:, :-1], params = params(0))
+    model.prefill(input_ids = ids[:, :-1], params = p)
     torch.cuda.synchronize()
+    rs = p.get("recurrent_states")
     ms = (time.time() - t0) * 1000
     print(f"prefill: {ids.shape[-1] - 1} tokens em {ms:.0f} ms = {(ids.shape[-1] - 1) / ms * 1000:.0f} tok/s")
     if not args.tp:
@@ -117,7 +129,7 @@ def main():
     x = ids
     torch.cuda.synchronize(); t0 = time.time()
     for i in range(args.decode):
-        logits = model.forward(input_ids = x[:, -1:], params = params(x.shape[-1] - 1))
+        logits = model.forward(input_ids = x[:, -1:], params = params(x.shape[-1] - 1, rs))
         nxt = logits[0, -1].argmax().item()
         x = torch.cat((x, torch.tensor([[nxt]], dtype = x.dtype)), dim = -1)
     torch.cuda.synchronize()
@@ -125,6 +137,7 @@ def main():
     print(f"decode: {args.decode} passos em {ms:.0f} ms = {ms / args.decode:.1f} ms/token = {args.decode / ms * 1000:.1f} tok/s")
     if not args.tp:
         perfil.tabela(f"DECODE por módulo ({args.decode} passos)", ms)
+    liberar(rs)
     print("FIM_PERFIL")
 
 
