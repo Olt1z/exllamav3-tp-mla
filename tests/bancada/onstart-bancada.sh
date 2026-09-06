@@ -54,7 +54,8 @@ NUCLEOS=$(nproc); export MAX_JOBS=$(( NUCLEOS > 8 ? 8 : (NUCLEOS < 2 ? 2 : NUCLE
 export TORCH_CUDA_ARCH_LIST="$CAP"
 marco "compilando a extensão para sm $CAP com MAX_JOBS=$MAX_JOBS"
 pip install -q --no-build-isolation -e . 2>&1 | tail -3
-python3 -c "import exllamav3_ext; from exllamav3.version import __version__ as v; print('exllamav3', v, 'ext ok')"
+# o torch vem antes: a extensão liga em libc10.so, que só entra no processo com ele importado
+python3 -c "import torch, exllamav3_ext; from exllamav3.version import __version__ as v; print('exllamav3', v, 'ext ok')"
 
 marco "3. corte $CORTE"
 python3 - <<PY
@@ -65,6 +66,10 @@ PY
 du -sh /workspace/corte
 # Artefato da esteira antiga com kv_b_proj em treliça: repara antes de carregar
 python3 tests/bancada/reparar_kv_b_proj.py /workspace/corte
+
+marco "3b. teste por bloco: original × importado por TP, bloco a bloco e filho a filho"
+env $BASE python3 tests/test_tp_block_import.py /workspace/corte 2>&1 | grep -v -E "it/s\]|━━" | tee /workspace/3b.txt
+echo "3b saiu com ${PIPESTATUS[0]}"
 
 set -e
 marco "4a. base, uma placa"
@@ -82,6 +87,7 @@ echo "4d saiu com $?"
 
 {
   echo "bancada $PROVA_ID · $(nvidia-smi --query-gpu=name --format=csv,noheader | sort | uniq -c | tr '\n' ' ')"
+  echo "--- 3b"; grep -E "== bloco|vs original|Error|error" /workspace/3b.txt | head -40
   for f in 4a 4b 4c 4d-base 4d; do echo "--- $f"; grep -E "decode:|uso médio|KL média|OK|FALHOU|Error|error" /workspace/$f.txt | head -8; done
 } | tee /workspace/resumo.txt
 publicar
