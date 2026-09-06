@@ -76,7 +76,8 @@ class DFlash2Model(DFlashModel):
                 # either way. Do the tuple if acceptance measurably drops at long contexts.
                 self.attn_modules[idx].sliding_window = -1
 
-        # The selector is not part of the forward chain; it loads/unloads with the final norm
+        # The selector is not part of the forward chain: loaded after the chain, on the device of
+        # the final norm (RMSNorm.load does not recurse into registered children)
         self.candidate_selector = CandidateSelector(
             config = config,
             key = "candidate_selector",
@@ -85,7 +86,18 @@ class DFlash2Model(DFlashModel):
             rank = config.selector_rank,
             top_k = config.selector_top_k,
         )
-        self.modules[-1].register_submodule(self.candidate_selector)
+
+
+    @override
+    def load_gen(self, *args, **kwargs):
+        yield from super().load_gen(*args, **kwargs)
+        self.candidate_selector.load(torch.device(self.modules[-1].device))
+
+
+    @override
+    def unload(self):
+        self.candidate_selector.unload()
+        super().unload()
 
 
     @override
