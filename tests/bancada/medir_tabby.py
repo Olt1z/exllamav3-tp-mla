@@ -88,6 +88,19 @@ def chat(url, chave, prompt, max_tokens):
 
 
 RE_METRICS = re.compile(r"Metrics \(ID: (\S+)\): (\d+) tokens generated in ([\d.]+) seconds \((.*)\)")
+RE_INICIO_DE_LINHA = re.compile(r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d")
+
+
+def desquebrar(texto):
+    """O logger do TabbyAPI quebra mensagens longas a ~80 colunas: a linha Metrics vira quatro.
+    Cola em cada registro as linhas seguintes que não começam com data e hora."""
+    registros = []
+    for linha in texto.splitlines():
+        if registros and not RE_INICIO_DE_LINHA.match(linha):
+            registros[-1] += " " + linha.strip()
+        else:
+            registros.append(linha.rstrip())
+    return [re.sub(r"\s+", " ", r) for r in registros]
 
 
 def parse_metrics(linha):
@@ -117,7 +130,7 @@ def ultima_metrics(caminho, depois_de):
     with open(caminho, errors = "replace") as f:
         f.seek(depois_de)
         ultima = None
-        for linha in f:
+        for linha in desquebrar(f.read()):
             if "Metrics (ID:" in linha:
                 ultima = linha
     return parse_metrics(ultima) if ultima else None
