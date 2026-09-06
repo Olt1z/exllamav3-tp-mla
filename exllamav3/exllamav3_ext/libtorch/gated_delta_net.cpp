@@ -348,9 +348,13 @@ void BC_GatedDeltaNetSplit::run_bszN
     Slot& s = slot(bsz, seqlen, history);
     TORCH_CHECK(s.configured, "BC_GatedDeltaNetSplit::run_bszN: slot not configured");
 
-    if (s.graph->disabled || (!s.graph->ready && !s.graph->ready_to_record))
+    // EXL3_BC_GDN_EAGER=1: run the fused path without ever capturing (A/B of the graph replay
+    // against the same kernels launched eagerly)
+    static const bool force_eager = [](){ const char* e = getenv("EXL3_BC_GDN_EAGER"); return e && *e == '1'; }();
+    if (force_eager || s.graph->disabled || (!s.graph->ready && !s.graph->ready_to_record))
     {
         run_bszN_gr(x, y, conv_state, recurrent_state, slots, history, s, nullptr);
+        if (force_eager) return;
         s.graph->ready_to_record = true;
         s.graph_state_size = (int) conv_state.size(2);
         s.graph_hist_stride = (int) recurrent_state.size(1);
