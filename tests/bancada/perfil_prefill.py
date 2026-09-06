@@ -108,11 +108,14 @@ def main():
         for r in rs or []:
             r.free()
 
-    # aquecimento: compila Triton e grava grafos; não conta
+    # aquecimento com o MESMO tamanho e o mesmo regime (o Triton compila por forma: um prefill
+    # curto não aquece o scan do KDA de 4k, e um decode em contexto curto não aquece o DSA
+    # esparso; medido em 06/09: 10,6 s de "prefill" que eram compilação); não conta
     p = params(0)
-    model.prefill(input_ids = ids[:, :64], params = p)
+    model.prefill(input_ids = ids[:, :-1], params = p)
     rs = p.get("recurrent_states")
-    model.forward(input_ids = ids[:, 64:65], params = params(64, rs))
+    for _ in range(2):
+        model.forward(input_ids = ids[:, -1:], params = params(ids.shape[-1] - 1, rs))
     torch.cuda.synchronize(); liberar(rs); perfil.zerar()
 
     p = params(0)
