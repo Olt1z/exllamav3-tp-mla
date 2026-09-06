@@ -15,7 +15,7 @@ Prompts (tokens aproximados no tokenizador do GLM-5.3-Flash):
   longo    ~5,3k de entrada, 200 de saída (prefill; DSA passa de denso a esparso)
   dificil  ~31k de entrada (1.000 registros), soma de 11 valores e uma agulha; confere a resposta
 """
-import argparse, json, random, re, sys, time, urllib.request
+import argparse, json, random, re, sys, time, urllib.request, uuid
 
 CURTO = "Explique em três frases por que o céu é azul e por que o pôr do sol é avermelhado. Depois escreva um poema de 40 versos sobre isso."
 
@@ -136,13 +136,19 @@ def ultima_metrics(caminho, depois_de):
     return parse_metrics(ultima) if ultima else None
 
 
+def com_nonce(prompt):
+    """Prefixo único por pedido: o TabbyAPI guarda o prefixo no cache de prompt, e a segunda rodada
+    do mesmo texto media um prefill de 60 tokens em vez de 5.436 (visto em 06/09/2026)."""
+    return f"[sessão {uuid.uuid4().hex[:10]}]\n{prompt}"
+
+
 def medir(nome, url, chave, prompt, max_tokens, log):
     pos = 0
     if log:
         with open(log, "rb") as f:
             f.seek(0, 2)
             pos = f.tell()
-    texto, uso, ttft, total = chat(url, chave, prompt, max_tokens)
+    texto, uso, ttft, total = chat(url, chave, com_nonce(prompt), max_tokens)
     entrada = uso.get("prompt_tokens")
     saida = uso.get("completion_tokens") or 0
     # relógio do cliente: o 1º token sai depois do prefill + 1 passo de decode; o erro é um passo
@@ -179,8 +185,11 @@ def main():
     args = p.parse_args()
     quais = args.prompts.split(",")
 
+    # curto e longo: os kernels de chunk do prefill compilam por forma, e a primeira leitura de um
+    # prompt de 5k pagou ~9 s de Triton em 06/09/2026 (475 T/s em vez de ~2k)
     print("aquecimento (compila Triton, não conta)…", flush = True)
-    chat(args.url, args.chave, "Diga apenas: pronto.", 8)
+    chat(args.url, args.chave, com_nonce("Diga apenas: pronto."), 8)
+    chat(args.url, args.chave, com_nonce(prompt_longo()), 8)
 
     resultados = []
     if "curto" in quais:
