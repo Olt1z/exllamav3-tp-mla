@@ -532,6 +532,9 @@ class HyperHead(Module):
                 "hc_mult": self.hc_mult,
                 "rms_norm_eps": self.rms_eps,
                 "hc_eps": self.hc_eps,
+                # GLM-5.3 collapses by unweighted mean and has no tensors; without the flag the
+                # imported head takes the weighted path and dereferences fn = None
+                "mean": self.mean,
             },
             "fn": producer.send(self.fn),
             "base": producer.send(self.base),
@@ -543,9 +546,10 @@ class HyperHead(Module):
     def tp_import(local_context, exported, plan):
         consumer = local_context["consumer"]
         module = HyperHead(config = None, **exported["kwargs"])
-        module.fn = consumer.recv(exported["fn"], cuda = True)
-        module.base = consumer.recv(exported["base"], cuda = True)
-        module.scale = consumer.recv(exported["scale"], cuda = True)
+        if not module.mean:
+            module.fn = consumer.recv(exported["fn"], cuda = True)
+            module.base = consumer.recv(exported["base"], cuda = True)
+            module.scale = consumer.recv(exported["scale"], cuda = True)
         module.device = local_context["device"]
         return module
 
