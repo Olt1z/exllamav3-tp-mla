@@ -114,8 +114,8 @@ def main():
     p = params(0)
     model.prefill(input_ids = ids[:, :-1], params = p)
     rs = p.get("recurrent_states")
-    for _ in range(2):
-        model.forward(input_ids = ids[:, -1:], params = params(ids.shape[-1] - 1, rs))
+    # um passo só: o estado recorrente avança e o past_len teria de acompanhar
+    model.forward(input_ids = ids[:, -1:], params = params(ids.shape[-1] - 1, rs))
     torch.cuda.synchronize(); liberar(rs); perfil.zerar()
 
     p = params(0)
