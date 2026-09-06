@@ -107,7 +107,15 @@ Carga em TP4 em 1 min 05 s. Decode de 596 tokens a 63,8 tok/s (44,1 na primeira 
 draft MTP aceito em 48–66 %; prefill de 5.321 tokens a 312 tok/s, seguido de decode a 45 tok/s
 com a resposta certa sobre o texto. A primeira requisição gasta ~50 s compilando os kernels
 Triton. Referência do README do TR3: 145–151 tok/s em 2× PRO 6000 com DFlash2, outro drafter
-e sem TP; a comparação justa (mesma máquina, com e sem `--tensor-parallel`) fica para a etapa 6d.
+e sem TP.
+
+**Mesma máquina, com e sem `--tensor-parallel` (06/09/2026, 01:55Z, mesmos prompts, mesma
+chave):** sem TP o autosplit reparte por camadas (95 + 96 + 6 + 0 GB, o cache de 1M enche as duas
+primeiras placas) e decodifica 596 tokens a 54,1–54,7 tok/s; em TP4, 63,8 tok/s (+18 %). No prompt
+de 5.321 tokens o autosplit estoura a memória da placa 1 (`torch.OutOfMemoryError` no transiente do
+KDA, 93,3 de 95 GiB ocupados); em TP4 o mesmo prompt entra a 312 tok/s, porque cache e transientes
+se dividem pelas quatro placas. A carga é mais rápida sem TP (50 s contra 65 s). O decode em grafo
+CUDA no rank TP (`has_split_cache`) segue desligado: é a parte da etapa 6d que ainda falta.
 
 ## Timeout dos coletivos nativos
 
