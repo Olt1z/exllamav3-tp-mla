@@ -864,7 +864,7 @@ def finalize_capture_H(H_data: dict, quant_args: dict, verbose: bool):
 
         # Mean of samples summed up during forward pass
         # Switch to uncalibrated fallback if no input activations or diagonal is too small (few activations)
-        count = H_data["count"]
+        count = H_data["count"] - int(H_data["dropped"]) if "dropped" in H_data else H_data["count"]
         if count == 0:
             q_fallback = True
             diag_mean = 0.0

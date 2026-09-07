@@ -560,6 +560,8 @@ class Linear(Module):
             "finalized": False,
             "num_total": 0,
             "inf_nan": torch.zeros(2, dtype = torch.long, device = self.device),
+            # rows dropped from H for carrying inf/nan, kept on device so capture_H never syncs the host
+            "dropped": torch.zeros((), dtype = torch.long, device = self.device),
             "device": self.device,
         }
 
@@ -579,13 +581,14 @@ class Linear(Module):
             # fp16 activation overflow (+-inf) would poison entire rows/columns of H through the
             # accumulation, and no diagonal damping can repair non-finite entries afterwards.
             # Drop the affected rows; the inf_nan counter above still reports them
-            finite = torch.isfinite(x).all(dim = 1)
-            if not finite.all():
-                x = x[finite]
-                rows = x.shape[0]
+            # Branchless: a `bool()` on the device mask here is a host sync per call, and a block-sparse
+            # layer with every expert active makes ~300 such calls per calibration row
+            finite = torch.isfinite(x).all(dim = 1, keepdim = True)
+            x.masked_fill_(~finite, 0.0)
 
             params["capture"][self.qmap]["H"].addmm_(x.T, x)
             params["capture"][self.qmap]["count"] += rows
+            params["capture"][self.qmap]["dropped"] += (~finite).sum()
 
 
     @override

@@ -907,6 +907,7 @@ def capture_module_parallel(
                 m = capture_H[qmap]
                 m["H"] += hd["H"].to(device)
                 m["count"] += hd["count"]
+                m["dropped"] += hd["dropped"].to(device)
                 m["num_total"] += hd["num_total"]
                 m["inf_nan"] += hd["inf_nan"].to(device)
         cap.clear()
