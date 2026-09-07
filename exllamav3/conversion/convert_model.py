@@ -1580,6 +1580,13 @@ def main(args, job_state):
     if vision_model:
         quantize_side_model(vision_model, "vision model")
 
+    # The previous checkpoint is dead weight once every module is quantized, and compile needs the
+    # disk: the output is written next to qtensors (measured 07/09/2026 on a 321B model: 306 GB source
+    # + 167 GB qtensors + 2 × 63 GB checkpoints left 143 GB for a 167 GB output on a 750 GB disk)
+    ckpt_dir_old = os.path.join(args["work_dir"], "ckpt_old")
+    if os.path.exists(ckpt_dir_old):
+        shutil.rmtree(ckpt_dir_old)
+
     # Compile model
     compile_model(args, model, config, tokenizer, mtp_model, vision_model)
 

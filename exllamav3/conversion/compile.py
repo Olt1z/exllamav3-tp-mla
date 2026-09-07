@@ -124,7 +124,14 @@ def compile_model(args, model, config, tokenizer, mtp_model = None, vision_model
             elif isinstance(m, str):
                 tensor = config.stc.get_tensor(m, allow_bf16 = True)
                 tensors = {m: tensor.contiguous()}
-            file_dict.update(tensors)
+            # A tensor can be collected twice when a module gathers by key prefix and a sibling
+            # module owns the same key (MTP block vs. its eh_proj/enorm/hnorm/shared_head.norm):
+            # keep the first copy, or the loader sees duplicates across shards and the index
+            # points at whichever came last
+            for k, v in tensors.items():
+                if k in map_dict or k in file_dict:
+                    continue
+                file_dict[k] = v
         for name in file_dict.keys():
             map_dict[name] = filename
         save_file(file_dict, os.path.join(out_dir, filename))
