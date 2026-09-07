@@ -1,0 +1,40 @@
+=== BANCADA tp-mla · 2026-09-06T23:34:26Z
+=== 1. dependências · 2026-09-06T23:34:27Z
+=== 2. fork https://github.com/Olt1z/exllamav3-tp-mla @ tp-mla · 2026-09-06T23:34:31Z
+=== compilando a extensão para sm 12.0 com MAX_JOBS=8 · 2026-09-06T23:34:38Z
+=== 3. corte Olt1z/GLM-5.3-Flash-podado-4L-EXL3-4.0bpw-bl4ck0ut · 2026-09-06T23:36:59Z
+=== 10. etapa 9: conversor nativo no corte · 2026-09-06T23:37:53Z
+=== 10b. convert.py · 2026-09-06T23:39:32Z
+    raise ValueError(f"Required tensor {key} not found in any *.safetensors file in {self.directory}")
+ValueError: Required tensor model.language_model.layers.4.hnorm.weight not found in any *.safetensors file in /workspace/origem
+=== FALHOU · linha 216
+=== publicando em Olt1z/quantizacao-bl4ck0ut/saidas/tp-mla/20260906T233226Z · 2026-09-06T23:56:15Z
+=== FALHOU · linha 218
+=== publicando em Olt1z/quantizacao-bl4ck0ut/saidas/tp-mla/20260906T233226Z · 2026-09-06T23:56:18Z
+=== 10c. manifest · 2026-09-06T23:56:21Z
+=== FALHOU · linha 220
+=== publicando em Olt1z/quantizacao-bl4ck0ut/saidas/tp-mla/20260906T233226Z · 2026-09-06T23:56:21Z
+=== 10d. KL: BF16 → nativo e → esteira GPTQModel · 2026-09-06T23:56:24Z
+FileNotFoundError: [Errno 2] No such file or directory: '/workspace/exl3/config.json'
+=== FALHOU · linha 227
+=== publicando em Olt1z/quantizacao-bl4ck0ut/saidas/tp-mla/20260906T233226Z · 2026-09-06T23:57:03Z
+FileNotFoundError: [Errno 2] No such file or directory: '/workspace/nativo.pt'
+=== FALHOU · linha 231
+=== publicando em Olt1z/quantizacao-bl4ck0ut/saidas/tp-mla/20260906T233226Z · 2026-09-06T23:57:22Z
+=== 10e. publicar Olt1z/GLM-5.3-Flash-podado-4L-EXL3-nativo-4bpw-bl4ck0ut · 2026-09-06T23:57:25Z
+Traceback (most recent call last):
+    raise ValueError(f"Provided path: '{folder_path}' is not a directory")
+ValueError: Provided path: '/workspace/exl3' is not a directory
+=== FALHOU · linha 233
+=== publicando em Olt1z/quantizacao-bl4ck0ut/saidas/tp-mla/20260906T233226Z · 2026-09-06T23:57:25Z
+FileNotFoundError: [Errno 2] No such file or directory: '/workspace/exl3/config.json'
+FileNotFoundError: [Errno 2] No such file or directory: '/workspace/nativo.pt'
+=== FALHOU · linha 254
+=== publicando em Olt1z/quantizacao-bl4ck0ut/saidas/tp-mla/20260906T233226Z · 2026-09-06T23:57:28Z
+=== publicando em Olt1z/quantizacao-bl4ck0ut/saidas/tp-mla/20260906T233226Z · 2026-09-06T23:57:31Z
+=== FIM · 2026-09-06T23:57:34Z
+Traceback (most recent call last):
+    with map_exceptions({h11.LocalProtocolError: LocalProtocolError}):
+httpcore.LocalProtocolError: Illegal header value b'Bearer '
+Traceback (most recent call last):
+httpx.LocalProtocolError: Illegal header value b'Bearer '

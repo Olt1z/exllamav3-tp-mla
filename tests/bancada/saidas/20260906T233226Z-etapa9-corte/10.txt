@@ -1,0 +1,31 @@
+convert.py: 78 s no total
+7.9G	/workspace/exl3
+ "shards": 1,
+ "quantization_config_de_origem": false,
+ "quantization_config": {
+  "quant_method": "exl3",
+  "version": "1.4.7",
+  "bits": 4.48,
+  "head_bits": 16,
+  "calibration": {
+   "rows": 503,
+   "cols": 2048
+  },
+  "out_scales": "always",
+  "codebook": "mul1"
+ }
+}
+decode: 112 tokens (após 16 de aquecimento) em 0.44 s = 255.77 tok/s
+OK
+--- nativo vs BF16
+decode: 112 tokens (após 16 de aquecimento) em 0.25 s = 440.01 tok/s
+KL média 0.00249  KL máx 0.00791  |dif| máx 0.659  top-1 igual 100.0%
+OK
+--- esteira GPTQModel vs BF16
+decode: 112 tokens (após 16 de aquecimento) em 0.28 s = 399.45 tok/s
+KL média 0.00422  KL máx 0.00960  |dif| máx 0.723  top-1 igual 100.0%
+OK
+--- esteira GPTQModel vs nativo
+decode: 112 tokens (após 16 de aquecimento) em 0.28 s = 398.97 tok/s
+KL média 0.00653  KL máx 0.01355  |dif| máx 0.897  top-1 igual 100.0%
+OK

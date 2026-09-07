@@ -1,0 +1,52 @@
+{
+ "tensores": 3965,
+ "quantizados": 886,
+ "nativos": 264,
+ "quantizados_por_classe": {
+  "atencao": 10,
+  "densa": 9,
+  "expert": 864,
+  "shared": 3
+ },
+ "experts_bits_histograma": {
+  "4": 864
+ },
+ "experts_grupos_camada_projecao": 3,
+ "nativos_do_caminho_por_token_por_dtype": {
+  "atencao:BF16": 8,
+  "atencao:F16": 16,
+  "indexer:F16": 4,
+  "lm_head:F16": 1
+ },
+ "violacoes": [],
+ "aprovado": true,
+ "camadas_principais": 4,
+ "receita": "/workspace/quantizacao/saidas/cmtqbp54o006c1jgr2mi3ux0p/receita.json",
+ "bpw_efetivo_da_receita": 6.612174071868484,
+ "escalas": {
+  "normalizado_pela_origem": true,
+  "padding_desconhecido": false,
+  "grupos_auditados": 3,
+  "experts_auditados": 864,
+  "experts_fora": 0,
+  "experts_isolados": 0,
+  "g_sc_min": 0.717565355086222,
+  "g_sc_mediana": 0.7259128234784749,
+  "g_sc_max": 0.7347341062898434
+ },
+ "avisos": [],
+ "shards": 1,
+ "quantization_config_de_origem": false,
+ "quantization_config": {
+  "quant_method": "exl3",
+  "version": "1.4.7",
+  "bits": 4.48,
+  "head_bits": 16,
+  "calibration": {
+   "rows": 503,
+   "cols": 2048
+  },
+  "out_scales": "always",
+  "codebook": "mul1"
+ }
+}

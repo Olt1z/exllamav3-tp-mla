@@ -1,0 +1,9 @@
+        lm_head                                                             1 tensor
+ -- Estimated remaining time: warming up (1/3 timed blocks)
+ -- Estimated remaining time: warming up (2/3 timed blocks)
+ -- Loading unquantized module: lm_head
+ -- Captured: lm_head
+ -- Unquantized: lm_head                                                                          bpw: 16.00
+ -- Quantized: lm_head                                                                            bpw: 16.00  rfn: 0.000000  cos: 0.000006  sqnr: 136.428188  [22.05 s]  r
+ -- Estimated remaining time: < 1 minute (avg over last 3 blocks)
+ -- All done
