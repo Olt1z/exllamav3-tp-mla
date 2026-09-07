@@ -14,3 +14,10 @@
 - quantização total invariante às linhas: 54 grupos → ~235 s de LDLQ + ~49 s de g_scale
 - KL vs BF16 (mesma placa): 503 linhas 0,00249/0,00795 · 250 linhas 0,00276/0,00806 (+11 % na média)
 - decode dos dois artefatos ~446 tok/s; BF16 254 tok/s
+
+## Passo 11 — mesmo host (2× RTX 5090 Letônia, 50114439, $0,95/h; placas limitadas a 400/425 W, fábrica 575/600), 250 linhas
+- solo (1 placa): MoE capture 98,6 · quantize 392,5 (7,1 s por grupo) · advance 8,7; densas 26 s; total 706 s
+- dois processos independentes, um por placa: p0 quantize 392,9 (idêntico ao solo) → ZERO disputa de host; p1 morreu no meio da camada 3 sem erro no log (provável OOM de host com dois estados pinados)
+- um processo em 2 placas: MoE load 11,0 · capture 50,2 · quantize 214,7 (7,0 s por grupo) · advance 6,3 → 283 s (solo 501 s, 1,77×); densas 15 s; total 419 s (1,68×)
+- conclusão: o "1,3×" de antes comparava hosts diferentes (Coreia sem limite de energia: 5,4 s por grupo; Letônia a 400 W: 7,1 s). O caminho paralelo por threads já escala ~1,8× por placa; processo por placa não tem o que resolver.
+- custo fixo que sobra em multi-GPU: carga das réplicas por camada (11 s) e o aquecimento da camada 0 (85 s na rodada anterior)
