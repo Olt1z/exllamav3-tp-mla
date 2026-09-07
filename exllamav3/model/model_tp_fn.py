@@ -174,6 +174,16 @@ def mp_model_append(local_context: dict, exported: dict):
     return None
 
 
+def mp_set_master_config(local_context: dict, config):
+    """
+    Hand the parent's Config to the output-device rank only. That rank runs in the main
+    process (PseudoParentConn calls this directly, nothing is pickled), so the object is
+    shared, not copied; the CPU expert split under TP reads config.stc from it at import
+    """
+    local_context["config"] = config
+    return None
+
+
 def mp_model_append_gather(local_context: dict):
     """
     Used by TP loader, append final logit gather module to the module list

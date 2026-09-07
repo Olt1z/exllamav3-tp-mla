@@ -559,6 +559,10 @@ class Model_TPMixin:
             [(producer.export(),) if d != tp_output_device else (producer,) for d in active_devices]
         )
 
+        # The output rank alone gets the real config (it is this process): the CPU expert
+        # split under TP registers the tail with the worker from config.stc at import time
+        self.tp_worker_dispatch_wait_multi([self.tp_output_device], mp_set_master_config, (config,))
+
         # Begin loading modules
         with (ProgressBar(f"Loading (TP)" if progressbar else None, len(modules)) as progress):
             for idx, module in enumerate(modules):

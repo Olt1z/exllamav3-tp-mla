@@ -35,7 +35,7 @@ publicar() {
 import os
 from huggingface_hub import HfApi
 api = HfApi(token=os.environ["HF_TOKEN"])
-for f in ("bancada.log", "resumo.txt", "build.log", "10.txt", "10-cobertura.txt", "10-convert.txt", "11.txt", "11-solo.txt", "11-p0.txt", "11-p1.txt", "11-duas.txt", "12.txt"):
+for f in ("bancada.log", "resumo.txt", "build.log", "10.txt", "10-cobertura.txt", "10-convert.txt", "11.txt", "11-solo.txt", "11-p0.txt", "11-p1.txt", "11-duas.txt", "12.txt", "13.txt"):
     p = f"/workspace/{f}"
     if os.path.exists(p):
         api.upload_file(path_or_fileobj=p, path_in_repo=f"saidas/tp-mla/$PROVA_ID/{f}", repo_id="$REPO_SAIDAS")
@@ -70,7 +70,7 @@ du -sh /workspace/corte
 # Artefato da esteira antiga com kv_b_proj em treliça: repara antes de carregar
 python3 tests/bancada/reparar_kv_b_proj.py /workspace/corte
 
-if [ -z "${SO_7:-}" ] && [ -z "${SO_8:-}" ] && [ -z "${SO_9:-}" ] && [ -z "${SO_10:-}" ] && [ -z "${SO_11:-}" ] && [ -z "${SO_12:-}" ]; then
+if [ -z "${SO_7:-}" ] && [ -z "${SO_8:-}" ] && [ -z "${SO_9:-}" ] && [ -z "${SO_10:-}" ] && [ -z "${SO_11:-}" ] && [ -z "${SO_12:-}" ] && [ -z "${SO_13:-}" ]; then
 marco "3b. teste por bloco: original × importado por TP, bloco a bloco e filho a filho"
 env $BASE python3 tests/test_tp_block_import.py /workspace/corte 2>&1 | grep -v -E "it/s\]|━━" | tee /workspace/3b.txt
 echo "3b saiu com ${PIPESTATUS[0]}"
@@ -343,6 +343,37 @@ PY
   echo "12 terminou"
 fi
 
+# 13. Etapa 2 do plano "experts na RAM com tensor parallel": o remendo, no modo de canais
+# (moe_tensor_split). Duas placas, corte em mul1. 13a base numa placa; 13b split numa placa
+# (caminho que já existia) contra 13a; 13c TP2 canais sem split contra 13a pelo fio bf16;
+# 13d TP2 canais COM split (o remendo) contra 13a — o worker tem de subir UMA vez, no rank de
+# saída; 13e TP2 expert-parallel com split: tem de AVISAR e carregar inteiro (a armadilha que
+# antes era silenciosa); 13f decode pelo gerador nos três arranjos. SO_13=1 roda só isto.
+if [ -n "${SO_13:-}" ]; then
+  marco "13. TP + experts na RAM (modo de canais)"
+  : > /workspace/13.txt
+  K13="${K13:-144}"; TOK13="${TOK13:-128}"
+  SM="python3 tests/tp_mla_smoke.py -m /workspace/corte --tokens $TOK13 --cache 4096"
+  F13="decode:|uso médio|KL média|^OK|FALHOU|Error|error|Traceback|CPU split experts|CPU MoE worker|ignored|skipped"
+  echo "--- 13a. base, uma placa, tudo na placa" | tee -a /workspace/13.txt
+  env CUDA_VISIBLE_DEVICES=0 $SM --save /workspace/13-base.pt 2>&1 | grep -E "$F13" | tee -a /workspace/13.txt
+  echo "--- 13b. uma placa, EXL3_MOE_CPU_SPLIT=$K13 (caminho antigo), KL contra 13a" | tee -a /workspace/13.txt
+  env CUDA_VISIBLE_DEVICES=0 EXL3_MOE_CPU_SWAP=0 EXL3_MOE_CPU_SPLIT=$K13 $SM --compare /workspace/13-base.pt 2>&1 | grep -E "$F13" | tee -a /workspace/13.txt
+  echo "--- 13c. TP2 canais, tudo na placa, KL contra 13a (fio bf16)" | tee -a /workspace/13.txt
+  $SM --tp --tp-moe-ts --compare /workspace/13-base.pt --simular-fio-bf16 2>&1 | grep -E "$F13" | tee -a /workspace/13.txt
+  echo "--- 13d. TP2 canais, EXL3_MOE_CPU_SPLIT=$K13 (o remendo), KL contra 13a (fio bf16); worker UMA vez" | tee -a /workspace/13.txt
+  EXL3_MOE_CPU_SWAP=0 EXL3_MOE_CPU_SPLIT=$K13 $SM --tp --tp-moe-ts --compare /workspace/13-base.pt --simular-fio-bf16 2>&1 | grep -E "$F13" | tee -a /workspace/13.txt
+  echo "--- 13e. TP2 expert-parallel, EXL3_MOE_CPU_SPLIT=$K13: deve avisar e carregar inteiro" | tee -a /workspace/13.txt
+  EXL3_MOE_CPU_SPLIT=$K13 $SM --tp --compare /workspace/13-base.pt --simular-fio-bf16 2>&1 | grep -E "$F13" | tee -a /workspace/13.txt
+  echo "--- 13f. decode pelo gerador" | tee -a /workspace/13.txt
+  PG13="python3 tests/bancada/perfil_gerador.py -m /workspace/corte --tokens 4096 --cache 8192 --novos 256"
+  G13="decode|worker started|CPU split|Error|Traceback"
+  env CUDA_VISIBLE_DEVICES=0 EXL3_MOE_CPU_SWAP=0 EXL3_MOE_CPU_SPLIT=$K13 $PG13 --rotulo "1placa-split$K13" 2>&1 | grep -E "$G13" | tee -a /workspace/13.txt
+  $PG13 --tp --tp-moe-ts --rotulo "tp2-canais" 2>&1 | grep -E "$G13" | tee -a /workspace/13.txt
+  EXL3_MOE_CPU_SWAP=0 EXL3_MOE_CPU_SPLIT=$K13 $PG13 --tp --tp-moe-ts --rotulo "tp2-canais-split$K13" 2>&1 | grep -E "$G13" | tee -a /workspace/13.txt
+  echo "13 terminou"
+fi
+
 {
   echo "bancada $PROVA_ID · $(nvidia-smi --query-gpu=name --format=csv,noheader | sort | uniq -c | tr '\n' ' ')"
   echo "--- 3b"; grep -E "== bloco|vs original|Error|error" /workspace/3b.txt | head -40
@@ -355,6 +386,7 @@ fi
   echo "--- 10"; cat /workspace/10.txt 2>/dev/null
   echo "--- 11"; cat /workspace/11.txt 2>/dev/null
   echo "--- 12"; cat /workspace/12.txt 2>/dev/null
+  echo "--- 13"; cat /workspace/13.txt 2>/dev/null
   echo "--- 5a tabelas"; sed -n '/PREFILL por módulo/,/FIM_PERFIL/p' /workspace/5a.txt | head -60
 } | tee /workspace/resumo.txt
 publicar

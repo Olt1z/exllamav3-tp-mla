@@ -9,7 +9,8 @@ nos dois lados da comparação (uma placa × TP), então serve para a bancada.
 
     python3 reparar_kv_b_proj.py /workspace/corte
 """
-import json, sys
+import json
+import os, sys
 import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
@@ -17,6 +18,9 @@ from exllamav3.modules.quant.exl3 import LinearEXL3
 
 d = sys.argv[1]
 idx_path = f"{d}/model.safetensors.index.json"
+if not os.path.exists(idx_path):
+    print("sem índice de shards: artefato de um arquivo só (conversor nativo), nada a reparar")
+    raise SystemExit(0)
 idx = json.load(open(idx_path))
 wm = idx["weight_map"]
 cfg = json.load(open(f"{d}/config.json"))

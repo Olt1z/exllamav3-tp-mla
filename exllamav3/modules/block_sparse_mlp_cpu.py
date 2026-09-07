@@ -186,8 +186,11 @@ class BlockSparseMLP_CPU:
             host = getattr(self, "cpu_host", None)
             if host is not None:
                 host.unregister()
-            (self.gates, self.ups, self.downs, self.modules,
-             self.num_local_experts, self.routing_first, self.routing_last) = self._split_saved
+            # Under TP the module was imported already shrunk (the tail never travelled), so
+            # there are no saved lists to restore
+            if getattr(self, "_split_saved", None) is not None:
+                (self.gates, self.ups, self.downs, self.modules,
+                 self.num_local_experts, self.routing_first, self.routing_last) = self._split_saved
             self._split_saved = None
             self.cpu_split_first = None
             if self._split_map is not None:
@@ -426,30 +429,8 @@ class BlockSparseMLP_CPU:
         expert compute instead of serializing a whole layer. Registration only. The caller
         proceeds with the normal load, which now loads just the GPU slice.
         """
-        stc = self.config.stc
-        cpu = torch.device("cpu")
         first = self.num_experts - split_k
-
-        # Same eligibility probes as the whole-layer path, on the tail experts
-        probe = ([self.gates[first]] if self.gated else []) + [self.ups[first], self.downs[first]]
-        for l in probe:
-            if stc.get_tensor(l.key + ".mul1", cpu, optional = True) is None:
-                print(f" !! {self.key}: experts are not mul1, CPU split skipped")
-                return False
-        def hdr_shape(l):
-            return stc.list_tensors(l.key)[l.key + ".trellis"]["shape"]
-        for l in probe:
-            if hdr_shape(l)[-1] // 16 > 8:
-                print(f" !! {self.key}: K > 8, CPU split skipped")
-                return False
-        def bias_keys(ls):
-            has = [(l.key + ".bias") in stc.tensor_file_map for l in ls[first:]]
-            if any(has) and not all(has):
-                print(f" !! {self.key}: mixed expert biases, CPU split skipped")
-                return None
-            return all(has)
-        checks = [bias_keys(ls) for ls in ([self.gates] if self.gated else []) + [self.ups, self.downs]]
-        if any(c is None for c in checks):
+        if not self.cpu_split_eligible(first):
             return False
 
         # Optional frequency-guided placement (EXL3_MOE_CPU_SPLIT_STATS = json of per-layer
@@ -491,53 +472,10 @@ class BlockSparseMLP_CPU:
                 print(f" !! {self.key}: no routing stats for layer, tail placement unpermuted")
 
         self.device = torch.device(device)
-
-        from ..model.moe_cpu_host import MoeCpuHost
-        comp = getattr(self.config.infer_params, "moe_cpu_component", "text")
-        hosts = getattr(self.config, "moe_cpu_hosts", None)
-        if hosts is None:
-            hosts = {}
-            self.config.moe_cpu_hosts = hosts
-        host = hosts.get(comp)
-        if host is None:
-            host = MoeCpuHost(self.config)
-            hosts[comp] = host
-        self.cpu_host = host
-        self.cpu_component = comp
-
-        def dims_of(l):
-            s = stc.list_tensors(l.key)[l.key + ".trellis"]["shape"]
-            return (s[0] * 16, s[1] * 16, s[2] // 16)
-        gd = dims_of(self.gates[first]) if self.gated else None
-        ud = dims_of(self.ups[first])
-        dd = dims_of(self.downs[first])
-        hi, ho = ud[0], dd[1]
-
-        def fetch_aux(ls, suffix, optional = False):
-            out = [stc.get_tensor(l.key + suffix, self.device, optional = optional,
-                                  float2half = True) for l in ls[first:]]
-            return out if not optional or out[0] is not None else None
-        aux = dict(
-            suh_u = fetch_aux(self.ups, ".suh"), svh_u = fetch_aux(self.ups, ".svh"),
-            suh_d = fetch_aux(self.downs, ".suh"), svh_d = fetch_aux(self.downs, ".svh"),
-            bias_u = fetch_aux(self.ups, ".bias", True),
-            bias_d = fetch_aux(self.downs, ".bias", True),
-        )
-        if self.gated:
-            aux["suh_g"] = fetch_aux(self.gates, ".suh")
-            aux["svh_g"] = fetch_aux(self.gates, ".svh")
-            aux["bias_g"] = fetch_aux(self.gates, ".bias", True)
-
-        self.cpu_layer_idx = host.register_layer(
-            self.key,
+        self._cpu_split_register(
             [l.key for l in self.gates[first:]] if self.gated else [],
             [l.key for l in self.ups[first:]],
             [l.key for l in self.downs[first:]],
-            {"silu": 0, "gelu": 1, "relu2": 2, "swiglu_oai": 3}[self.activation_fn],
-            float(self.act_limit or 0.0),
-            hi, ho, self.num_experts_per_tok,
-            proj_dims = dict(g = gd, u = ud, d = dd),
-            aux = aux,
         )
 
         # Shrink to the GPU slice. The tail Linears leave the module tree entirely (never
@@ -559,6 +497,99 @@ class BlockSparseMLP_CPU:
               f"[{first}..{self.num_experts}) of {self.num_experts}")
         return True
 
+
+    def cpu_split_eligible(self, first: int) -> bool:
+        """The whole-layer path's eligibility probes, on the tail experts [first, E): mul1
+        codebook, K <= 8, uniform biases. Reads the checkpoint (needs a real config.stc), so
+        under TP it runs on the parent at export time, never on the imported modules."""
+        stc = self.config.stc
+        cpu = torch.device("cpu")
+        probe = ([self.gates[first]] if self.gated else []) + [self.ups[first], self.downs[first]]
+        for l in probe:
+            if stc.get_tensor(l.key + ".mul1", cpu, optional = True) is None:
+                print(f" !! {self.key}: experts are not mul1, CPU split skipped")
+                return False
+        def hdr_shape(l):
+            return stc.list_tensors(l.key)[l.key + ".trellis"]["shape"]
+        for l in probe:
+            if hdr_shape(l)[-1] // 16 > 8:
+                print(f" !! {self.key}: K > 8, CPU split skipped")
+                return False
+        for ls in ([self.gates] if self.gated else []) + [self.ups, self.downs]:
+            has = [(l.key + ".bias") in stc.tensor_file_map for l in ls[first:]]
+            if any(has) and not all(has):
+                print(f" !! {self.key}: mixed expert biases, CPU split skipped")
+                return False
+        return True
+
+    def _cpu_split_register(self, gate_keys, up_keys, down_keys):
+        """Register the tail experts (by checkpoint key) with this component's CPU worker.
+        Key-based on purpose: under TP the tail Linears never exist on the importing rank,
+        only their keys travel. Needs config.stc open (the worker child re-reads the weights
+        from its own checkpoint handle; the aux tensors are fetched here)."""
+        stc = self.config.stc
+        from ..model.moe_cpu_host import MoeCpuHost
+        comp = getattr(self.config.infer_params, "moe_cpu_component", "text")
+        hosts = getattr(self.config, "moe_cpu_hosts", None)
+        if hosts is None:
+            hosts = {}
+            self.config.moe_cpu_hosts = hosts
+        host = hosts.get(comp)
+        if host is None:
+            host = MoeCpuHost(self.config)
+            hosts[comp] = host
+        self.cpu_host = host
+        self.cpu_component = comp
+
+        def dims_of(k):
+            s = stc.list_tensors(k)[k + ".trellis"]["shape"]
+            return (s[0] * 16, s[1] * 16, s[2] // 16)
+        gd = dims_of(gate_keys[0]) if self.gated else None
+        ud = dims_of(up_keys[0])
+        dd = dims_of(down_keys[0])
+        hi, ho = ud[0], dd[1]
+
+        def fetch_aux(keys, suffix, optional = False):
+            out = [stc.get_tensor(k + suffix, self.device, optional = optional,
+                                  float2half = True) for k in keys]
+            return out if not optional or out[0] is not None else None
+        aux = dict(
+            suh_u = fetch_aux(up_keys, ".suh"), svh_u = fetch_aux(up_keys, ".svh"),
+            suh_d = fetch_aux(down_keys, ".suh"), svh_d = fetch_aux(down_keys, ".svh"),
+            bias_u = fetch_aux(up_keys, ".bias", True),
+            bias_d = fetch_aux(down_keys, ".bias", True),
+        )
+        if self.gated:
+            aux["suh_g"] = fetch_aux(gate_keys, ".suh")
+            aux["svh_g"] = fetch_aux(gate_keys, ".svh")
+            aux["bias_g"] = fetch_aux(gate_keys, ".bias", True)
+
+        self.cpu_layer_idx = host.register_layer(
+            self.key, gate_keys, up_keys, down_keys,
+            {"silu": 0, "gelu": 1, "relu2": 2, "swiglu_oai": 3}[self.activation_fn],
+            float(self.act_limit or 0.0),
+            hi, ho, self.num_experts_per_tok,
+            proj_dims = dict(g = gd, u = ud, d = dd),
+            aux = aux,
+        )
+
+    def cpu_split_register_tp(self, first: int, tail: dict):
+        """TP (tensor-split experts): the OUTPUT-DEVICE rank alone owns the CPU tail. Every
+        rank was imported already shrunk to [0, first) (the tail never travelled), so the GPU
+        paths mask the tail everywhere; this rank submits the tail to the worker and folds the
+        partial in before the all-reduce, which therefore counts it exactly once. The worker
+        reads whole experts from the checkpoint, which is why only one rank may submit: two
+        would sum the same tail twice. Static placement only: the dynamic swap re-reads whole
+        experts into GPU slots that here hold channel slices."""
+        self._split_perm = None
+        self._split_dynamic = False
+        self._split_map = None
+        self._split_hist = None
+        self._split_saved = None
+        self._cpu_split_register(tail["gates"], tail["ups"], tail["downs"])
+        self.cpu_split_first = first
+        print(f" -- CPU split experts (worker, static, TP output rank): {self.key} "
+              f"[{first}..{self.num_experts}) of {self.num_experts}")
 
     def _split_swap_tick(self):
         """Dynamic placement sweep trigger: the first registered module counts decode

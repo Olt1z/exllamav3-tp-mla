@@ -1460,14 +1460,35 @@ class BlockSparseMLP(BlockSparseMLP_CPU, Module):
         return t
 
 
+    def _tp_cpu_split_first(self, tensor_split: bool) -> int | None:
+        """Where the GPU slice ends under TP with the CPU expert split: E - k, or None. Only
+        the tensor-split (channels) layout supports it: every rank holds every expert, so
+        masking the tail on all ranks and computing it on one is exact. Under expert
+        parallelism the tail would straddle ranks; say so loudly instead of skipping in
+        silence (the silent skip loads the whole model on the GPU and OOMs later, with the
+        machine already paid for)."""
+        k = int(getattr(self.config.infer_params, "moe_cpu_split", 0) or 0)
+        if not (0 < k < self.num_experts):
+            return None
+        if not tensor_split:
+            if not getattr(BlockSparseMLP, "_warned_ep_split", False):
+                BlockSparseMLP._warned_ep_split = True
+                print(" !! EXL3_MOE_CPU_SPLIT is ignored under expert-parallel TP: every rank holds a"
+                      " different expert range. Load with tp_options={'moe_tensor_split': True}"
+                      " (-tp_moe_ts) to keep the tail on the CPU worker of the output rank")
+            return None
+        return self.num_experts - k
+
     def make_tp_allocation(self, options: dict) -> list[TPAllocation]:
+        first = self._tp_cpu_split_first(bool(options.get("moe_tensor_split", False)))
+        n_gpu = first if first is not None else self.num_experts
         storage = 0
         storage += self.routing_gate.storage_size()
         if self.shared_gate:
             storage += self.shared_gate.storage_size()
-        for g in self.gates: storage += g.storage_size()
-        for u in self.ups: storage += u.storage_size()
-        for d in self.downs: storage += d.storage_size()
+        for g in self.gates[:n_gpu]: storage += g.storage_size()
+        for u in self.ups[:n_gpu]: storage += u.storage_size()
+        for d in self.downs[:n_gpu]: storage += d.storage_size()
         # TODO: More precise overhead estimate accounting for gate etc.
         overhead_d = self.hidden_size * torch.float.itemsize
         overhead_s = 4 * self.intermediate_size * (self.interm_dtype or torch.half).itemsize
@@ -1504,7 +1525,23 @@ class BlockSparseMLP(BlockSparseMLP_CPU, Module):
             nonlocal producer
             return child.tp_export(plan, producer) if child is not None else None
 
+        # CPU expert split under TP: the tail [first, E) never travels. The parent (real
+        # config.stc) checks eligibility here; the importing output rank registers the tail
+        # by key (see cpu_split_register_tp)
+        unit = next((plan[d][self.key][2] for d in plan if self.key in plan[d]), None)
+        first = self._tp_cpu_split_first(unit == "channels")
+        if first is not None and not self.cpu_split_eligible(first):
+            first = None
+        n_exp = first if first is not None else self.num_experts
+        tail = None if first is None else {
+            "gates": [l.key for l in self.gates[first:]] if self.gated else [],
+            "ups": [l.key for l in self.ups[first:]],
+            "downs": [l.key for l in self.downs[first:]],
+        }
+
         return {
+            "cpu_split_first": first,
+            "cpu_split_tail": tail,
             "cls": BlockSparseMLP,
             "kwargs": {
                 "key": self.key,
@@ -1529,9 +1566,9 @@ class BlockSparseMLP(BlockSparseMLP_CPU, Module):
             "shared_gate": _export(self.shared_gate),
             "e_score_correction_bias": producer.send(self.e_score_correction_bias),
             "per_expert_scale": producer.send(self.per_expert_scale),
-            "gates": [_export(self.gates[i]) for i in range(self.num_experts)] if self.gated else None,
-            "ups": [_export(self.ups[i]) for i in range(self.num_experts)],
-            "downs": [_export(self.downs[i]) for i in range(self.num_experts)],
+            "gates": [_export(self.gates[i]) for i in range(n_exp)] if self.gated else None,
+            "ups": [_export(self.ups[i]) for i in range(n_exp)],
+            "downs": [_export(self.downs[i]) for i in range(n_exp)],
             "shared_experts": self.shared_experts.tp_export(plan, producer) \
                 if self.shared_experts is not None else None,
             "shared_experts_post_norm": _export(self.shared_experts_post_norm),
@@ -1575,8 +1612,12 @@ class BlockSparseMLP(BlockSparseMLP_CPU, Module):
         gated = exported.get("gates") is not None
 
         # Tensor parallel
+        cpu_split_first = exported.get("cpu_split_first")
         if unit == "channels":
-            num_local_experts = exported["kwargs"]["num_experts"]
+            # With the CPU expert split only the head [0, cpu_split_first) was exported: every
+            # rank masks the tail like a TP expert shard (num_local_experts < num_experts with
+            # routing_first 0), and the output rank alone computes it on the CPU worker
+            num_local_experts = cpu_split_first if cpu_split_first is not None else exported["kwargs"]["num_experts"]
             gu_split = (True, first, last)
             d_split = (False, first, last)
             exported["kwargs"]["intermediate_size"] = last - first
@@ -1622,6 +1663,13 @@ class BlockSparseMLP(BlockSparseMLP_CPU, Module):
         module.per_expert_scale = consumer.recv(exported["per_expert_scale"], cuda = True)
         if exported.get("tid2eid") is not None and device == output_device:
             module.tid2eid = consumer.recv(exported["tid2eid"], cuda = True)
+        if cpu_split_first is not None and device == output_device:
+            # The output rank runs in the main process and gets the real config (stc open
+            # during the distribution loop); the spawned ranks keep the NullConfig
+            config = local_context.get("config")
+            assert config is not None, "CPU expert split under TP needs the parent config on the output rank"
+            module.config = config
+            module.cpu_split_register_tp(cpu_split_first, exported["cpu_split_tail"])
         if unit == "channels" or num_local_experts > 0:
             module.load_local()
         if module.routing_gate is not None:
