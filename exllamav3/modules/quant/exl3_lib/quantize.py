@@ -2,6 +2,7 @@ import torch
 import torch.nn.functional as F
 import math
 import os
+import time
 from ....ext import exllamav3_ext as ext
 from ....util.progress import ProgressBar
 from ....util.memory import free_mem, list_gpu_tensors
@@ -1531,6 +1532,10 @@ def quantize_exl3_batch(
         quantize_exl3 updates quant_args
     """
     n_t = len(weights)
+    _tm = {} if os.environ.get("EXL3_CONVERT_TIMING") == "1" else None
+    def _mark(phase, t0):
+        if _tm is not None:
+            torch.cuda.synchronize(device); _tm[phase] = _tm.get(phase, 0.0) + time.time() - t0
     qa0 = quant_args_list[0]
     devices = qa0["devices"]
     device = torch.device(devices[0])
@@ -1548,8 +1553,10 @@ def quantize_exl3_batch(
 
         # Finalize Hessians, replicating the serial path's per-tensor RNG stream. Fallback tensors are
         # handled individually by quantize_exl3
+        _t0 = time.time()
         finalized = []
         batch_idx = []
+        _mark("finalize", _t0)
         for t in range(n_t):
             qa = quant_args_list[t]
             if "seed" in qa:
@@ -1571,6 +1578,7 @@ def quantize_exl3_batch(
         # Regularize each tensor with the scale search deferred, then search all scales in one
         # batch. Weights arrive in checkpoint precision on the CPU; the stager uploads tensor
         # t+1 while tensor t regularizes and casts to fp32 on the device
+        _t0 = time.time()
         stager = _WeightStager(device)
         stager.prefetch(batch_idx[0], weights[batch_idx[0]])
         regs = {}
@@ -1592,8 +1600,10 @@ def quantize_exl3_batch(
             regs[t] = [weight_r, su, sv, apply_out_scales]
             weights[t] = None
 
+        _mark("regularize", _t0); _t0 = time.time()
         samples = [sample_scale_tiles(regs[t][0]) for t in batch_idx]
         scales = g_scale_search_batch(samples, qa0)
+        _mark("g_scale", _t0)
         del samples
         g_scales = {}
         for t, (g_scale, _) in zip(batch_idx, scales):
@@ -1606,6 +1616,7 @@ def quantize_exl3_batch(
         pb.new_task(progress_text, tiles_k)
 
         # Quantize
+        _t0 = time.time()
         if shared_H:
             # A shared H_data serves many groups spread over several device threads; cache the
             # device copies of L (and H, below) in the dict so each device pays the transfer
@@ -1637,6 +1648,7 @@ def quantize_exl3_batch(
             encodeds = list(encoded_stack.unbind(0))
 
         pb.update(tiles_k)
+        _mark("ldlq", _t0); _t0 = time.time()
 
         # Per-tensor metrics and packing
         Hd = None
@@ -1689,4 +1701,7 @@ def quantize_exl3_batch(
             })
             results[t] = (proxy_err, out_tensors)
 
+        _mark("post", _t0)
+        if _tm is not None:
+            print(f" -- Timing batch n={n_t} {'concat' if shared_H else 'batched'}: " + " · ".join(f"{k} {v:.1f} s" for k, v in _tm.items()), flush = True)
     return results
