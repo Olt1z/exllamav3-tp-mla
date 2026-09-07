@@ -177,11 +177,15 @@ if [ -n "${ETAPA8:-}" ] || [ -n "${SO_9:-}" ]; then
   lscpu | grep -E "Model name|^CPU\(s\)|Thread|avx512" | head -4; free -g | head -2
   TAM9="${TAM9:-4096,16384,30000}"
   PG9="python3 tests/bancada/perfil_gerador.py -m /workspace/corte --tokens $TAM9 --cache 32768 --novos 128"
-  F9="prefill|Error|error|Traceback|FIM_PERFIL|mul1|offload|split|CPU"
+  F9="prefill|decode|Error|error|Traceback|FIM_PERFIL|mul1|offload|split|CPU|tok/s"
   : > /workspace/9.txt
-  for V in "" "EXL3_MOE_CPU_OFFLOAD=1" "EXL3_MOE_CPU_SPLIT=64" "EXL3_MOE_CPU_SPLIT=128" "EXL3_MOE_CPU_SPLIT=192" "EXL3_MOE_CPU_SPLIT=256"; do
+  # V9: variantes separadas por vírgula; "placa" = tudo na GPU (não cabe no Flash inteiro numa placa)
+  IFS=',' read -ra VARIANTES9 <<< "${V9:-placa,EXL3_MOE_CPU_OFFLOAD=1,EXL3_MOE_CPU_SPLIT=64,EXL3_MOE_CPU_SPLIT=128,EXL3_MOE_CPU_SPLIT=192,EXL3_MOE_CPU_SPLIT=256}"
+  for V in "${VARIANTES9[@]}"; do
+    [ "$V" = "placa" ] && V=""
     echo "--- ${V:-tudo na placa}" | tee -a /workspace/9.txt
     env CUDA_VISIBLE_DEVICES=0 $V $PG9 --rotulo "${V:-placa}" 2>&1 | grep -E "$F9" | tee -a /workspace/9.txt
+    nvidia-smi --query-gpu=memory.used --format=csv,noheader | head -1 | tee -a /workspace/9.txt; free -g | sed -n 2p | tee -a /workspace/9.txt
   done
   echo "9 terminou"
 fi
