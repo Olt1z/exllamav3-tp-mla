@@ -78,6 +78,8 @@ def cmd_comprar(a: argparse.Namespace) -> None:
         "cp /tmp/fork-boot/tests/bancada/onstart-bancada.sh /workspace/onstart-bancada.sh && rm -rf /tmp/fork-boot\n"
         "exec bash /workspace/onstart-bancada.sh\n"
     )
+    if any("," in kv for kv in (a.env or [])):
+        raise SystemExit("--env com vírgula no valor: a Vast descarta o env e o onstart em silêncio; use ':' como separador")
     if subprocess.run(["git", "-C", str(Path(__file__).parent), "status", "--porcelain", "onstart-bancada.sh"], capture_output=True, text=True).stdout.strip():
         raise SystemExit("onstart-bancada.sh tem mudança local não commitada: a máquina roda o do GitHub")
     prova_id = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
@@ -133,7 +135,7 @@ def main() -> None:
     c.add_argument("--corte", default="Olt1z/GLM-5.3-podado-4L-EXL3-balanced-bl4ck0ut")
     c.add_argument("--base-devices", default="0", help="'0' para corte; 'all' para modelo grande (base em autosplit)")
     c.add_argument("--tokens", type=int, default=64)
-    c.add_argument("--env", action="append", help="variável extra para o onstart, CHAVE=valor (repetível; ex.: SO_7=1)")
+    c.add_argument("--env", action="append", help="variável extra para o onstart, CHAVE=valor (repetível; ex.: SO_7=1). Sem vírgula no valor: em 07/09 a Vast criou a instância sem env e sem onstart quando o valor tinha vírgulas; listas vão com ':'")
     lg = sub.add_parser("log"); lg.add_argument("instancia", type=int); lg.add_argument("--linhas", type=int, default=200)
     d = sub.add_parser("destruir"); d.add_argument("instancia", type=int)
     a = p.parse_args()

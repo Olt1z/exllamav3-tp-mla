@@ -179,8 +179,8 @@ if [ -n "${ETAPA8:-}" ] || [ -n "${SO_9:-}" ]; then
   PG9="python3 tests/bancada/perfil_gerador.py -m /workspace/corte --tokens $TAM9 --cache 32768 --novos 128"
   F9="prefill|decode|Error|error|Traceback|FIM_PERFIL|mul1|offload|split|CPU|tok/s"
   : > /workspace/9.txt
-  # V9: variantes separadas por vírgula; "placa" = tudo na GPU (não cabe no Flash inteiro numa placa)
-  IFS=',' read -ra VARIANTES9 <<< "${V9:-placa,EXL3_MOE_CPU_OFFLOAD=1,EXL3_MOE_CPU_SPLIT=64,EXL3_MOE_CPU_SPLIT=128,EXL3_MOE_CPU_SPLIT=192,EXL3_MOE_CPU_SPLIT=256}"
+  # V9: variantes separadas por ':' (a Vast rejeitou em silêncio o env inteiro, e o onstart junto, com vírgulas no valor em 07/09) ou vírgula; "placa" = tudo na GPU (não cabe no Flash inteiro numa placa)
+  IFS=',:' read -ra VARIANTES9 <<< "${V9:-placa,EXL3_MOE_CPU_OFFLOAD=1,EXL3_MOE_CPU_SPLIT=64,EXL3_MOE_CPU_SPLIT=128,EXL3_MOE_CPU_SPLIT=192,EXL3_MOE_CPU_SPLIT=256}"
   for V in "${VARIANTES9[@]}"; do
     [ "$V" = "placa" ] && V=""
     echo "--- ${V:-tudo na placa}" | tee -a /workspace/9.txt
