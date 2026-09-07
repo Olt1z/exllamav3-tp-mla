@@ -984,70 +984,6 @@ class BlockSparseMLP(BlockSparseMLP_CPU, Module):
         super().unload()
 
 
-    def all_experts_capture_ok(self) -> bool:
-        from .quant.fp16 import LinearFP16
-        return all(
-            isinstance(l.inner, LinearFP16) and l.inner.bias is None and l.inner._pinned_store is None and not l.lora_a_tensors
-            for l in (*self.ups, *self.gates, *self.downs)
-        )
-
-    def forward_all_experts_capture(
-        self,
-        y: torch.Tensor,
-        routing_weights: torch.Tensor,
-        out: torch.Tensor,
-        params: dict,
-        chunk: int = 16,
-    ):
-        """
-        y: (T, hidden) fp16 input to the routed experts; routing_weights: (T, E) fp16; out: (T, hidden)
-        fp32 accumulator. Chunks of `chunk` experts keep the temporaries under ~2 GB.
-        """
-        T = y.shape[0]
-        E = self.num_local_experts
-        cap = params["capture"]
-        # gate/up share one Hessian (qmap ".input"): whichever key registered it first accumulates
-        self.ups[0].capture_H(y, params)
-        self.gates[0].capture_H(y, params)
-        for c0 in range(0, E, chunk):
-            idx = range(c0, min(E, c0 + chunk))
-            C = len(idx)
-            wu = torch.stack([self.ups[e].inner.weight for e in idx])      # (C, hidden, I)
-            wg = torch.stack([self.gates[e].inner.weight for e in idx])
-            u = torch.matmul(y, wu)                                         # (C, T, I) fp16
-            g = torch.matmul(y, wg)
-            a = torch.empty_like(u)
-            I = u.shape[-1]
-            self.activation_fn_call(g.view(-1, I), u.view(-1, I), a.view(-1, I), self.act_limit)
-            del u, g, wu, wg
-            # Hessian of each expert's down projection, as Linear.capture_H does it: fp32 copy,
-            # non-finite rows zeroed and discounted, one XᵀX per expert (batched here)
-            a_f = a.float()
-            finite = torch.isfinite(a_f).all(dim = 2, keepdim = True)
-            a_f.masked_fill_(~finite, 0.0)
-            hs = torch.bmm(a_f.transpose(1, 2), a_f)                        # (C, I, I) fp32
-            dropped = (~finite).sum(dim = (1, 2))
-            del a_f
-            for j, e in enumerate(idx):
-                down = self.downs[e]
-                if down.qmap not in cap:
-                    cap[down.qmap] = down.init_H_data(True)
-                hd = cap[down.qmap]
-                hd["num_total"] += a[j].numel()
-                ext.count_inf_nan(a[j], hd["inf_nan"])
-                if hd["first_key"] == down.key:
-                    hd["H"] += hs[j]
-                    hd["count"] += T
-                    hd["dropped"] += dropped[j]
-            del hs
-            wd = torch.stack([self.downs[e].inner.weight for e in idx])    # (C, I, hidden)
-            d = torch.empty((C, T, self.hidden_size), dtype = torch.float, device = y.device)
-            for j in range(C):
-                ext.hgemm(a[j], wd[j], d[j])
-            del a, wd
-            out += torch.einsum("ctd,tc->td", d, routing_weights[:, c0:c0 + C].float())
-            del d
-
     @override
     def forward(
         self,
@@ -1225,21 +1161,6 @@ class BlockSparseMLP(BlockSparseMLP_CPU, Module):
                 interm_a = None
                 max_count = 0
                 start = 0
-
-                # Calibration with every expert active (convert_model): each expert sees every
-                # token, so the per-expert Python iteration (index_select, 3 Linear.forward with
-                # capture, activation, index_add: ~20 launches and a host round trip per expert)
-                # is replaced by batched matmuls over chunks of experts. Same arithmetic as the
-                # loop: fp16 GEMMs with fp32 accumulate, down through hgemm into fp32, H per expert
-                if (
-                    expert_count_list is not None and params.get("activate_all_experts") and
-                    "capture" in params and self.num_local_experts == self.num_experts and
-                    not (self.bc is not None and self.support_quant_paths) and
-                    self.gated and self.interm_dtype == torch.half and self.activation_fn_call is not None and
-                    self.all_experts_capture_ok()
-                ):
-                    self.forward_all_experts_capture(y, routing_weights, final_hidden_states, params)
-                    expert_count_list = None
 
                 # expert_count_list None: everything already handled by the fused kernel above
                 for expert_idx in range(num_ex if expert_count_list is not None else 0):
