@@ -1548,7 +1548,8 @@ class BlockSparseMLP(BlockSparseMLP_CPU, Module):
         # CPU expert split under TP: the tail [first, E) never travels. The parent (real
         # config.stc) checks eligibility here; the importing output rank registers the tail
         # by key (see cpu_split_register_tp)
-        unit = next((plan[d][self.key][2] for d in plan if self.key in plan[d]), None)
+        # `plan` is a list indexed by device (compile_tp_plan), one dict per device
+        unit = next((p[self.key][2] for p in plan if p and self.key in p), None)
         first = self._tp_cpu_split_first(unit == "channels")
         n_exp = first if first is not None else self.num_experts
         tail = None if first is None else {
