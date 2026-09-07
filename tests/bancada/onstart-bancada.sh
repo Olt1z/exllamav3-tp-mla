@@ -211,11 +211,14 @@ PY
   source /workspace/work/motor.env
   marco "10b. convert.py"
   T0=$(date +%s)
-  CUDA_VISIBLE_DEVICES=0 TERM=dumb COLUMNS=200 python3 convert.py -i /workspace/origem -w /workspace/work -o /workspace/exl3 \
+  CUDA_VISIBLE_DEVICES=0 TERM=dumb COLUMNS=200 EXL3_CONVERT_TIMING=1 python3 convert.py -i /workspace/origem -w /workspace/work -o /workspace/exl3 \
     --recipe /workspace/work/recipe.yaml --codebook mul1 --devices 0 --cal_data $Q/cal_bl4ck0ut.safetensors \
     -cr 503 -cc 2048 -hb "$HEAD_BITS" -mb "$MTP_BITS" -vb "$VISION_BITS" -cpi 900 2>&1 | tee /workspace/10-convert.txt | grep -E "layers\.[0-9]+ +bpw|Unquantized|Estimated|!!|##|Error|error|All done"
   echo "convert.py: $(( $(date +%s) - T0 )) s no total" | tee -a /workspace/10.txt
   du -sh /workspace/exl3 | tee -a /workspace/10.txt
+  # PROVA9_SO_CONVERT=1: só o tempo por fase (EXL3_CONVERT_TIMING), sem manifest, KL nem publicação
+  if [ -n "${PROVA9_SO_CONVERT:-}" ]; then grep -a -E "Timing|layers\.[0-9]+ +bpw" /workspace/10-convert.txt | cut -c1-200 | tee -a /workspace/10.txt; echo "10 terminou"; fi
+  if [ -z "${PROVA9_SO_CONVERT:-}" ]; then
   marco "10c. manifest"
   python3 $Q/scripts/manifest_exl3.py --artefato /workspace/exl3 --origem /workspace/origem --receita $Q/saidas/$RECEITA_ID/receita.json --saida /workspace/exl3/manifest.json 2>&1 | tail -15 | tee -a /workspace/10.txt
   marco "10d. KL: BF16 → nativo e → esteira GPTQModel"
@@ -238,6 +241,7 @@ api.create_repo("$SAIDA_NATIVO", exist_ok=True)
 api.upload_folder(folder_path="/workspace/exl3", repo_id="$SAIDA_NATIVO", commit_message="corte 4L do Flash em EXL3 mul1 pelo convert.py nativo, receita do hub, prova da etapa 9 ($PROVA_ID)")
 PY
   echo "10 terminou"
+  fi
 fi
 
 {

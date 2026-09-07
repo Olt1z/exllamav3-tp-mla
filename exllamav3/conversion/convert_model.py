@@ -560,6 +560,23 @@ def quantize_linears_single(args, linears, config, strategy, idx, devices, devic
             print_quantized_linear(config, linear, quant_args, proxy_err, f"  [{t.interval:4.2f} s]")
 
 
+# EXL3_CONVERT_TIMING=1: per-phase and per-group wall times, to see where a layer's time goes
+CONVERT_TIMING = os.environ.get("EXL3_CONVERT_TIMING") == "1"
+_timing_marks = {}
+
+def timing_mark(key: str, phase: str, t_start: float):
+    if not CONVERT_TIMING:
+        return
+    torch.cuda.synchronize()
+    _timing_marks[phase] = _timing_marks.get(phase, 0.0) + (time.time() - t_start)
+
+def timing_report(key: str):
+    if not CONVERT_TIMING or not _timing_marks:
+        return
+    print(f" -- Timing {key}: " + " · ".join(f"{k} {v:.1f} s" for k, v in _timing_marks.items()), flush = True)
+    _timing_marks.clear()
+
+
 def dispatch_quantize(args, linears, config, strategy, idx, devices, ratios_thread, ratios_tiles, capture_H, state):
     """
     Linears kept at 16 bpw are only announced and skipped, so they must not decide the dispatch: a
@@ -625,6 +642,7 @@ def quantize_linears_parallel(args, linears, config, strategy, idx, devices, dev
             work_numel = sum(l.weights_numel() for g in dev_groups for l in g)
 
             for group in dev_groups:
+                tg = time.time()
                 if len(group) > 1:
                     quant_args_list = [make_quant_args(args, idx, strategy[l.key], [device_idx]) for l in group]
                     proxy_errs = convert_exl3_group(
@@ -632,6 +650,11 @@ def quantize_linears_parallel(args, linears, config, strategy, idx, devices, dev
                         [capture_H[l.qmap] for l in group],
                         quant_args_list,
                     )
+                    if CONVERT_TIMING:
+                        torch.cuda.synchronize(torch.device(device_idx))
+                        shared = all(capture_H[l.qmap] is capture_H[group[0].qmap] for l in group)
+                        print(f" -- Timing group: {'concat' if shared else 'batched'} n={len(group)} K={strategy[group[0].key]}"
+                              f" numel={sum(l.weights_numel() for l in group):,} first={group[0].key} [{time.time() - tg:.1f} s]", flush = True)
                     for linear, quant_args_local, proxy_err in zip(group, quant_args_list, proxy_errs):
                         assert isinstance(linear.inner, LinearEXL3)
                         linear.inner.swap_cpu()
@@ -654,6 +677,9 @@ def quantize_linears_parallel(args, linears, config, strategy, idx, devices, dev
                 linear.inner.swap_cpu()
 
                 print_quantized_linear(config, linear, quant_args_local, proxy_err)
+                if CONVERT_TIMING:
+                    torch.cuda.synchronize(torch.device(device_idx))
+                    print(f" -- Timing group: single K={strategy[linear.key]} numel={linear.weights_numel():,} key={linear.key} [{time.time() - tg:.1f} s]", flush = True)
                 with progress_lock:
                     curr_progress += 1
 
@@ -1190,6 +1216,7 @@ def main(args, job_state):
             defer = module.can_defer_load()
             if defer:
                 module.config.stc.begin_deferred_load()
+            t_load = time.time()
             try:
                 module.load(
                     torch.device("cpu") if module.caps.get("prefer_cpu") else device,
@@ -1198,6 +1225,7 @@ def main(args, job_state):
             finally:
                 if defer:
                     module.config.stc.end_deferred_load()
+                timing_mark(module.key, "load", t_load)
             for m in module:
                 if m.used_alt_key and not slicing:
                     print(f"     - Cloned {m.key} from {m.alt_key}")
@@ -1211,6 +1239,7 @@ def main(args, job_state):
                 # are activated to ensure all down projections capture at least some calibration data. When the
                 # state is advanced later, only selected experts will be used.
                 if state is not None:
+                    t_capture = time.time()
                     capture_replicas = None
                     if parallel_calib and not module.caps.get("prefer_cpu"):
                         capture_replicas = load_parallel_calib_modules(
@@ -1272,6 +1301,7 @@ def main(args, job_state):
                                         bad_rows.add(i)
                                         print(f" !! Non-finite reference state in calibration row {i}, excluding row")
                                 rs = None
+                    timing_mark(module.key, "capture", t_capture)
                     print(f" -- Captured: {module.key}" + slice_str, flush = True)
 
                     # More feedback
@@ -1311,7 +1341,9 @@ def main(args, job_state):
             # Quantize: one linear per device in parallel when the layer has enough
             # tensors to occupy every device, else tile-split each tensor across devices
             # (single large tensors, e.g. lm_head)
+            t_quant = time.time()
             dispatch_quantize(args, linears, config, strategy, idx, devices, eff_ratios("quant_thread"), eff_ratios("quant_tiles"), capture_H, state)
+            timing_mark(module.key, "quantize", t_quant)
 
             # Collect converted module tensors
             for m in module:
@@ -1325,7 +1357,9 @@ def main(args, job_state):
 
         # Save layer tensors to working directory
         clear_temp_files(args)
+        t_save = time.time()
         save_tensor(q_tensors, f"qtensors/{module.key}.safetensors", args)
+        timing_mark(module.key, "save", t_save)
 
         # Output final bpw for layer
         num_bytes = dsize(q_tensors)
@@ -1345,6 +1379,7 @@ def main(args, job_state):
         config.stc.set_new_tensors(None)
         del q_tensors
 
+        t_advance = time.time()
         # Advance state
         error = 0
         cos_error = 0
@@ -1412,7 +1447,9 @@ def main(args, job_state):
         # Feedback after module. Trim first so the reported RSS reflects what the job actually
         # retains, not what the allocator happens to be holding
         malloc_trim()
+        timing_mark(module.key, "advance", t_advance)
         module_time = time.time() - start_module_time
+        timing_report(module.key)
         feedback_module(state, module, config, final_bpw, error, cos_error, sqnr_, module_time)
         report_auto_split()
         feedback_eta(idx, model, module_time)
