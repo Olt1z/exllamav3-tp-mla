@@ -1,0 +1,10 @@
+NVIDIA GeForce RTX 3090, 1 MiB, 24576 MiB, 595.84, 370.00 W
+NVIDIA GeForce RTX 3090, 1 MiB, 24576 MiB, 595.84, 390.00 W
+               total        used        free      shared  buff/cache   available
+Mem:             125           5          68           0          51         118
+CPU(s):                                  32
+Model name:                              AMD Ryzen Threadripper 1950X 16-Core Processor
+CUDA_OK 12.8 2.8.0+cu128
+WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+=== 2. fork https://github.com/Olt1z/exllamav3-tp-mla @ tp-mla · 2026-09-07T21:23:24Z
+1e4da3d merge v1.4.8 do upstream (mantém o nosso README; bancada instala setuptools >= 77)

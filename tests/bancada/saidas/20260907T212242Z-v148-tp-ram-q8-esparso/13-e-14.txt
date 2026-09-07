@@ -1,0 +1,105 @@
+1e4da3d merge v1.4.8 do upstream (mantém o nosso README; bancada instala setuptools >= 77)
+exllamav3 1.4.8 ext ok
+=== FALHOU · linha 365
+=== FALHOU · linha 423
+===== 13.txt =====
+--- 13a. base, uma placa, tudo na placa
+decode: 112 tokens (após 16 de aquecimento) em 0.45 s = 249.75 tok/s
+uso médio por GPU (%): ['98', '0']
+OK
+--- 13b. uma placa, EXL3_MOE_CPU_SPLIT=144 (caminho antigo), KL contra 13a
+ -- CPU split experts (worker, static): model.language_model.layers.3.mlp [144..288) of 288
+ -- CPU MoE worker started: 1 layers, avx2, 16 threads
+decode: 112 tokens (após 16 de aquecimento) em 1.13 s = 99.05 tok/s
+uso médio por GPU (%): ['21', '0']
+KL média 0.00005  KL máx 0.00011  |dif| máx 0.074  top-1 igual 100.0%
+OK
+--- 13c. TP2 canais, tudo na placa, KL contra 13a (fio bf16)
+Traceback (most recent call last):
+RuntimeError: Synchronization timeout
+Traceback (most recent call last):
+RuntimeError: CPU reduce wait timeout
+Traceback (most recent call last):
+RuntimeError: Synchronization timeout
+--- 13d. TP2 canais, EXL3_MOE_CPU_SPLIT=144 (o remendo), KL contra 13a (fio bf16); worker UMA vez
+ -- CPU split experts (worker, static, TP output rank): model.language_model.layers.3.mlp [144..288) of 288
+ -- CPU MoE worker started: 1 layers, avx2, 16 threads
+decode: 112 tokens (após 16 de aquecimento) em 0.99 s = 113.63 tok/s
+uso médio por GPU (%): ['30', '33']
+KL média 0.00011  KL máx 0.00487  |dif| máx 0.492  top-1 igual 100.0%
+OK
+--- 13e. TP2 expert-parallel, EXL3_MOE_CPU_SPLIT=144: deve avisar e carregar inteiro
+ !! EXL3_MOE_CPU_SPLIT is ignored under expert-parallel TP: every rank holds a different expert range. Load with tp_options={'moe_tensor_split': True} (-tp_moe_ts) to keep the tail on the CPU worker of the output rank
+decode: 112 tokens (após 16 de aquecimento) em 0.40 s = 283.18 tok/s
+uso médio por GPU (%): ['67', '56']
+KL média 0.00006  KL máx 0.00492  |dif| máx 0.492  top-1 igual 100.0%
+OK
+--- 13f. decode pelo gerador
+ -- CPU split experts (worker, static): model.language_model.layers.3.mlp [144..288) of 288
+ -- CPU MoE worker started: 1 layers, avx2, 16 threads
+1placa-split144 · 4096       prefill   4096 tok em     242 ms =  16925 tok/s · decode 256 tok = 110.4 tok/s
+tp2-canais · 4096            prefill   4096 tok em     244 ms =  16799 tok/s · decode 256 tok = 257.2 tok/s
+ -- CPU split experts (worker, static, TP output rank): model.language_model.layers.3.mlp [144..288) of 288
+ -- CPU MoE worker started: 1 layers, avx2, 16 threads
+tp2-canais-split144 · 4096   prefill   4096 tok em     238 ms =  17176 tok/s · decode 256 tok = 131.2 tok/s
+===== 14.txt =====
+--- 14a. base fp16, uma placa, prefill 3000
+cache: CacheLayer_MLA_fp16, 12.5 MiB para 8192 tokens
+decode: 112 tokens (após 16 de aquecimento) em 0.46 s = 243.64 tok/s
+uso médio por GPU (%): ['71', '0']
+OK
+--- 14b. uma placa, cache Q8, KL contra 14a
+cache: CacheLayer_MLA_quant, 8.8 MiB para 8192 tokens
+decode: 112 tokens (após 16 de aquecimento) em 0.43 s = 258.78 tok/s
+uso médio por GPU (%): ['65', '0']
+KL média 0.00001  KL máx 0.00019  |dif| máx 0.105  top-1 igual 100.0%
+OK
+--- 14b. uma placa, cache Q6, KL contra 14a
+cache: CacheLayer_MLA_quant, 7.8 MiB para 8192 tokens
+decode: 112 tokens (após 16 de aquecimento) em 0.43 s = 258.09 tok/s
+uso médio por GPU (%): ['30', '0']
+KL média 0.00003  KL máx 0.00066  |dif| máx 0.307  top-1 igual 100.0%
+OK
+--- 14b. uma placa, cache Q4, KL contra 14a
+cache: CacheLayer_MLA_quant, 6.8 MiB para 8192 tokens
+decode: 112 tokens (após 16 de aquecimento) em 0.44 s = 254.17 tok/s
+uso médio por GPU (%): ['61', '0']
+KL média 0.00027  KL máx 0.00407  |dif| máx 0.460  top-1 igual 99.2%
+OK
+--- 14c. TP2 canais, cache fp16, KL contra 14a (fio bf16)
+cache: CacheLayer_MLA_fp16, 12.5 MiB para 8192 tokens
+decode: 112 tokens (após 16 de aquecimento) em 0.37 s = 301.00 tok/s
+uso médio por GPU (%): ['46', '24']
+KL média 0.00006  KL máx 0.00324  |dif| máx 0.368  top-1 igual 99.2%
+OK
+--- 14d. TP2 canais, cache Q8, KL contra 14a (fio bf16)
+cache: CacheLayer_MLA_quant, 8.8 MiB para 8192 tokens
+decode: 112 tokens (após 16 de aquecimento) em 0.38 s = 292.60 tok/s
+uso médio por GPU (%): ['6', '11']
+KL média 0.00009  KL máx 0.00353  |dif| máx 0.418  top-1 igual 100.0%
+OK
+--- 14e. TP2 canais, cache Q8, EXL3_MOE_CPU_SPLIT=144: o arranjo alvo
+cache: CacheLayer_MLA_quant, 8.8 MiB para 8192 tokens
+ -- CPU split experts (worker, static, TP output rank): model.language_model.layers.3.mlp [144..288) of 288
+decode: 112 tokens (após 16 de aquecimento) em 0.71 s = 158.76 tok/s
+uso médio por GPU (%): ['60', '81']
+KL média 0.00010  KL máx 0.00353  |dif| máx 0.431  top-1 igual 99.2%
+OK
+--- 14f. modo de canais pelo AMBIENTE (EXL3_TP_MOE_TENSOR_SPLIT=1, sem --tp-moe-ts), Q8 + split: o caminho do TabbyAPI
+cache: CacheLayer_MLA_quant, 8.8 MiB para 8192 tokens
+ -- CPU split experts (worker, static, TP output rank): model.language_model.layers.3.mlp [144..288) of 288
+decode: 112 tokens (após 16 de aquecimento) em 0.85 s = 131.00 tok/s
+uso médio por GPU (%): ['47', '56']
+KL média 0.00008  KL máx 0.00327  |dif| máx 0.369  top-1 igual 99.2%
+OK
+--- 14g. gerador: TP2 canais Q8 + split, prompts 4k e 16k
+ -- CPU MoE worker started: 1 layers, avx2, 16 threads
+tp2-q8-split144 · 4096       prefill   4096 tok em     294 ms =  13933 tok/s · decode 256 tok =  99.6 tok/s
+tp2-q8-split144 · 16384      prefill  16384 tok em    1118 ms =  14657 tok/s · decode 256 tok = 115.1 tok/s
+===== tracebacks =====
+33-RuntimeError: Synchronization timeout
+35-RuntimeError: CPU reduce wait timeout
+37-RuntimeError: Synchronization timeout
+155-RuntimeError: Synchronization timeout
+157-RuntimeError: CPU reduce wait timeout
+159-RuntimeError: Synchronization timeout
