@@ -1,0 +1,84 @@
+CPU(s):                                  48
+Model name:                              AMD EPYC 9654 96-Core Processor
+Thread(s) per core:                      1
+Socket(s):                               1
+L3 cache:                                768 MiB (48 instances)
+NUMA node(s):                            1
+               total        used        free      shared  buff/cache   available
+Mem:             117           1          85           0          30         114
+Hugepagesize:       2048 kB
+--- banda crua da RAM: torch, soma de 4 GiB float32, melhor de 5, GB/s por threads
+threads   6:  105.9 GB/s
+threads  12:  142.8 GB/s
+threads  24:  207.6 GB/s
+threads  36:  232.2 GB/s
+threads  48:  210.0 GB/s
+--- tudo na placa (colocação estática)
+placa · 4096                 prefill   4096 tok em     143 ms =  28611 tok/s · decode 1100 tok = 283.9 tok/s
+FIM_PERFIL_GERADOR
+--- EXL3_MOE_CPU_SPLIT=32 (colocação estática)
+ -- moe_cpu prof (512 jobs, us/job): prep_gu 99.6 | gemv_gu 63.8 | act+prep_d 21.6 | gemv_d 33.1 | tf_d 8.6 | accum 4.2
+ -- moe_cpu prof (1024 jobs, us/job): prep_gu 98.5 | gemv_gu 61.4 | act+prep_d 19.6 | gemv_d 32.5 | tf_d 8.6 | accum 4.3
+ -- CPU MoE worker started: 1 layers, avx512-vbmi, 24 threads
+EXL3_MOE_CPU_SPLIT=32 · 4096 prefill   4096 tok em     193 ms =  21206 tok/s · decode 1100 tok = 279.0 tok/s
+FIM_PERFIL_GERADOR
+--- EXL3_MOE_CPU_SPLIT=64 (colocação estática)
+ -- moe_cpu prof (512 jobs, us/job): prep_gu 91.3 | gemv_gu 89.6 | act+prep_d 19.0 | gemv_d 43.5 | tf_d 8.5 | accum 4.4
+ -- CPU MoE worker started: 1 layers, avx512-vbmi, 24 threads
+EXL3_MOE_CPU_SPLIT=64 · 4096 prefill   4096 tok em     205 ms =  19939 tok/s · decode 1100 tok = 278.9 tok/s
+FIM_PERFIL_GERADOR
+--- EXL3_MOE_CPU_SPLIT=128 (colocação estática)
+ -- moe_cpu prof (512 jobs, us/job): prep_gu 99.3 | gemv_gu 195.4 | act+prep_d 18.7 | gemv_d 83.2 | tf_d 8.9 | accum 4.9
+ -- moe_cpu prof (1024 jobs, us/job): prep_gu 95.9 | gemv_gu 182.2 | act+prep_d 18.3 | gemv_d 85.5 | tf_d 9.0 | accum 5.0
+ -- CPU MoE worker started: 1 layers, avx512-vbmi, 24 threads
+EXL3_MOE_CPU_SPLIT=128 · 4096 prefill   4096 tok em     206 ms =  19879 tok/s · decode 1100 tok = 266.3 tok/s
+FIM_PERFIL_GERADOR
+--- EXL3_MOE_CPU_SPLIT=192 (colocação estática)
+ -- moe_cpu prof (512 jobs, us/job): prep_gu 86.7 | gemv_gu 289.5 | act+prep_d 18.6 | gemv_d 121.9 | tf_d 8.3 | accum 5.3
+ -- moe_cpu prof (1024 jobs, us/job): prep_gu 85.4 | gemv_gu 233.3 | act+prep_d 18.5 | gemv_d 103.9 | tf_d 8.4 | accum 5.1
+ -- CPU MoE worker started: 1 layers, avx512-vbmi, 24 threads
+EXL3_MOE_CPU_SPLIT=192 · 4096 prefill   4096 tok em     229 ms =  17918 tok/s · decode 1100 tok = 261.0 tok/s
+FIM_PERFIL_GERADOR
+--- EXL3_MOE_CPU_SPLIT=256 (colocação estática)
+ -- moe_cpu prof (512 jobs, us/job): prep_gu 120.7 | gemv_gu 442.3 | act+prep_d 17.5 | gemv_d 158.4 | tf_d 7.7 | accum 6.7
+ -- moe_cpu prof (1024 jobs, us/job): prep_gu 107.9 | gemv_gu 354.1 | act+prep_d 17.4 | gemv_d 140.9 | tf_d 7.7 | accum 6.2
+ -- CPU MoE worker started: 1 layers, avx512-vbmi, 24 threads
+EXL3_MOE_CPU_SPLIT=256 · 4096 prefill   4096 tok em     199 ms =  20618 tok/s · decode 1100 tok = 250.5 tok/s
+FIM_PERFIL_GERADOR
+--- EXL3_MOE_CPU_OFFLOAD=1 (colocação estática)
+ -- moe_cpu prof (512 jobs, us/job): prep_gu 100.9 | gemv_gu 479.4 | act+prep_d 40.6 | gemv_d 168.1 | tf_d 7.4 | accum 6.2
+ -- moe_cpu prof (1024 jobs, us/job): prep_gu 95.3 | gemv_gu 461.6 | act+prep_d 29.0 | gemv_d 163.2 | tf_d 7.5 | accum 6.1
+ -- CPU MoE worker started: 1 layers, avx512-vbmi, 24 threads
+EXL3_MOE_CPU_OFFLOAD=1 · 4096 prefill   4096 tok em     195 ms =  20980 tok/s · decode 1100 tok = 238.1 tok/s
+FIM_PERFIL_GERADOR
+--- EXL3_MOE_CPU_SPLIT=144 threads=12 (colocação estática)
+ -- moe_cpu prof (512 jobs, us/job): prep_gu 140.1 | gemv_gu 327.7 | act+prep_d 17.8 | gemv_d 134.3 | tf_d 7.7 | accum 4.1
+ -- moe_cpu prof (1024 jobs, us/job): prep_gu 126.2 | gemv_gu 336.5 | act+prep_d 17.5 | gemv_d 136.3 | tf_d 7.6 | accum 4.3
+ -- CPU MoE worker started: 1 layers, avx512-vbmi, 12 threads
+split144-t12 · 4096          prefill   4096 tok em     188 ms =  21757 tok/s · decode 1100 tok = 250.2 tok/s
+FIM_PERFIL_GERADOR
+--- EXL3_MOE_CPU_SPLIT=144 threads=24 (colocação estática)
+ -- moe_cpu prof (512 jobs, us/job): prep_gu 119.8 | gemv_gu 175.3 | act+prep_d 19.2 | gemv_d 71.6 | tf_d 9.2 | accum 4.7
+ -- moe_cpu prof (1024 jobs, us/job): prep_gu 116.3 | gemv_gu 165.5 | act+prep_d 18.8 | gemv_d 73.7 | tf_d 9.0 | accum 4.8
+ -- CPU MoE worker started: 1 layers, avx512-vbmi, 24 threads
+split144-t24 · 4096          prefill   4096 tok em     200 ms =  20476 tok/s · decode 1100 tok = 267.2 tok/s
+FIM_PERFIL_GERADOR
+--- EXL3_MOE_CPU_SPLIT=144 threads=36 (colocação estática)
+ -- moe_cpu prof (512 jobs, us/job): prep_gu 85.1 | gemv_gu 99.2 | act+prep_d 41.0 | gemv_d 41.4 | tf_d 8.5 | accum 5.0
+ -- CPU MoE worker started: 1 layers, avx512-vbmi, 36 threads
+split144-t36 · 4096          prefill   4096 tok em     195 ms =  20973 tok/s · decode 1100 tok = 274.6 tok/s
+FIM_PERFIL_GERADOR
+--- EXL3_MOE_CPU_SPLIT=144 threads=48 (colocação estática)
+ -- moe_cpu prof (512 jobs, us/job): prep_gu 340.2 | gemv_gu 144.5 | act+prep_d 21.2 | gemv_d 38.0 | tf_d 8.7 | accum 5.8
+ -- moe_cpu prof (1024 jobs, us/job): prep_gu 303.9 | gemv_gu 114.2 | act+prep_d 21.1 | gemv_d 38.9 | tf_d 9.6 | accum 6.2
+ -- CPU MoE worker started: 1 layers, avx512-vbmi, 48 threads
+split144-t48 · 4096          prefill   4096 tok em     179 ms =  22872 tok/s · decode 1100 tok = 242.1 tok/s
+FIM_PERFIL_GERADOR
+--- EXL3_MOE_CPU_SPLIT=144 (colocação dinâmica, padrão)
+ -- CPU MoE worker started: 1 layers, avx512-vbmi, 24 threads
+ -- expert swap sweep: 1 swaps
+ -- moe_cpu prof (512 jobs, us/job): prep_gu 112.7 | gemv_gu 109.2 | act+prep_d 18.2 | gemv_d 48.2 | tf_d 8.2 | accum 4.3
+ -- expert swap sweep: 1 swaps
+ -- moe_cpu prof (1024 jobs, us/job): prep_gu 118.5 | gemv_gu 159.0 | act+prep_d 19.1 | gemv_d 74.4 | tf_d 8.3 | accum 4.8
+split144-swap · 4096         prefill   4096 tok em     197 ms =  20789 tok/s · decode 1100 tok = 260.5 tok/s
+FIM_PERFIL_GERADOR
