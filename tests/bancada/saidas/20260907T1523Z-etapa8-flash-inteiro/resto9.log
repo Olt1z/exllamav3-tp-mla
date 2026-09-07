@@ -1,0 +1,28 @@
+--- EXL3_MOE_CPU_OFFLOAD=45 (sequencial, sem concorrência)
+ -- CPU MoE worker started: 42 layers, avx512-vbmi, 20 threads
+EXL3_MOE_CPU_OFFLOAD=45: dispositivos [], cache 32768, rascunho não
+EXL3_MOE_CPU_OFFLOAD=45 · 4096 prefill   4096 tok em    4463 ms =    918 tok/s · decode 128 tok =  14.9 tok/s
+EXL3_MOE_CPU_OFFLOAD=45 · 16384 prefill  16384 tok em   11748 ms =   1395 tok/s · decode 128 tok =  14.9 tok/s
+EXL3_MOE_CPU_OFFLOAD=45 · 30000 prefill  30000 tok em   20579 ms =   1458 tok/s · decode 128 tok =  15.0 tok/s
+FIM_PERFIL_GERADOR
+0 MiB
+Mem:             314           3         151           0         160         309
+--- EXL3_MOE_CPU_SPLIT=224 (sequencial, sem concorrência)
+ -- CPU MoE worker started: 42 layers, avx512-vbmi, 20 threads
+EXL3_MOE_CPU_SPLIT=224: dispositivos [], cache 32768, rascunho não
+EXL3_MOE_CPU_SPLIT=224 · 4096 prefill   4096 tok em    3869 ms =   1059 tok/s · decode 128 tok =  18.7 tok/s
+EXL3_MOE_CPU_SPLIT=224 · 16384 prefill  16384 tok em   10371 ms =   1580 tok/s · decode 128 tok =  19.8 tok/s
+EXL3_MOE_CPU_SPLIT=224 · 30000 prefill  30000 tok em   18361 ms =   1634 tok/s · decode 128 tok =  21.3 tok/s
+FIM_PERFIL_GERADOR
+0 MiB
+Mem:             314           3         150           0         160         309
+--- EXL3_MOE_CPU_SPLIT=192 (sequencial, sem concorrência)
+ -- CPU MoE worker started: 42 layers, avx512-vbmi, 20 threads
+EXL3_MOE_CPU_SPLIT=192: dispositivos [], cache 32768, rascunho não
+EXL3_MOE_CPU_SPLIT=192 · 4096 prefill   4096 tok em    3568 ms =   1148 tok/s · decode 128 tok =  20.7 tok/s
+EXL3_MOE_CPU_SPLIT=192 · 16384 prefill  16384 tok em    9722 ms =   1685 tok/s · decode 128 tok =  22.1 tok/s
+EXL3_MOE_CPU_SPLIT=192 · 30000 prefill  30000 tok em   17125 ms =   1752 tok/s · decode 128 tok =  23.6 tok/s
+FIM_PERFIL_GERADOR
+0 MiB
+Mem:             314           3         150           0         160         309
+resto9 terminou
