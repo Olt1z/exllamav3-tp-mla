@@ -612,6 +612,13 @@ class Model_TPMixin:
     def unload_tp(self):
         if not self.loaded_tp:
             return
+        # The output rank's CPU expert workers hang off the real config; a reload in the same
+        # process would reuse a started host and trip "cannot register layers after start"
+        hosts = getattr(self.config, "moe_cpu_hosts", None)
+        if hosts:
+            for h in list(hosts.values()):
+                h.shutdown()
+            hosts.clear()
         self.destroy_tp_context()
         self.loaded_tp = False
         self.tp_output_device = None

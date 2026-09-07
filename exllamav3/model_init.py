@@ -202,7 +202,8 @@ def init(
         assert not args.tensor_parallel, "--moe_cpu_offload currently requires layer-split mode"
         config.infer_params.moe_cpu_offload = args.moe_cpu_offload
     if getattr(args, "moe_cpu_split", 0):
-        assert not args.tensor_parallel, "--moe_cpu_split currently requires layer-split mode"
+        assert not args.tensor_parallel or getattr(args, "tp_moe_tensor_split", False), \
+            "--moe_cpu_split under tensor parallel needs --tp_moe_tensor_split (channels mode): every rank must hold every expert"
         assert not getattr(args, "moe_cpu_offload", 0), "--moe_cpu_split and --moe_cpu_offload are mutually exclusive"
         config.infer_params.moe_cpu_split = args.moe_cpu_split
     if getattr(args, "moe_cpu_threads", None) is not None:

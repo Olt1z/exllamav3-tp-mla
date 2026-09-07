@@ -1413,7 +1413,9 @@ class BlockSparseMLP(BlockSparseMLP_CPU, Module):
         if pre_norm_reduce:
             params["backend"].all_reduce(
                 final_hidden_states,
-                self.intermediate_size > 0 and self.num_local_experts > 0
+                # The CPU tail partial lives in this tensor on the output rank even when the
+                # allocator gave it zero channels; the native backend drops non-contributors
+                (self.intermediate_size > 0 and self.num_local_experts > 0) or self.cpu_split_first is not None
             )
 
         # Extra norm (Gemma4)
@@ -1441,6 +1443,7 @@ class BlockSparseMLP(BlockSparseMLP_CPU, Module):
             params["backend"].all_reduce(
                 final_hidden_states,
                 (self.intermediate_size > 0 and self.num_local_experts > 0) or bool(self.shared_experts)
+                or self.cpu_split_first is not None
             )
 
         if out_dtype is not None:
@@ -1467,8 +1470,21 @@ class BlockSparseMLP(BlockSparseMLP_CPU, Module):
         parallelism the tail would straddle ranks; say so loudly instead of skipping in
         silence (the silent skip loads the whole model on the GPU and OOMs later, with the
         machine already paid for)."""
+        cache = getattr(self, "_tp_split_cache", None)
+        if cache is not None and cache[0] == tensor_split:
+            return cache[1]
+        first = self._tp_cpu_split_first_uncached(tensor_split)
+        self._tp_split_cache = (tensor_split, first)
+        return first
+
+    def _tp_cpu_split_first_uncached(self, tensor_split: bool) -> int | None:
         k = int(getattr(self.config.infer_params, "moe_cpu_split", 0) or 0)
         if not (0 < k < self.num_experts):
+            return None
+        # Same activation guard as the single-device path (cpu_maybe_split_load)
+        gated = bool(self.gates)
+        if not (self.activation_fn in ("silu", "gelu", "swiglu_oai") if gated else self.activation_fn == "relu2"):
+            print(f" !! {self.key}: activation {self.activation_fn} unsupported by the CPU worker, split skipped")
             return None
         if not tensor_split:
             if not getattr(BlockSparseMLP, "_warned_ep_split", False):
@@ -1477,7 +1493,11 @@ class BlockSparseMLP(BlockSparseMLP_CPU, Module):
                       " different expert range. Load with tp_options={'moe_tensor_split': True}"
                       " (-tp_moe_ts) to keep the tail on the CPU worker of the output rank")
             return None
-        return self.num_experts - k
+        first = self.num_experts - k
+        # Checkpoint eligibility (mul1, K <= 8, biases) decided here, before the allocator
+        # sizes the slices: deciding it later, at export, would size for E - k and then ship
+        # all E experts, an OOM with the machine already paid for
+        return first if self.cpu_split_eligible(first) else None
 
     def make_tp_allocation(self, options: dict) -> list[TPAllocation]:
         first = self._tp_cpu_split_first(bool(options.get("moe_tensor_split", False)))
@@ -1530,8 +1550,6 @@ class BlockSparseMLP(BlockSparseMLP_CPU, Module):
         # by key (see cpu_split_register_tp)
         unit = next((plan[d][self.key][2] for d in plan if self.key in plan[d]), None)
         first = self._tp_cpu_split_first(unit == "channels")
-        if first is not None and not self.cpu_split_eligible(first):
-            first = None
         n_exp = first if first is not None else self.num_experts
         tail = None if first is None else {
             "gates": [l.key for l in self.gates[first:]] if self.gated else [],

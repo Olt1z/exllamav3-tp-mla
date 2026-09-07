@@ -259,6 +259,14 @@ def mp_model_forward(
 
     x = consumer.recv(shared_input)
 
+    # The CPU expert workers are woken once per pass, as forward_ls/prefill_ls do. Under TP
+    # only the output rank owns them (it alone holds the real config, see
+    # mp_set_master_config); on the other ranks the getattr on None is a no-op. Without this
+    # the worker child polls in 50 us naps and every layer pays the wake latency
+    for h in getattr(local_context.get("config"), "moe_cpu_hosts", {}).values():
+        h.ensure_started()
+        h.begin_pass()
+
     for idx, module in enumerate(modules):
         logits_layer = module.caps.get("logits_output")
         if logits_layer and (num := params.get("last_tokens_only")):
