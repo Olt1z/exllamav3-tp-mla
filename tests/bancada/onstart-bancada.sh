@@ -52,6 +52,8 @@ cd /workspace && rm -rf exllamav3-tp-mla
 git clone -q -b "$BRANCH" "$FORK" exllamav3-tp-mla && cd exllamav3-tp-mla
 git log --oneline -1
 pip install -q -r requirements.txt
+# A 1.4.8 exige setuptools >= 77 no pyproject; com --no-build-isolation vale o da imagem, que é mais velho
+pip install -q -U "setuptools>=77" wheel
 CAP=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -1)
 NUCLEOS=$(nproc); export MAX_JOBS=$(( NUCLEOS > 8 ? 8 : (NUCLEOS < 2 ? 2 : NUCLEOS) ))
 export TORCH_CUDA_ARCH_LIST="$CAP"
