@@ -1,0 +1,49 @@
+--- 13c. TP2 canais, tudo na placa, KL contra 13a (fio bf16)
+Traceback (most recent call last):
+  File "/workspace/exllamav3-tp-mla/tests/tp_mla_smoke.py", line 181, in <module>
+  File "/workspace/exllamav3-tp-mla/tests/tp_mla_smoke.py", line 125, in main
+  File "/opt/conda/lib/python3.11/site-packages/torch/utils/_contextlib.py", line 120, in decorate_context
+  File "/workspace/exllamav3-tp-mla/exllamav3/model/model.py", line 203, in prefill
+  File "/workspace/exllamav3-tp-mla/exllamav3/model/model_tp.py", line 694, in prefill_tp
+  File "/workspace/exllamav3-tp-mla/exllamav3/model/model_tp.py", line 219, in tp_worker_dispatch
+  File "/workspace/exllamav3-tp-mla/exllamav3/model/model_tp_fn.py", line 619, in send
+  File "/workspace/exllamav3-tp-mla/exllamav3/model/model_tp_fn.py", line 277, in mp_model_forward
+  File "/workspace/exllamav3-tp-mla/exllamav3/modules/transformer.py", line 187, in forward
+  File "/workspace/exllamav3-tp-mla/exllamav3/modules/mlp.py", line 764, in forward
+  File "/workspace/exllamav3-tp-mla/exllamav3/model/model_tp_backend.py", line 429, in all_reduce
+RuntimeError: Synchronization timeout
+Traceback (most recent call last):
+  File "/workspace/exllamav3-tp-mla/exllamav3/model/model_tp_fn.py", line 113, in mp_model_worker
+  File "/workspace/exllamav3-tp-mla/exllamav3/model/model_tp_fn.py", line 126, in mp_cpu_reduce
+  File "/workspace/exllamav3-tp-mla/exllamav3/model/model_tp_backend.py", line 518, in run_cpu_reduce_jobs
+RuntimeError: CPU reduce wait timeout
+Traceback (most recent call last):
+  File "/workspace/exllamav3-tp-mla/exllamav3/model/model_tp_fn.py", line 113, in mp_model_worker
+  File "/workspace/exllamav3-tp-mla/exllamav3/model/model_tp_fn.py", line 277, in mp_model_forward
+  File "/workspace/exllamav3-tp-mla/exllamav3/modules/transformer.py", line 187, in forward
+  File "/workspace/exllamav3-tp-mla/exllamav3/modules/mlp.py", line 764, in forward
+  File "/workspace/exllamav3-tp-mla/exllamav3/model/model_tp_backend.py", line 429, in all_reduce
+RuntimeError: Synchronization timeout
+--- 13d. TP2 canais, EXL3_MOE_CPU_SPLIT=144 (o remendo), KL contra 13a (fio bf16); worker UMA vez
+ -- CPU split experts (worker, static, TP output rank): model.language_model.layers.3.mlp [144..288) of 288
+ -- CPU MoE worker started: 1 layers, avx2, 32 threads
+decode: 112 tokens (após 16 de aquecimento) em 0.48 s = 233.16 tok/s
+uso médio por GPU (%): ['35', '41']
+KL média 0.00007  KL máx 0.00020  |dif| máx 0.084  top-1 igual 100.0%
+OK
+--- 13e. TP2 expert-parallel, EXL3_MOE_CPU_SPLIT=144: deve avisar e carregar inteiro
+ !! EXL3_MOE_CPU_SPLIT is ignored under expert-parallel TP: every rank holds a different expert range. Load with tp_options={'moe_tensor_split': True} (-tp_moe_ts) to keep the tail on the CPU worker of the output rank
+decode: 112 tokens (após 16 de aquecimento) em 0.43 s = 260.97 tok/s
+uso médio por GPU (%): ['26', '65']
+KL média 0.00010  KL máx 0.00484  |dif| máx 0.492  top-1 igual 100.0%
+OK
+--- 13f. decode pelo gerador (TP2 canais sem e com split)
+tp2-canais · 4096            prefill   4096 tok em     237 ms =  17253 tok/s · decode 256 tok = 229.1 tok/s
+ -- CPU split experts (worker, static, TP output rank): model.language_model.layers.3.mlp [144..288) of 288
+ -- CPU MoE worker started: 1 layers, avx2, 32 threads
+tp2-canais-split144 · 4096   prefill   4096 tok em     223 ms =  18392 tok/s · decode 256 tok = 174.1 tok/s
+13r terminou
+===== 13d.log: alocador e worker =====
+1: -- Model split:
+19: -- CPU split experts (worker, static, TP output rank): model.language_model.layers.3.mlp [144..288) of 288
+21: -- CPU MoE worker started: 1 layers, avx2, 32 threads

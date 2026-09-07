@@ -1,0 +1,68 @@
+--- 13a. base, uma placa, tudo na placa
+decode: 112 tokens (após 16 de aquecimento) em 0.45 s = 247.57 tok/s
+uso médio por GPU (%): ['82', '0']
+OK
+--- 13b. uma placa, EXL3_MOE_CPU_SPLIT=144 (caminho antigo), KL contra 13a
+ -- CPU split experts (worker, static): model.language_model.layers.3.mlp [144..288) of 288
+ -- CPU MoE worker started: 1 layers, avx2, 32 threads
+decode: 112 tokens (após 16 de aquecimento) em 0.63 s = 178.80 tok/s
+uso médio por GPU (%): ['31', '0']
+KL média 0.00005  KL máx 0.00018  |dif| máx 0.082  top-1 igual 100.0%
+OK
+--- 13c. TP2 canais, tudo na placa, KL contra 13a (fio bf16)
+Traceback (most recent call last):
+TypeError: list indices must be integers or slices, not dict
+--- 13d. TP2 canais, EXL3_MOE_CPU_SPLIT=144 (o remendo), KL contra 13a (fio bf16); worker UMA vez
+Traceback (most recent call last):
+TypeError: list indices must be integers or slices, not dict
+--- 13e. TP2 expert-parallel, EXL3_MOE_CPU_SPLIT=144: deve avisar e carregar inteiro
+ !! EXL3_MOE_CPU_SPLIT is ignored under expert-parallel TP: every rank holds a different expert range. Load with tp_options={'moe_tensor_split': True} (-tp_moe_ts) to keep the tail on the CPU worker of the output rank
+Traceback (most recent call last):
+TypeError: list indices must be integers or slices, not dict
+--- 13f. decode pelo gerador
+ -- CPU split experts (worker, static): model.language_model.layers.3.mlp [144..288) of 288
+ -- CPU MoE worker started: 1 layers, avx2, 32 threads
+1placa-split144 · 4096       prefill   4096 tok em     253 ms =  16202 tok/s · decode 256 tok = 191.5 tok/s
+[rank1]: Traceback (most recent call last):
+[rank1]: TypeError: list indices must be integers or slices, not dict
+[rank1]: Traceback (most recent call last):
+[rank1]: TypeError: list indices must be integers or slices, not dict
+===== LOG: split do alocador, workers, erros =====
+25: -- CPU split experts (worker, static): model.language_model.layers.3.mlp [144..288) of 288
+26: -- CPU MoE worker started: 1 layers, avx2, 32 threads
+32:Traceback (most recent call last):
+33:TypeError: list indices must be integers or slices, not dict
+34:=== FALHOU · linha 363
+37:Traceback (most recent call last):
+38:TypeError: list indices must be integers or slices, not dict
+39:=== FALHOU · linha 365
+43: !! EXL3_MOE_CPU_SPLIT is ignored under expert-parallel TP: every rank holds a different expert range. Load with tp_options={'moe_tensor_split': True} (-tp_moe_ts) to keep the tail on the CPU worke
+44:Traceback (most recent call last):
+45:TypeError: list indices must be integers or slices, not dict
+46:=== FALHOU · linha 367
+50: -- CPU split experts (worker, static): model.language_model.layers.3.mlp [144..288) of 288
+51: -- CPU MoE worker started: 1 layers, avx2, 32 threads
+52:1placa-split144 · 4096       prefill   4096 tok em     253 ms =  16202 tok/s · decode 256 tok = 191.5 tok/s
+53:[rank1]: Traceback (most recent call last):
+54:[rank1]: TypeError: list indices must be integers or slices, not dict
+55:=== FALHOU · linha 372
+58:[rank1]: Traceback (most recent call last):
+59:[rank1]: TypeError: list indices must be integers or slices, not dict
+60:=== FALHOU · linha 373
+94: -- CPU split experts (worker, static): model.language_model.layers.3.mlp [144..288) of 288
+95: -- CPU MoE worker started: 1 layers, avx2, 32 threads
+101:Traceback (most recent call last):
+102:TypeError: list indices must be integers or slices, not dict
+104:Traceback (most recent call last):
+105:TypeError: list indices must be integers or slices, not dict
+107: !! EXL3_MOE_CPU_SPLIT is ignored under expert-parallel TP: every rank holds a different expert range. Load with tp_options={'moe_tensor_split': True} (-tp_moe_ts) to keep the tail on the CPU work
+108:Traceback (most recent call last):
+109:TypeError: list indices must be integers or slices, not dict
+111: -- CPU split experts (worker, static): model.language_model.layers.3.mlp [144..288) of 288
+112: -- CPU MoE worker started: 1 layers, avx2, 32 threads
+113:1placa-split144 · 4096       prefill   4096 tok em     253 ms =  16202 tok/s · decode 256 tok = 191.5 tok/s
+114:[rank1]: Traceback (most recent call last):
+115:[rank1]: TypeError: list indices must be integers or slices, not dict
+116:[rank1]: Traceback (most recent call last):
+117:[rank1]: TypeError: list indices must be integers or slices, not dict
+120:=== FALHOU · linha 391

@@ -1,0 +1,5 @@
+--- 13c tentativa 1: TP2 canais, tudo na placa, KL contra 13a (fio bf16)
+decode: 112 tokens (após 16 de aquecimento) em 0.38 s = 295.00 tok/s
+uso médio por GPU (%): ['27', '1']
+KL média 0.00006  KL máx 0.00487  |dif| máx 0.492  top-1 igual 100.0%
+OK
