@@ -35,7 +35,7 @@ publicar() {
 import os
 from huggingface_hub import HfApi
 api = HfApi(token=os.environ["HF_TOKEN"])
-for f in ("bancada.log", "resumo.txt", "build.log", "10.txt", "10-cobertura.txt", "10-convert.txt"):
+for f in ("bancada.log", "resumo.txt", "build.log", "10.txt", "10-cobertura.txt", "10-convert.txt", "11.txt", "11-solo.txt", "11-p0.txt", "11-p1.txt", "11-duas.txt"):
     p = f"/workspace/{f}"
     if os.path.exists(p):
         api.upload_file(path_or_fileobj=p, path_in_repo=f"saidas/tp-mla/$PROVA_ID/{f}", repo_id="$REPO_SAIDAS")
@@ -70,7 +70,7 @@ du -sh /workspace/corte
 # Artefato da esteira antiga com kv_b_proj em treliça: repara antes de carregar
 python3 tests/bancada/reparar_kv_b_proj.py /workspace/corte
 
-if [ -z "${SO_7:-}" ] && [ -z "${SO_8:-}" ] && [ -z "${SO_9:-}" ] && [ -z "${SO_10:-}" ]; then
+if [ -z "${SO_7:-}" ] && [ -z "${SO_8:-}" ] && [ -z "${SO_9:-}" ] && [ -z "${SO_10:-}" ] && [ -z "${SO_11:-}" ]; then
 marco "3b. teste por bloco: original × importado por TP, bloco a bloco e filho a filho"
 env $BASE python3 tests/test_tp_block_import.py /workspace/corte 2>&1 | grep -v -E "it/s\]|━━" | tee /workspace/3b.txt
 echo "3b saiu com ${PIPESTATUS[0]}"
@@ -253,6 +253,48 @@ PY
   fi
 fi
 
+# 11. Escala em várias placas: dois conversores INDEPENDENTES ao mesmo tempo, um por placa, no corte.
+# Compara o tempo por grupo com o de uma placa sozinha (5,4 s) e com o do conversor único em 2 placas
+# (7–8,5 s): se ficar em 5,4 s a lentidão é disputa de host entre threads (processo por placa resolve);
+# se subir junto, é hardware. SO_11=1 roda só isto; precisa de 2 placas e RAM para dois estados (2 × 67 GB
+# a 503 linhas, então usa CR11 linhas, padrão 250).
+if [ -n "${SO_11:-}" ]; then
+  marco "11. dois conversores concorrentes, um por placa"
+  ORIGEM="${ORIGEM:-Olt1z/GLM-5.3-Flash-podado-4L-BF16}"
+  REPO_QUANT="${REPO_QUANT:-Olt1z/quantizacao-bl4ck0ut}"
+  RECEITA_ID="${RECEITA_ID:-cmtqbp54o006c1jgr2mi3ux0p}"
+  CR11="${CR11:-250}"
+  pip install -q pyyaml
+  free -g | head -2; nvidia-smi --query-gpu=name,memory.total,power.limit --format=csv,noheader
+  python3 - <<PY
+import os
+from huggingface_hub import snapshot_download, hf_hub_download
+snapshot_download("$ORIGEM", local_dir="/workspace/origem", token=os.environ["HF_TOKEN"])
+for f in ["scripts/receita_para_nativo.py", "cal_bl4ck0ut.safetensors", "saidas/$RECEITA_ID/receita.json"]:
+    hf_hub_download("$REPO_QUANT", f, local_dir="/workspace/quantizacao", token=os.environ["HF_TOKEN"])
+PY
+  Q=/workspace/quantizacao; mkdir -p /workspace/work
+  python3 $Q/scripts/receita_para_nativo.py --receita $Q/saidas/$RECEITA_ID/receita.json --modelo /workspace/origem --saida /workspace/work/recipe.yaml > /workspace/11-cobertura.txt 2>&1
+  source /workspace/work/motor.env
+  conv() { # $1 placa  $2 rótulo  $3 devices locais
+    CUDA_VISIBLE_DEVICES=$1 TERM=dumb COLUMNS=200 EXL3_CONVERT_TIMING=1 python3 convert.py -i /workspace/origem -w /workspace/work-$2 -o /workspace/exl3-$2 \
+      --recipe /workspace/work/recipe.yaml --codebook mul1 --devices $3 --cal_data $Q/cal_bl4ck0ut.safetensors \
+      -cr $CR11 -cc 2048 -hb "$HEAD_BITS" -mb "$MTP_BITS" -vb "$VISION_BITS" -cpi 3600 > /workspace/11-$2.txt 2>&1
+  }
+  marco "11a. uma placa sozinha (referência)"
+  T0=$(date +%s); conv 0 solo 0; echo "solo: $(( $(date +%s) - T0 )) s" | tee -a /workspace/11.txt
+  marco "11b. dois processos ao mesmo tempo, placas 0 e 1"
+  T0=$(date +%s); conv 0 p0 0 & P0=$!; conv 1 p1 0 & P1=$!; wait $P0; wait $P1; echo "dois processos: $(( $(date +%s) - T0 )) s" | tee -a /workspace/11.txt
+  marco "11c. um processo com as duas placas"
+  T0=$(date +%s); conv 0,1 duas 0,1; echo "um processo, duas placas: $(( $(date +%s) - T0 )) s" | tee -a /workspace/11.txt
+  for r in solo p0 p1 duas; do
+    echo "--- $r" | tee -a /workspace/11.txt
+    grep -a -E "Timing model.language_model.layers" /workspace/11-$r.txt | cut -c1-200 | tee -a /workspace/11.txt
+    grep -a "Timing group" /workspace/11-$r.txt | grep "layers.3" | awk "{print \$NF}" | sort | uniq -c | sort -rn | head -4 | tee -a /workspace/11.txt
+  done
+  echo "11 terminou"
+fi
+
 {
   echo "bancada $PROVA_ID · $(nvidia-smi --query-gpu=name --format=csv,noheader | sort | uniq -c | tr '\n' ' ')"
   echo "--- 3b"; grep -E "== bloco|vs original|Error|error" /workspace/3b.txt | head -40
@@ -263,6 +305,7 @@ fi
   echo "--- 8"; cat /workspace/8.txt 2>/dev/null
   echo "--- 9"; cat /workspace/9.txt 2>/dev/null
   echo "--- 10"; cat /workspace/10.txt 2>/dev/null
+  echo "--- 11"; cat /workspace/11.txt 2>/dev/null
   echo "--- 5a tabelas"; sed -n '/PREFILL por módulo/,/FIM_PERFIL/p' /workspace/5a.txt | head -60
 } | tee /workspace/resumo.txt
 publicar
