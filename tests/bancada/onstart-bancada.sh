@@ -35,7 +35,7 @@ publicar() {
 import os
 from huggingface_hub import HfApi
 api = HfApi(token=os.environ["HF_TOKEN"])
-for f in ("bancada.log", "resumo.txt", "build.log", "10.txt", "10-cobertura.txt", "10-convert.txt", "11.txt", "11-solo.txt", "11-p0.txt", "11-p1.txt", "11-duas.txt"):
+for f in ("bancada.log", "resumo.txt", "build.log", "10.txt", "10-cobertura.txt", "10-convert.txt", "11.txt", "11-solo.txt", "11-p0.txt", "11-p1.txt", "11-duas.txt", "12.txt"):
     p = f"/workspace/{f}"
     if os.path.exists(p):
         api.upload_file(path_or_fileobj=p, path_in_repo=f"saidas/tp-mla/$PROVA_ID/{f}", repo_id="$REPO_SAIDAS")
@@ -70,7 +70,7 @@ du -sh /workspace/corte
 # Artefato da esteira antiga com kv_b_proj em treliça: repara antes de carregar
 python3 tests/bancada/reparar_kv_b_proj.py /workspace/corte
 
-if [ -z "${SO_7:-}" ] && [ -z "${SO_8:-}" ] && [ -z "${SO_9:-}" ] && [ -z "${SO_10:-}" ] && [ -z "${SO_11:-}" ]; then
+if [ -z "${SO_7:-}" ] && [ -z "${SO_8:-}" ] && [ -z "${SO_9:-}" ] && [ -z "${SO_10:-}" ] && [ -z "${SO_11:-}" ] && [ -z "${SO_12:-}" ]; then
 marco "3b. teste por bloco: original × importado por TP, bloco a bloco e filho a filho"
 env $BASE python3 tests/test_tp_block_import.py /workspace/corte 2>&1 | grep -v -E "it/s\]|━━" | tee /workspace/3b.txt
 echo "3b saiu com ${PIPESTATUS[0]}"
@@ -299,6 +299,50 @@ PY
   echo "11 terminou"
 fi
 
+# 12. Etapa 1 do plano "experts na RAM com tensor parallel": o teto do worker de CPU. Uma placa,
+# corte em mul1, modo layer-split. (a) o host: CPU, NUMA, RAM; (b) banda crua de leitura da RAM
+# por número de threads (torch, soma de 4 GiB); (c) perfil por fase do kernel de CPU
+# (EXL3_MOE_CPU_PROF=1 imprime a média a cada 512 jobs: prep_gu, gemv_gu, act+prep_d, gemv_d,
+# tf_d, accum) por fração de experts na CPU, com colocação ESTÁTICA (EXL3_MOE_CPU_SWAP=0) para a
+# conta de bytes por token fechar: 8 ativos × N/288 na CPU; (d) varredura de threads numa fração
+# fixa; (e) a mesma fração com a colocação dinâmica ligada, para medir o que o swap rende.
+# SO_12=1 roda só isto. V12 separa variantes por ':' (vírgula derruba o env na Vast).
+if [ -n "${SO_12:-}" ]; then
+  marco "12. teto do worker de CPU"
+  : > /workspace/12.txt
+  { lscpu | grep -E "Model name|^CPU\(s\)|Thread\(s\) per core|Socket\(s\)|NUMA node\(s\)|L3 cache"; free -g | head -2; grep -E "Hugepagesize" /proc/meminfo; } | tee -a /workspace/12.txt
+  NUC=$(nproc)
+  echo "--- banda crua da RAM: torch, soma de 4 GiB float32, melhor de 5, GB/s por threads" | tee -a /workspace/12.txt
+  python3 - <<PY 2>&1 | tee -a /workspace/12.txt
+import os, time, torch
+n = 4 * 1024**3 // 4
+x = torch.ones(n, dtype=torch.float32); x += 1
+nuc = os.cpu_count() or 1
+for t in sorted({max(1, nuc // 8), max(1, nuc // 4), max(1, nuc // 2), max(1, nuc * 3 // 4), nuc}):
+    torch.set_num_threads(t); x.sum(); best = 1e9
+    for _ in range(5):
+        t0 = time.perf_counter(); x.sum(); best = min(best, time.perf_counter() - t0)
+    print(f"threads {t:>3}: {4 / best:6.1f} GB/s")
+PY
+  TAM12="${TAM12:-4096}"; NOVOS12="${NOVOS12:-1100}"
+  PG12="python3 tests/bancada/perfil_gerador.py -m /workspace/corte --tokens $TAM12 --cache 8192 --novos $NOVOS12"
+  F12="decode|moe_cpu prof|worker started|arena: new|swap sweep|Error|error|Traceback|FIM_PERFIL"
+  IFS=',:' read -ra V12 <<< "${V12:-placa:EXL3_MOE_CPU_SPLIT=32:EXL3_MOE_CPU_SPLIT=64:EXL3_MOE_CPU_SPLIT=128:EXL3_MOE_CPU_SPLIT=192:EXL3_MOE_CPU_SPLIT=256:EXL3_MOE_CPU_OFFLOAD=1}"
+  for V in "${V12[@]}"; do
+    [ "$V" = "placa" ] && V=""
+    echo "--- ${V:-tudo na placa} (colocação estática)" | tee -a /workspace/12.txt
+    env CUDA_VISIBLE_DEVICES=0 EXL3_MOE_CPU_PROF=1 EXL3_MOE_CPU_SWAP=0 $V $PG12 --rotulo "${V:-placa}" 2>&1 | grep -E "$F12" | tee -a /workspace/12.txt
+  done
+  for T in $(( NUC / 4 )) $(( NUC / 2 )) $(( NUC * 3 / 4 )) $NUC; do
+    [ "$T" -lt 1 ] && continue
+    echo "--- EXL3_MOE_CPU_SPLIT=144 threads=$T (colocação estática)" | tee -a /workspace/12.txt
+    env CUDA_VISIBLE_DEVICES=0 EXL3_MOE_CPU_PROF=1 EXL3_MOE_CPU_SWAP=0 EXL3_MOE_CPU_SPLIT=144 EXL3_MOE_CPU_THREADS=$T $PG12 --rotulo "split144-t$T" 2>&1 | grep -E "$F12" | tee -a /workspace/12.txt
+  done
+  echo "--- EXL3_MOE_CPU_SPLIT=144 (colocação dinâmica, padrão)" | tee -a /workspace/12.txt
+  env CUDA_VISIBLE_DEVICES=0 EXL3_MOE_CPU_PROF=1 EXL3_MOE_CPU_SWAP_DEBUG=1 EXL3_MOE_CPU_SPLIT=144 $PG12 --rotulo "split144-swap" 2>&1 | grep -E "$F12" | tee -a /workspace/12.txt
+  echo "12 terminou"
+fi
+
 {
   echo "bancada $PROVA_ID · $(nvidia-smi --query-gpu=name --format=csv,noheader | sort | uniq -c | tr '\n' ' ')"
   echo "--- 3b"; grep -E "== bloco|vs original|Error|error" /workspace/3b.txt | head -40
@@ -310,6 +354,7 @@ fi
   echo "--- 9"; cat /workspace/9.txt 2>/dev/null
   echo "--- 10"; cat /workspace/10.txt 2>/dev/null
   echo "--- 11"; cat /workspace/11.txt 2>/dev/null
+  echo "--- 12"; cat /workspace/12.txt 2>/dev/null
   echo "--- 5a tabelas"; sed -n '/PREFILL por módulo/,/FIM_PERFIL/p' /workspace/5a.txt | head -60
 } | tee /workspace/resumo.txt
 publicar
