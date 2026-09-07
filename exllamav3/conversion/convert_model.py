@@ -577,6 +577,30 @@ def timing_report(key: str):
     _timing_marks.clear()
 
 
+# Calibration state rows live on the host between modules. Pageable copies run at a few GB/s and
+# block; a pinned row uploads/downloads asynchronously at PCIe speed, and the buffer is reused
+# across modules while the shape holds (it changes once, at hc_expand). EXL3_PIN_STATE=0 to disable,
+# e.g. on hosts that cannot lock tens of GB. Readers of the host copy (state error, checkpoint)
+# must synchronize first
+PIN_STATE = os.environ.get("EXL3_PIN_STATE", "1") == "1"
+_pin_failed = [False]
+
+def to_host_state(rs: torch.Tensor, prev: torch.Tensor | None):
+    if not PIN_STATE or _pin_failed[0]:
+        return rs.cpu()
+    if prev is not None and prev.device.type == "cpu" and prev.is_pinned() and prev.shape == rs.shape and prev.dtype == rs.dtype:
+        prev.copy_(rs, non_blocking = True)
+        return prev
+    try:
+        buf = torch.empty(rs.shape, dtype = rs.dtype, pin_memory = True)
+    except RuntimeError as e:
+        print(f" !! Could not pin calibration state ({str(e).splitlines()[0]}), falling back to pageable copies")
+        _pin_failed[0] = True
+        return rs.cpu()
+    buf.copy_(rs, non_blocking = True)
+    return buf
+
+
 def dispatch_quantize(args, linears, config, strategy, idx, devices, ratios_thread, ratios_tiles, capture_H, state):
     """
     Linears kept at 16 bpw are only announced and skipped, so they must not decide the dispatch: a
@@ -955,6 +979,7 @@ def advance_state_parallel(
                     "attn_mode": "flash_attn_nc",
                     "input_ids": original_input_ids[i],
                 }
+                host_prev = state[i]
                 state[i] = module.prepare_for_device(state[i], params)
                 row_bad = False
                 if i < num_ref_states or not is_last_module:
@@ -965,10 +990,11 @@ def advance_state_parallel(
                         with lock:
                             bad_rows.add(i)
                         print(f" !! Non-finite hidden state in calibration row {i}, excluding row")
-                    state[i] = rs.cpu()
+                    state[i] = to_host_state(rs, host_prev)
                     put_preserve(i, params)
                 ref = ref_states.get(i) if i < num_ref_states else None
                 if ref is not None and have_linears and not row_bad:
+                    torch.cuda.synchronize()
                     ref = ref.to(state[i].device)
                     rfn, cos, sq = get_state_error(state[i], ref)
                     ref_states[i] = None
@@ -1421,6 +1447,7 @@ def main(args, job_state):
                             "attn_mode": "flash_attn_nc",
                             "input_ids": original_input_ids[i],
                         }
+                        host_prev = state[i]
                         state[i] = module.prepare_for_device(state[i], params)
                         if i < num_ref_states or idx < len(model.modules) - 1:
                             get_preserve(i, params)
@@ -1428,10 +1455,11 @@ def main(args, job_state):
                             if not torch.isfinite(rs).all().item():
                                 bad_rows.add(i)
                                 print(f" !! Non-finite hidden state in calibration row {i}, excluding row")
-                            state[i] = rs.cpu()
+                            state[i] = to_host_state(rs, host_prev)
                             put_preserve(i, params)
                         ref = ref_states.get(i) if i < num_ref_states else None
                         if ref is not None and len(linears) and i not in bad_rows:
+                            torch.cuda.synchronize()
                             ref = ref.to(state[i].device)
                             rfn, cos, sq = get_state_error(state[i], ref)
                             error += rfn
@@ -1471,6 +1499,7 @@ def main(args, job_state):
             os.makedirs(ckpt_dir_new, exist_ok = True)
             job_state["bad_rows"] = sorted(bad_rows)
             save_dict("ckpt_new/job.json", job_state, args)
+            torch.cuda.synchronize()   # pinned rows may still be receiving the last async copy
             save_tensor(state, "ckpt_new/state.safetensors", args)
             save_tensor(original_input_ids, "ckpt_new/original_input_ids.safetensors", args)
             if os.path.exists(ckpt_dir_old):

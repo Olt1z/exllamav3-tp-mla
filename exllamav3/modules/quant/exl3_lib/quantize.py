@@ -1032,7 +1032,9 @@ def g_scale_search_batch(
     step = 0.075
     fine = [[c + step * (i - 2) for i in range(5)] for c in centers]
     pairs2 = [(t, s) for t in range(n_t) for s in fine[t]]
-    mse2 = eval_pairs(pairs2, samples).view(n_t, 5)
+    # EXL3_GSCALE_STAGE2_STRIDE=n evaluates the fine grid on every n-th sample tile (default: all)
+    stride2 = int(os.environ.get("EXL3_GSCALE_STAGE2_STRIDE", "1"))
+    mse2 = eval_pairs(pairs2, samples if stride2 <= 1 else [s[::stride2] for s in samples]).view(n_t, 5)
     mse2_h = mse2.tolist()
 
     results = []
