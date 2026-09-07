@@ -95,12 +95,15 @@ def main():
                       k_bits = args.cache_bits, v_bits = args.cache_bits)
     else:
         cache = Cache(model, max_num_tokens = args.cache)
-    camadas = getattr(cache, "layers", None) or getattr(cache, "cache_layers", None)
-    if camadas:
-        try:
-            print(f"cache: {type(camadas[0]).__name__}, {sum(c.storage_size() for c in camadas) / 2**20:.1f} MiB para {args.cache} tokens")
-        except Exception as e:
-            print(f"cache: {type(camadas[0]).__name__} ({e})")
+    # Só informativo: a forma de `cache.layers` varia (lista ou dicionário por chave) e nada
+    # aqui pode derrubar a corrida
+    try:
+        camadas = getattr(cache, "layers", None) or getattr(cache, "cache_layers", None)
+        vals = list(camadas.values()) if isinstance(camadas, dict) else list(camadas or [])
+        if vals:
+            print(f"cache: {type(vals[0]).__name__}, {sum(c.storage_size() for c in vals) / 2**20:.1f} MiB para {args.cache} tokens")
+    except Exception as e:
+        print(f"cache: (sem tamanho: {e})")
     t0 = time.time()
     model.load(
         tensor_p = args.tp, progressbar = True, verbose = args.tp,
