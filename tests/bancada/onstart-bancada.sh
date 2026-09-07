@@ -211,13 +211,22 @@ PY
   source /workspace/work/motor.env
   marco "10b. convert.py"
   T0=$(date +%s)
-  CUDA_VISIBLE_DEVICES=0 TERM=dumb COLUMNS=200 EXL3_CONVERT_TIMING=1 python3 convert.py -i /workspace/origem -w /workspace/work -o /workspace/exl3 \
-    --recipe /workspace/work/recipe.yaml --codebook mul1 --devices 0 --cal_data $Q/cal_bl4ck0ut.safetensors \
+  # DEVICES9=0,1 quantiza com mais de uma placa (mede a escala do paralelismo por grupo e da calibração)
+  DEVICES9="${DEVICES9:-0}"
+  CUDA_VISIBLE_DEVICES=$DEVICES9 TERM=dumb COLUMNS=200 EXL3_CONVERT_TIMING=1 python3 convert.py -i /workspace/origem -w /workspace/work -o /workspace/exl3 \
+    --recipe /workspace/work/recipe.yaml --codebook mul1 --devices "$DEVICES9" --cal_data $Q/cal_bl4ck0ut.safetensors \
     -cr 503 -cc 2048 -hb "$HEAD_BITS" -mb "$MTP_BITS" -vb "$VISION_BITS" -cpi 900 2>&1 | tee /workspace/10-convert.txt | grep -E "layers\.[0-9]+ +bpw|Unquantized|Estimated|!!|##|Error|error|All done"
   echo "convert.py: $(( $(date +%s) - T0 )) s no total" | tee -a /workspace/10.txt
   du -sh /workspace/exl3 | tee -a /workspace/10.txt
-  # PROVA9_SO_CONVERT=1: só o tempo por fase (EXL3_CONVERT_TIMING), sem manifest, KL nem publicação
-  if [ -n "${PROVA9_SO_CONVERT:-}" ]; then grep -a -E "Timing|layers\.[0-9]+ +bpw" /workspace/10-convert.txt | cut -c1-200 | tee -a /workspace/10.txt; echo "10 terminou"; fi
+  grep -a -E "Timing model|Timing group|Timing batch|layers\.[0-9]+ +bpw" /workspace/10-convert.txt | sort | uniq -c | sort -rn | head -40 | cut -c1-200 | tee -a /workspace/10.txt
+  # PROVA9_SO_CONVERT=1: tempo por fase, manifest e KL contra o BF16, sem comparar com a esteira antiga nem publicar
+  if [ -n "${PROVA9_SO_CONVERT:-}" ]; then
+    python3 $Q/scripts/manifest_exl3.py --artefato /workspace/exl3 --origem /workspace/origem --receita $Q/saidas/$RECEITA_ID/receita.json --saida /workspace/exl3/manifest.json 2>&1 | grep -E "aprovado|violac|g_sc" | tee -a /workspace/10.txt
+    CUDA_VISIBLE_DEVICES=0 python3 tests/tp_mla_smoke.py -m /workspace/origem --tokens 128 --cache 8192 --save /workspace/bf16.pt 2>&1 | grep -E "KL|Error|error" | tee -a /workspace/10.txt
+    echo "--- nativo vs BF16" | tee -a /workspace/10.txt
+    CUDA_VISIBLE_DEVICES=0 python3 tests/tp_mla_smoke.py -m /workspace/exl3 --tokens 128 --cache 8192 --compare /workspace/bf16.pt 2>&1 | grep -E "KL|OK|FALHOU|Error|error" | tee -a /workspace/10.txt
+    echo "10 terminou"
+  fi
   if [ -z "${PROVA9_SO_CONVERT:-}" ]; then
   marco "10c. manifest"
   python3 $Q/scripts/manifest_exl3.py --artefato /workspace/exl3 --origem /workspace/origem --receita $Q/saidas/$RECEITA_ID/receita.json --saida /workspace/exl3/manifest.json 2>&1 | tail -15 | tee -a /workspace/10.txt
