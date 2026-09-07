@@ -452,7 +452,10 @@ class Model(Model_TPMixin, Model_LSMixin):
                         "Output device must be part of split."
 
                 if tp_options is None:
-                    tp_options = {}
+                    # Launchers that expose no tp_options (TabbyAPI) can still ask for the
+                    # channel split of MoE experts by env. It is the only TP layout that accepts
+                    # EXL3_MOE_CPU_SPLIT (every rank holds every expert); see BlockSparseMLP
+                    tp_options = {"moe_tensor_split": os.environ.get("EXL3_TP_MOE_TENSOR_SPLIT", "0") == "1"}
 
                 yield from self._load_tp(
                     progressbar,
