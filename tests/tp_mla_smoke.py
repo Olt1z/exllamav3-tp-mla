@@ -73,6 +73,7 @@ def main():
     p.add_argument("--compare", help = "arquivo de --save para comparar (teacher forcing)")
     p.add_argument("--max-kl", type = float, help = "falha se a KL média passar deste valor")
     p.add_argument("--tp-moe-ts", action = "store_true", help = "tensor split nos experts em vez de expert parallel")
+    p.add_argument("--cache-bits", type = int, default = 0, help = "cache quantizado (2 a 8 bits); na MLA é a largura do latente")
     p.add_argument("--tp-dev-limits", default = None,
                    help = "paralelismo máximo por classe, ex.: 'attn=1' (só experts/MLP divididos) ou 'moe=1,mlp=1,linear=1' (só a atenção dividida)")
     p.add_argument("--simular-fio-bf16", action = "store_true",
@@ -88,7 +89,18 @@ def main():
 
     config = Config.from_directory(args.model_dir)
     model = Model.from_config(config)
-    cache = Cache(model, max_num_tokens = args.cache)
+    if args.cache_bits:
+        from exllamav3.cache import CacheLayer_quant
+        cache = Cache(model, max_num_tokens = args.cache, layer_type = CacheLayer_quant,
+                      k_bits = args.cache_bits, v_bits = args.cache_bits)
+    else:
+        cache = Cache(model, max_num_tokens = args.cache)
+    camadas = getattr(cache, "layers", None) or getattr(cache, "cache_layers", None)
+    if camadas:
+        try:
+            print(f"cache: {type(camadas[0]).__name__}, {sum(c.storage_size() for c in camadas) / 2**20:.1f} MiB para {args.cache} tokens")
+        except Exception as e:
+            print(f"cache: {type(camadas[0]).__name__} ({e})")
     t0 = time.time()
     model.load(
         tensor_p = args.tp, progressbar = True, verbose = args.tp,

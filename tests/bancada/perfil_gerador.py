@@ -74,6 +74,7 @@ def main():
     p.add_argument("--tp", action = "store_true")
     p.add_argument("--backend", default = "nccl", help = "backend do TP (o hub usa nccl)")
     p.add_argument("--tp-moe-ts", action = "store_true", help = "TP: experts fatiados por canal (é o modo que aceita EXL3_MOE_CPU_SPLIT)")
+    p.add_argument("--cache-bits", type = int, default = 0, help = "cache quantizado (2 a 8 bits); na MLA é a largura do latente")
     p.add_argument("--chunk", type = int, default = 4096, help = "max_chunk_size do gerador (o hub passa --chunk-size)")
     p.add_argument("--tokens", default = "4096,16384,30000", help = "tamanhos de prompt, separados por vírgula")
     p.add_argument("--novos", type = int, default = 64, help = "tokens gerados por prompt")
@@ -99,8 +100,12 @@ def main():
         draft = Model.from_config(cfg_d)
         dcache = Cache(draft, max_num_tokens = args.cache)
         draft.load(device = torch.device("cuda:0"), progressbar = True)
+    extra = {}
+    if args.cache_bits:
+        from exllamav3.cache import CacheLayer_quant
+        extra = dict(layer_type = CacheLayer_quant, k_bits = args.cache_bits, v_bits = args.cache_bits)
     cache = Cache(model, max_num_tokens = args.cache,
-                  max_history = draft.caps.get("default_draft_size", 4) if draft else 0)
+                  max_history = draft.caps.get("default_draft_size", 4) if draft else 0, **extra)
     if args.tp:
         model.load(tensor_p = True, tp_backend = args.backend, progressbar = True,
                    reserve_per_device = args.reserva_gb or None,

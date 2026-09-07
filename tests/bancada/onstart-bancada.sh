@@ -35,7 +35,7 @@ publicar() {
 import os
 from huggingface_hub import HfApi
 api = HfApi(token=os.environ["HF_TOKEN"])
-for f in ("bancada.log", "resumo.txt", "build.log", "10.txt", "10-cobertura.txt", "10-convert.txt", "11.txt", "11-solo.txt", "11-p0.txt", "11-p1.txt", "11-duas.txt", "12.txt", "13.txt"):
+for f in ("bancada.log", "resumo.txt", "build.log", "10.txt", "10-cobertura.txt", "10-convert.txt", "11.txt", "11-solo.txt", "11-p0.txt", "11-p1.txt", "11-duas.txt", "12.txt", "13.txt", "14.txt"):
     p = f"/workspace/{f}"
     if os.path.exists(p):
         api.upload_file(path_or_fileobj=p, path_in_repo=f"saidas/tp-mla/$PROVA_ID/{f}", repo_id="$REPO_SAIDAS")
@@ -70,7 +70,7 @@ du -sh /workspace/corte
 # Artefato da esteira antiga com kv_b_proj em treliça: repara antes de carregar
 python3 tests/bancada/reparar_kv_b_proj.py /workspace/corte
 
-if [ -z "${SO_7:-}" ] && [ -z "${SO_8:-}" ] && [ -z "${SO_9:-}" ] && [ -z "${SO_10:-}" ] && [ -z "${SO_11:-}" ] && [ -z "${SO_12:-}" ] && [ -z "${SO_13:-}" ]; then
+if [ -z "${SO_7:-}" ] && [ -z "${SO_8:-}" ] && [ -z "${SO_9:-}" ] && [ -z "${SO_10:-}" ] && [ -z "${SO_11:-}" ] && [ -z "${SO_12:-}" ] && [ -z "${SO_13:-}" ] && [ -z "${SO_14:-}" ]; then
 marco "3b. teste por bloco: original × importado por TP, bloco a bloco e filho a filho"
 env $BASE python3 tests/test_tp_block_import.py /workspace/corte 2>&1 | grep -v -E "it/s\]|━━" | tee /workspace/3b.txt
 echo "3b saiu com ${PIPESTATUS[0]}"
@@ -374,6 +374,35 @@ if [ -n "${SO_13:-}" ]; then
   echo "13 terminou"
 fi
 
+# 14. Etapa 3 do plano: cache quantizado no latente da MLA (Q8/Q6/Q4), qualidade contra fp16 com
+# prefill longo (o erro do cache cresce com o contexto), numa placa e em TP2 canais; e o arranjo
+# alvo, TP2 canais + Q8 + split. O corte tem UMA camada MLA, então VRAM do cache não é mensurável
+# aqui — só a KL e o tamanho que a camada declara. SO_14=1 roda só isto; duas placas.
+if [ -n "${SO_14:-}" ]; then
+  marco "14. cache quantizado na MLA"
+  : > /workspace/14.txt
+  K14="${K14:-144}"; PF14="${PF14:-3000}"
+  SM="python3 tests/tp_mla_smoke.py -m /workspace/corte --tokens 128 --cache 8192 --prefill-tokens $PF14"
+  F14="^cache:|decode:|uso médio|KL média|^OK|FALHOU|Error|error|Traceback|CPU split experts|ignored|skipped"
+  echo "--- 14a. base fp16, uma placa, prefill $PF14" | tee -a /workspace/14.txt
+  env CUDA_VISIBLE_DEVICES=0 $SM --save /workspace/14-base.pt 2>&1 | grep -E "$F14" | tee -a /workspace/14.txt
+  for B in 8 6 4; do
+    echo "--- 14b. uma placa, cache Q$B, KL contra 14a" | tee -a /workspace/14.txt
+    env CUDA_VISIBLE_DEVICES=0 $SM --cache-bits $B --compare /workspace/14-base.pt 2>&1 | grep -E "$F14" | tee -a /workspace/14.txt
+  done
+  echo "--- 14c. TP2 canais, cache fp16, KL contra 14a (fio bf16)" | tee -a /workspace/14.txt
+  $SM --tp --tp-moe-ts --compare /workspace/14-base.pt --simular-fio-bf16 2>&1 | grep -E "$F14" | tee -a /workspace/14.txt
+  echo "--- 14d. TP2 canais, cache Q8, KL contra 14a (fio bf16)" | tee -a /workspace/14.txt
+  $SM --tp --tp-moe-ts --cache-bits 8 --compare /workspace/14-base.pt --simular-fio-bf16 2>&1 | grep -E "$F14" | tee -a /workspace/14.txt
+  echo "--- 14e. TP2 canais, cache Q8, EXL3_MOE_CPU_SPLIT=$K14: o arranjo alvo" | tee -a /workspace/14.txt
+  EXL3_MOE_CPU_SWAP=0 EXL3_MOE_CPU_SPLIT=$K14 $SM --tp --tp-moe-ts --cache-bits 8 --compare /workspace/14-base.pt --simular-fio-bf16 2>&1 | grep -E "$F14" | tee -a /workspace/14.txt
+  echo "--- 14f. modo de canais pelo AMBIENTE (EXL3_TP_MOE_TENSOR_SPLIT=1, sem --tp-moe-ts), Q8 + split: o caminho do TabbyAPI" | tee -a /workspace/14.txt
+  EXL3_TP_MOE_TENSOR_SPLIT=1 EXL3_MOE_CPU_SWAP=0 EXL3_MOE_CPU_SPLIT=$K14 $SM --tp --cache-bits 8 --compare /workspace/14-base.pt --simular-fio-bf16 2>&1 | grep -E "$F14" | tee -a /workspace/14.txt
+  echo "--- 14g. gerador: TP2 canais Q8 + split, prompts 4k e 16k" | tee -a /workspace/14.txt
+  EXL3_MOE_CPU_SWAP=0 EXL3_MOE_CPU_SPLIT=$K14 python3 tests/bancada/perfil_gerador.py -m /workspace/corte --tp --tp-moe-ts --cache-bits 8 --tokens 4096,16384 --cache 32768 --novos 256 --rotulo "tp2-q8-split$K14" 2>&1 | grep -E "prefill|decode|worker started|Error|Traceback" | tee -a /workspace/14.txt
+  echo "14 terminou"
+fi
+
 {
   echo "bancada $PROVA_ID · $(nvidia-smi --query-gpu=name --format=csv,noheader | sort | uniq -c | tr '\n' ' ')"
   echo "--- 3b"; grep -E "== bloco|vs original|Error|error" /workspace/3b.txt | head -40
@@ -387,6 +416,7 @@ fi
   echo "--- 11"; cat /workspace/11.txt 2>/dev/null
   echo "--- 12"; cat /workspace/12.txt 2>/dev/null
   echo "--- 13"; cat /workspace/13.txt 2>/dev/null
+  echo "--- 14"; cat /workspace/14.txt 2>/dev/null
   echo "--- 5a tabelas"; sed -n '/PREFILL por módulo/,/FIM_PERFIL/p' /workspace/5a.txt | head -60
 } | tee /workspace/resumo.txt
 publicar
