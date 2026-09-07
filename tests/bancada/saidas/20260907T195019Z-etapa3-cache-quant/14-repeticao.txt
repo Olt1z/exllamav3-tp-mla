@@ -1,0 +1,60 @@
+[rank1]:     raise RuntimeError(f"job falhou: {fim.get('error') if fim else 'sem resultado'}")
+[rank1]: RuntimeError: job falhou: sparse DSA over a quantized MLA cache is not supported yet; use an fp16 cache
+Traceback (most recent call last):
+    x = self.decode_flash_attn(x, bsz, seqlen, params)
+  File "/workspace/exllamav3-tp-mla/exllamav3/modules/mla_attn.py", line 1015, in decode_flash_attn
+AssertionError: sparse DSA over a quantized MLA cache is not supported yet; use an fp16 cache
+===== 14r =====
+--- 14a. base fp16, uma placa, prefill 1500
+cache: CacheLayer_MLA_fp16, 12.5 MiB para 8192 tokens
+decode: 112 tokens (após 16 de aquecimento) em 0.45 s = 247.75 tok/s
+uso médio por GPU (%): ['0', '0']
+OK
+--- 14b. uma placa, cache Q8, KL contra 14a
+cache: CacheLayer_MLA_quant, 8.8 MiB para 8192 tokens
+decode: 112 tokens (após 16 de aquecimento) em 0.43 s = 259.93 tok/s
+uso médio por GPU (%): ['0', '0']
+KL média 0.00014  KL máx 0.00292  |dif| máx 0.395  top-1 igual 100.0%
+OK
+--- 14b. uma placa, cache Q6, KL contra 14a
+cache: CacheLayer_MLA_quant, 7.8 MiB para 8192 tokens
+decode: 112 tokens (após 16 de aquecimento) em 0.43 s = 260.22 tok/s
+uso médio por GPU (%): ['0', '0']
+KL média 0.00087  KL máx 0.00322  |dif| máx 0.421  top-1 igual 100.0%
+OK
+--- 14b. uma placa, cache Q4, KL contra 14a
+cache: CacheLayer_MLA_quant, 6.8 MiB para 8192 tokens
+decode: 112 tokens (após 16 de aquecimento) em 0.43 s = 260.77 tok/s
+uso médio por GPU (%): ['44', '0']
+KL média 0.00125  KL máx 0.00344  |dif| máx 0.448  top-1 igual 100.0%
+OK
+--- 14c. TP2 canais, cache fp16, KL contra 14a (fio bf16) [tentativa 1]
+cache: CacheLayer_MLA_fp16, 12.5 MiB para 8192 tokens
+decode: 112 tokens (após 16 de aquecimento) em 0.39 s = 290.05 tok/s
+uso médio por GPU (%): ['8', '18']
+KL média 0.00028  KL máx 0.00306  |dif| máx 0.407  top-1 igual 100.0%
+OK
+--- 14d. TP2 canais, cache Q8, KL contra 14a (fio bf16)
+cache: CacheLayer_MLA_quant, 8.8 MiB para 8192 tokens
+decode: 112 tokens (após 16 de aquecimento) em 0.38 s = 291.69 tok/s
+uso médio por GPU (%): ['7', '0']
+KL média 0.00026  KL máx 0.00302  |dif| máx 0.408  top-1 igual 100.0%
+OK
+--- 14e. TP2 canais, cache Q8, EXL3_MOE_CPU_SPLIT=144: o arranjo alvo
+cache: CacheLayer_MLA_quant, 8.8 MiB para 8192 tokens
+ -- CPU split experts (worker, static, TP output rank): model.language_model.layers.3.mlp [144..288) of 288
+decode: 112 tokens (após 16 de aquecimento) em 0.41 s = 275.21 tok/s
+uso médio por GPU (%): ['1', '26']
+KL média 0.00033  KL máx 0.00317  |dif| máx 0.416  top-1 igual 100.0%
+OK
+--- 14f. modo de canais pelo AMBIENTE, Q8 + split: o caminho do TabbyAPI
+cache: CacheLayer_MLA_quant, 8.8 MiB para 8192 tokens
+ -- CPU split experts (worker, static, TP output rank): model.language_model.layers.3.mlp [144..288) of 288
+decode: 112 tokens (após 16 de aquecimento) em 0.41 s = 273.57 tok/s
+uso médio por GPU (%): ['31', '6']
+KL média 0.00036  KL máx 0.00312  |dif| máx 0.415  top-1 igual 100.0%
+OK
+14r terminou
+===== tracebacks =====
+# /workspace/14a.log
+# /workspace/14e.log

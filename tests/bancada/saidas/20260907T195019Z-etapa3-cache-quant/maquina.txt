@@ -1,0 +1,10 @@
+NVIDIA GeForce RTX 3090, 0 MiB, 24576 MiB, 570.190, 320.00 W
+NVIDIA GeForce RTX 3090, 0 MiB, 24576 MiB, 570.190, 320.00 W
+               total        used        free      shared  buff/cache   available
+Mem:             125          22          38           0          64         102
+CPU(s):                               64
+Model name:                           AMD EPYC 7532 32-Core Processor
+CUDA_OK 12.8 2.8.0+cu128
+NVIDIA GeForce RTX 3090, 24576 MiB, 8.6
+torch 2.8.0+cu128 cuda 12.8 gpus 2
+=== 1. dependências · 2026-09-07T19:51:11Z

@@ -1,0 +1,66 @@
+--- 14a. base fp16, uma placa, prefill 3000
+Traceback (most recent call last):
+KeyError: 0
+Traceback (most recent call last):
+KeyError: 0
+--- 14b. uma placa, cache Q8, KL contra 14a
+Traceback (most recent call last):
+FileNotFoundError: [Errno 2] No such file or directory: '/workspace/14-base.pt'
+--- 14b. uma placa, cache Q6, KL contra 14a
+Traceback (most recent call last):
+FileNotFoundError: [Errno 2] No such file or directory: '/workspace/14-base.pt'
+--- 14b. uma placa, cache Q4, KL contra 14a
+Traceback (most recent call last):
+FileNotFoundError: [Errno 2] No such file or directory: '/workspace/14-base.pt'
+--- 14c. TP2 canais, cache fp16, KL contra 14a (fio bf16)
+Traceback (most recent call last):
+FileNotFoundError: [Errno 2] No such file or directory: '/workspace/14-base.pt'
+--- 14d. TP2 canais, cache Q8, KL contra 14a (fio bf16)
+Traceback (most recent call last):
+FileNotFoundError: [Errno 2] No such file or directory: '/workspace/14-base.pt'
+--- 14e. TP2 canais, cache Q8, EXL3_MOE_CPU_SPLIT=144: o arranjo alvo
+Traceback (most recent call last):
+FileNotFoundError: [Errno 2] No such file or directory: '/workspace/14-base.pt'
+--- 14f. modo de canais pelo AMBIENTE (EXL3_TP_MOE_TENSOR_SPLIT=1, sem --tp-moe-ts), Q8 + split: o caminho do TabbyAPI
+Traceback (most recent call last):
+FileNotFoundError: [Errno 2] No such file or directory: '/workspace/14-base.pt'
+--- 14g. gerador: TP2 canais Q8 + split, prompts 4k e 16k
+ -- CPU MoE worker started: 1 layers, avx2, 32 threads
+[rank1]: Traceback (most recent call last):
+[rank1]:     raise RuntimeError(f"job falhou: {fim.get('error') if fim else 'sem resultado'}")
+[rank1]: RuntimeError: job falhou: sparse DSA over a quantized MLA cache is not supported yet; use an fp16 cache
+Traceback (most recent call last):
+    x = self.decode_flash_attn(x, bsz, seqlen, params)
+  File "/workspace/exllamav3-tp-mla/exllamav3/modules/mla_attn.py", line 1015, in decode_flash_attn
+AssertionError: sparse DSA over a quantized MLA cache is not supported yet; use an fp16 cache
+===== LOG: tracebacks =====
+71:[rank1]: Traceback (most recent call last):
+72-[rank1]:     raise RuntimeError(f"job falhou: {fim.get('error') if fim else 'sem resultado'}")
+73-[rank1]: RuntimeError: job falhou: sparse DSA over a quantized MLA cache is not supported yet; use an fp16 cache
+74:Traceback (most recent call last):
+76-  File "/workspace/exllamav3-tp-mla/exllamav3/modules/mla_attn.py", line 1015, in decode_flash_attn
+77-AssertionError: sparse DSA over a quantized MLA cache is not supported yet; use an fp16 cache
+109:Traceback (most recent call last):
+110-KeyError: 0
+111:Traceback (most recent call last):
+112-KeyError: 0
+114:Traceback (most recent call last):
+115-FileNotFoundError: [Errno 2] No such file or directory: '/workspace/14-base.pt'
+117:Traceback (most recent call last):
+118-FileNotFoundError: [Errno 2] No such file or directory: '/workspace/14-base.pt'
+120:Traceback (most recent call last):
+121-FileNotFoundError: [Errno 2] No such file or directory: '/workspace/14-base.pt'
+123:Traceback (most recent call last):
+124-FileNotFoundError: [Errno 2] No such file or directory: '/workspace/14-base.pt'
+126:Traceback (most recent call last):
+127-FileNotFoundError: [Errno 2] No such file or directory: '/workspace/14-base.pt'
+129:Traceback (most recent call last):
+130-FileNotFoundError: [Errno 2] No such file or directory: '/workspace/14-base.pt'
+132:Traceback (most recent call last):
+133-FileNotFoundError: [Errno 2] No such file or directory: '/workspace/14-base.pt'
+136:[rank1]: Traceback (most recent call last):
+137-[rank1]:     raise RuntimeError(f"job falhou: {fim.get('error') if fim else 'sem resultado'}")
+138-[rank1]: RuntimeError: job falhou: sparse DSA over a quantized MLA cache is not supported yet; use an fp16 cache
+139:Traceback (most recent call last):
+141-  File "/workspace/exllamav3-tp-mla/exllamav3/modules/mla_attn.py", line 1015, in decode_flash_attn
+142-AssertionError: sparse DSA over a quantized MLA cache is not supported yet; use an fp16 cache
