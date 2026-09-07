@@ -201,7 +201,9 @@ def compile_model(args, model, config, tokenizer, mtp_model = None, vision_model
     qcfg = {
         "quant_method": "exl3",
         "version": __version__,
-        "bits": args["final_bits"],
+        # The Hub's config validator wants an integer `bits`; the exact figure goes in `bpw`
+        "bits": int(round(args["final_bits"])),
+        "bpw": args["final_bits"],
         "head_bits": args["head_bits"],
     }
     if "cal_rows" in args:
@@ -225,7 +227,9 @@ def compile_model(args, model, config, tokenizer, mtp_model = None, vision_model
         if orig_qcfg.get("quant_method") == "exl3":
             qcfg = orig_qcfg
             qcfg.update({
-                "bits": args["final_bits"],
+                # The Hub's config validator wants an integer `bits`; the exact figure goes in `bpw`
+                "bits": int(round(args["final_bits"])),
+                "bpw": args["final_bits"],
                 "head_bits": args["head_bits"],
             })
             if "codebook" in args:
