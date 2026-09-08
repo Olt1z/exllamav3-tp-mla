@@ -108,14 +108,14 @@ def _cp_correct_kernel(
 
     # logsumexp sobre os ranks. NaN/inf de buffer não inicializado viram -inf: um único rank com
     # lixo aqui contaminaria o máximo e zeraria o peso de todos os outros
-    m_g = tl.full((1,), -float("inf"), tl.float32)
+    m_g = -float("inf")
     for r in range(N):
         x = tl.load(lse_all + r * (R * H) + idx)
         x = tl.where((x != x) | (x == float("inf")), -float("inf"), x)
         m_g = tl.maximum(m_g, x)
 
     m_safe = tl.where(m_g == -float("inf"), 0.0, m_g)
-    soma = tl.zeros((1,), tl.float32)
+    soma = 0.0
     for r in range(N):
         x = tl.load(lse_all + r * (R * H) + idx)
         x = tl.where((x != x) | (x == float("inf")), -float("inf"), x)
@@ -238,3 +238,48 @@ if __name__ == "__main__":
     erro_v = (obtido_v - esperado).abs().max().item()
     assert erro_v < 1e-4, f"fatia vazia contaminou o combine: erro maximo {erro_v}"
     print(f"fatia vazia ignorada corretamente · erro maximo {erro_v:.2e}")
+
+    if dev != "cuda":
+        print("sem GPU: os dois kernels Triton nao foram exercitados")
+        raise SystemExit(0)
+
+    # --- os kernels, com os ranks emulados numa placa so ------------------------------------
+    o_locais, lses = o_locais[:N], lses[:N]
+
+    # 1. _cp_lse_kernel contra o logsumexp do torch, a partir de um ws_ml sintetico no layout
+    #    que os kernels de split produzem: base = ((pid * n_splits + s) * BLOCK_H + hloc) * 2
+    BLOCK_H, n_splits = 8, 16
+    n_pid = (R * H) // BLOCK_H
+    ws = torch.randn(n_pid, n_splits, BLOCK_H, 2, device = dev, dtype = torch.float32)
+    ws[..., 1] = ws[..., 1].abs() + 0.1          # l tem de ser positivo
+    lse_ker = cp_lse_local(ws.reshape(-1).contiguous(), n_pid, n_splits, BLOCK_H)
+    m, l = ws[..., 0], ws[..., 1]                # (n_pid, n_splits, BLOCK_H)
+    lse_ref = torch.logsumexp(m + torch.log(l), dim = 1).reshape(-1)
+    erro_l = (lse_ker - lse_ref).abs().max().item()
+    assert erro_l < 1e-4, f"_cp_lse_kernel divergiu: erro maximo {erro_l}"
+    print(f"_cp_lse_kernel bate com logsumexp do torch · erro maximo {erro_l:.2e}")
+
+    # 2. _cp_correct_kernel: rodado uma vez por rank e somado, emula o reduce_scatter. A soma
+    #    tem de dar a mesma coisa que a referencia.
+    lse_all = torch.stack([x.reshape(R * H) for x in lses]).contiguous()
+    acc = torch.zeros(H, R, D, device = dev, dtype = torch.float32)
+    for r in range(N):
+        pesada = torch.empty(H, R, D, device = dev, dtype = torch.float32)
+        lse_g = torch.empty(R * H, device = dev, dtype = torch.float32)
+        o_r = o_locais[r].contiguous()           # (R, H, D), strides (H*D, D, 1)
+        _cp_correct_kernel[(R * H, triton.cdiv(D, 128))](
+            o_r, lse_all, pesada, lse_g,
+            N, R, H, r, H * D, D,
+            D = D, BLOCK_D = 128, SALVAR_LSE = 1,
+            num_warps = 4, num_stages = 2,
+        )
+        acc += pesada
+    obtido_k = acc.permute(1, 0, 2)              # (H, R, D) -> (R, H, D)
+    erro_k = (obtido_k - esperado).abs().max().item()
+    assert erro_k < 1e-4, f"_cp_correct_kernel divergiu: erro maximo {erro_k}"
+    print(f"_cp_correct_kernel + soma dos ranks = atencao completa · erro maximo {erro_k:.2e}")
+
+    lse_g_ref = torch.logsumexp(lse_all, dim = 0)
+    erro_g = (lse_g - lse_g_ref).abs().max().item()
+    assert erro_g < 1e-4, f"lse global divergiu: erro maximo {erro_g}"
+    print(f"lse global do kernel bate com o do torch · erro maximo {erro_g:.2e}")

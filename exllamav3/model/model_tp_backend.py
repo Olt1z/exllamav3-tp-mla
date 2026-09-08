@@ -35,21 +35,6 @@ REDUZIR_GRANDE_NA_GPU = os.environ.get("EXL3_TP_REDUCE_GPU", "0") == "1"
 # nunca é alcançado e manda tudo em fp32.
 LIMIAR_FIO_BF16 = int(os.environ.get("EXLLAMA_TP_LIMIAR_FIO_BF16", 1 << 20))
 
-# O context parallel precisa de all_gather e reduce_scatter, que o backend nativo ainda não tem.
-# A prova 19 (08/09/2026) mediu que só o par AG(lse) + reduce_scatter cabe no passo de decode: o
-# all_reduce de slot, que seria a saída sem primitiva nova, custa 17 ms por token em TP4 com
-# rascunho, contra um passo de 26.
-#
-# O porte para o nativo já tem forma conhecida e é pequeno: pg_all_reduce_kernel É um anel de duas
-# fases -- as primeiras (num_ranks - 1) iterações acumulam, que é exatamente reduce-scatter, e as
-# últimas (num_ranks - 1) copiam, que é exatamente all-gather. Basta um seletor de fase no laço,
-# com a convenção de que o rank r é dono do segmento (r + 1) % num_ranks. Não é kernel novo.
-_SEM_CP_NO_NATIVO = (
-    "context parallel exige all_gather/reduce_scatter, que o backend nativo ainda não implementa. "
-    "Rode com EXLLAMA_TP_BACKEND=nccl, ou porte a fase do anel em parallel/all_reduce.cu "
-    "(as duas fases do all-reduce já SÃO reduce-scatter e all-gather)."
-)
-
 SHBUF_SIZE_S = 16 * 1024
 SHBUF_SIZE_LL = 16 * 1024
 # MAX_CPU_REDUCE = SHBUF_SIZE_R // 17 // 256 * 256
@@ -540,11 +525,44 @@ class TPBackendNative:
 
 
     def all_gather(self, out_tensor: torch.Tensor, tensor: torch.Tensor):
-        raise NotImplementedError(_SEM_CP_NO_NATIVO)
+        """out_tensor é (world_size, *tensor.shape) e contígua; sai com a fatia de cada rank.
+
+        O anel trabalha no lugar sobre o buffer inteiro, então a contribuição local entra na
+        própria fatia antes de rodar. Sem estreitar fp32 — ver a nota do backend NCCL."""
+        rank = self.active_devices.index(self.device)
+        plano = out_tensor.view(len(self.active_devices), -1)
+        plano[rank].copy_(tensor.reshape(-1))
+        ext.pg_all_gather(
+            self.ptr_g,
+            self.dev_g,
+            self.active_devices,
+            self.device,
+            self.active_devices[0],
+            out_tensor,
+            self.dev_b,
+            self.shbuf_size,
+            self.abort_flag
+        )
 
 
     def reduce_scatter(self, out_tensor: torch.Tensor, tensor: torch.Tensor):
-        raise NotImplementedError(_SEM_CP_NO_NATIVO)
+        """tensor é (world_size, *out_tensor.shape) e contígua; cada rank sai com a sua fatia.
+
+        O anel soma no lugar e deixa a fatia do rank pronta na posição dele; as outras ficam com
+        acumulado parcial e não devem ser lidas."""
+        rank = self.active_devices.index(self.device)
+        ext.pg_reduce_scatter(
+            self.ptr_g,
+            self.dev_g,
+            self.active_devices,
+            self.device,
+            self.active_devices[0],
+            tensor,
+            self.dev_b,
+            self.shbuf_size,
+            self.abort_flag
+        )
+        out_tensor.copy_(tensor.view(len(self.active_devices), -1)[rank].view_as(out_tensor))
 
 
     def gather(

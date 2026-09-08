@@ -130,6 +130,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
     m.def("pg_gather", &pg_gather, "pg_gather");
     m.def("pg_gather_small", &pg_gather_small, "pg_gather_small");
     m.def("pg_all_reduce", &pg_all_reduce, "pg_all_reduce");
+    m.def("pg_reduce_scatter", &pg_reduce_scatter, "pg_reduce_scatter");
+    m.def("pg_all_gather", &pg_all_gather, "pg_all_gather");
     m.def("pg_all_reduce_cpu", &pg_all_reduce_cpu, "pg_all_reduce_cpu");
     m.def("run_cpu_reduce_jobs", &run_cpu_reduce_jobs, "run_cpu_reduce_jobs");
     m.def("end_cpu_reduce_jobs", &end_cpu_reduce_jobs, "end_cpu_reduce_jobs");

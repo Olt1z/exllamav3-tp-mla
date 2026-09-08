@@ -37,7 +37,7 @@ publicar() {
 import os
 from huggingface_hub import HfApi
 api = HfApi(token=os.environ["HF_TOKEN"])
-for f in ("bancada.log", "resumo.txt", "build.log", "10.txt", "10-cobertura.txt", "10-convert.txt", "11.txt", "11-solo.txt", "11-p0.txt", "11-p1.txt", "11-duas.txt", "12.txt", "13.txt", "14.txt", "15.txt", "16.txt", "18.txt", "19.txt", "banda.txt"):
+for f in ("bancada.log", "resumo.txt", "build.log", "10.txt", "10-cobertura.txt", "10-convert.txt", "11.txt", "11-solo.txt", "11-p0.txt", "11-p1.txt", "11-duas.txt", "12.txt", "13.txt", "14.txt", "15.txt", "16.txt", "18.txt", "19.txt", "20.txt", "banda.txt"):
     p = f"/workspace/{f}"
     if os.path.exists(p):
         api.upload_file(path_or_fileobj=p, path_in_repo=f"saidas/tp-mla/$PROVA_ID/{f}", repo_id="$REPO_SAIDAS")
@@ -126,6 +126,35 @@ marco "compilando a extensão para sm $CAP com MAX_JOBS=$MAX_JOBS"
 pip install -q --no-build-isolation -e . > /workspace/build.log 2>&1; { grep -E -i "error|FAILED" /workspace/build.log | grep -v -i "warning" | head -20; tail -2 /workspace/build.log; } || true
 # o torch vem antes: a extensão liga em libc10.so, que só entra no processo com ele importado
 python3 -c "import torch, exllamav3_ext; from exllamav3.version import __version__ as v; print('exllamav3', v, 'ext ok')"
+
+# ---------------------------------------------------------------------------------------------
+# 20. O portão da etapa 2b do context parallel: as duas metades do anel do backend nativo contra
+# as primitivas do NCCL. Precisa da extensão compilada, mas NÃO do corte — SO_20=1 sai antes do
+# download e a máquina vive ~10 min. 2+ placas.
+#
+# all_gather é cópia e tem de bater bit a bit. reduce_scatter é soma, e o anel soma em ordem
+# diferente do NCCL: exigir bit a bit em float seria portão errado, então vai int32 para exatidão
+# e fp32 para tolerância.
+if [ -n "${SO_20:-}" ]; then
+  marco "20. paridade dos coletivos do backend nativo"
+  N=$(nvidia-smi --list-gpus | wc -l)
+  { echo "=== topologia"; nvidia-smi topo -m 2>&1 | head -20; } | tee /workspace/20.txt
+  FALHOU_20=0
+  for placas in $(seq 2 "$N"); do
+    { echo; echo "=== $placas placas"; } | tee -a /workspace/20.txt
+    torchrun --nproc_per_node="$placas" tests/bancada/provar_coletivos.py \
+      --cabecas "${CABECAS:-64}" --latente "${LATENTE:-512}" 2>&1 | tee -a /workspace/20.txt \
+      || FALHOU_20=1
+  done
+  # E os dois kernels Triton da peca compartilhada do CP, que nunca rodaram: _cp_lse_kernel
+  # contra o logsumexp do torch, e _cp_correct_kernel com os ranks emulados numa placa so
+  { echo; echo "=== kernels do cp.py"; } | tee -a /workspace/20.txt
+  python3 -m exllamav3.modules.attention_fn.cp 2>&1 | tee -a /workspace/20.txt || FALHOU_20=1
+  echo "=== veredito: $([ "$FALHOU_20" = 0 ] && echo PARIDADE_OK || echo DIVERGIU)" | tee -a /workspace/20.txt
+  publicar
+  marco "FIM"
+  exit 0
+fi
 
 marco "3. corte $CORTE"
 python3 - <<PY

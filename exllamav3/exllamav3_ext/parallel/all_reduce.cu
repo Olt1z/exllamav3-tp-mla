@@ -26,7 +26,8 @@ void pg_all_reduce_kernel
     uint8_t* __restrict__ shbuf_ptr,
     const size_t data_size,
     const size_t shbuf_size,
-    uint32_t* abort_flag
+    uint32_t* abort_flag,
+    const int phase
 )
 {
     int t = threadIdx.x;
@@ -50,7 +51,18 @@ void pg_all_reduce_kernel
     // Divide each workload and buffer into stages
     int num_stages = segment_size / reduce_stage_size;
     int num_buf_stages = rank_shbuf_size / reduce_stage_size;
-    bool no_overflow = num_stages * 2 * (num_ranks - 1) < num_buf_stages - 2;
+
+    // O anel tem duas metades e cada uma é uma primitiva completa: as primeiras (num_ranks - 1)
+    // iterações acumulam, o que É reduce-scatter, e as últimas (num_ranks - 1) copiam, o que É
+    // all-gather. phase seleciona qual rodar. O context parallel precisa das duas separadas
+    // (prova 19: só AG(lse) + reduce-scatter cabe no passo de decode), e elas já estavam aqui.
+    //   PG_RING_ALL_REDUCE = 0  as duas metades, o comportamento de sempre
+    //   PG_RING_REDUCE_SCATTER = 1  só a primeira: o rank r sai com o segmento r somado
+    //   PG_RING_ALL_GATHER = 2  só a segunda: exige o segmento r já preenchido pelo rank r
+    int iter_beg = (phase == 2) ? (num_ranks - 1) : 0;
+    int iter_end = (phase == 1) ? (num_ranks - 1) : (num_ranks - 1) * 2;
+    int num_iters = iter_end - iter_beg;
+    bool no_overflow = num_stages * num_iters < num_buf_stages - 2;
 
     // Indexing
     auto shbuf_stage_ptr = [&] (int rank, int stage_idx)
@@ -98,16 +110,28 @@ void pg_all_reduce_kernel
     int src_rank = (this_rank + num_ranks - 1) % num_ranks;
 
     // Loop around ring
-    for (int iter = 0; iter < (num_ranks - 1) * 2; ++iter)
+    for (int iter = iter_beg; iter < iter_end; ++iter)
     {
         uint64_t deadline = sync_deadline(ctx);
 
         // Outgoing segment to (rank+1)%num_ranks is (rank+iter)%num_iters
         // Incoming segment from (rank-1)%num_ranks is (rank+iter-1)%num_iters
-        int send_seg = (this_rank + num_ranks * 2 - iter) % num_ranks;
-        int recv_seg = (this_rank + num_ranks * 2 - iter - 1) % num_ranks;
+        //
+        // Deslocado de -1 em relação ao upstream para que o rank r termine a fase de acumulação
+        // dono do segmento r, e não do (r+1)%num_ranks. Para o all-reduce inteiro a permutação
+        // dos segmentos é indiferente (todo rank acaba com tudo), mas para as metades soltas é o
+        // que faz a semântica bater com a do NCCL sem uma rotação do buffer por camada. O anel
+        // continua consistente: o rank r manda send_seg(r, iter) e o r+1 recebe
+        // recv_seg(r+1, iter), e as duas expressões são a mesma.
+        int send_seg = (this_rank + num_ranks * 2 - 1 - iter) % num_ranks;
+        int recv_seg = (this_rank + num_ranks * 2 - 2 - iter) % num_ranks;
 
-        int stage_beg = iter * num_stages;
+        // Numeração de estágio relativa ao início da FASE, não do anel inteiro. Os contadores
+        // nascem em zero e o teste de espaço do produtor é
+        // `consumed >= stage_send - num_buf_stages + 1 + BATCH_STAGE`: começar a all-gather em
+        // (num_ranks-1)*num_stages deixaria esse limiar positivo com os contadores ainda em zero,
+        // e o produtor esperaria um consumo que só o próprio produtor pode destravar.
+        int stage_beg = (iter - iter_beg) * num_stages;
         int stage_end = stage_beg + num_stages;
         int stage_send = stage_beg;
         int stage_recv = stage_beg;
@@ -236,7 +260,7 @@ void pg_all_reduce_kernel
 }
 
 
-void pg_all_reduce
+static void pg_ring
 (
     uintptr_t ctx,
     uintptr_t ctx_dev,
@@ -246,7 +270,8 @@ void pg_all_reduce
     at::Tensor& tensor,
     uintptr_t shbuf_dev,
     size_t shbuf_size,
-    at::Tensor& abort_flag
+    at::Tensor& abort_flag,
+    int phase
 )
 {
     const at::cuda::OptionalCUDAGuard device_guard(this_device);
@@ -265,6 +290,29 @@ void pg_all_reduce
     int threads = (int) CEIL_DIVIDE(CEIL_DIVIDE(data_size / 16ll, num_ranks), 32ll) * 32ll;
     threads = MIN(threads, MAX_NUM_THREADS);
 
+    // As metades soltas exigem que o segmento do anel COINCIDA com a fatia lógica do chamador:
+    // reduce-scatter entrega ao rank r o segmento r, e all-gather espera encontrar ali a
+    // contribuição dele. No all-reduce inteiro a última fatia pode sobrar do fim do tensor sem
+    // problema (o kernel guarda por data_end e todo rank termina com tudo), mas aqui o
+    // arredondamento moveria a fronteira e cortaria dados em silêncio.
+    //
+    // O segmento é `threads * 16` B, então threads tem de DIVIDIR a fatia em unidades de 16 B, e
+    // não é o que a conta do all-reduce dá: o lse do context parallel são 256 B por rank, que a
+    // conta original arredondaria para um estágio de 512 B. Pega-se o maior divisor até o teto de
+    // bloco -- para fatia potência de dois isso é só o teto, e o laço nunca passa de 1024 voltas.
+    if (phase != 0)
+    {
+        TORCH_CHECK(data_size % (size_t) num_ranks == 0,
+                    "pg_ring: reduce_scatter/all_gather exigem tensor divisivel por num_ranks");
+        size_t chunk = data_size / (size_t) num_ranks;
+        TORCH_CHECK(chunk % 16 == 0,
+                    "pg_ring: a fatia por rank (", chunk, " B) tem de ser multipla de 16");
+        long chunk16 = (long) (chunk / 16);
+        long t = MIN((long) MAX_NUM_THREADS, chunk16);
+        while (t > 1 && chunk16 % t) t--;
+        threads = (int) t;
+    }
+
     uint32_t* abort_flag_ptr = (uint32_t*) abort_flag.data_ptr();
     void* kernelArgs[] =
     {
@@ -276,7 +324,8 @@ void pg_all_reduce
         (void*)& shbuf_ptr,
         (void*)& data_size,
         (void*)& shbuf_size,
-        (void*)& abort_flag_ptr
+        (void*)& abort_flag_ptr,
+        (void*)& phase
     };
 
     dim3 block_grid(2);
@@ -293,4 +342,62 @@ void pg_all_reduce
     );
 
     cuda_check(cudaPeekAtLastError());
+}
+
+
+void pg_all_reduce
+(
+    uintptr_t ctx,
+    uintptr_t ctx_dev,
+    std::vector<uintptr_t> devices,
+    int this_device,
+    int master_device,
+    at::Tensor& tensor,
+    uintptr_t shbuf_dev,
+    size_t shbuf_size,
+    at::Tensor& abort_flag
+)
+{
+    pg_ring(ctx, ctx_dev, devices, this_device, master_device, tensor,
+            shbuf_dev, shbuf_size, abort_flag, 0);
+}
+
+
+void pg_reduce_scatter
+(
+    uintptr_t ctx,
+    uintptr_t ctx_dev,
+    std::vector<uintptr_t> devices,
+    int this_device,
+    int master_device,
+    at::Tensor& tensor,
+    uintptr_t shbuf_dev,
+    size_t shbuf_size,
+    at::Tensor& abort_flag
+)
+{
+    // No lugar: entra o buffer inteiro (num_ranks fatias), sai com a fatia do proprio rank somada
+    // sobre todos. As outras fatias ficam com lixo parcial, e o chamador nao deve le-las.
+    pg_ring(ctx, ctx_dev, devices, this_device, master_device, tensor,
+            shbuf_dev, shbuf_size, abort_flag, 1);
+}
+
+
+void pg_all_gather
+(
+    uintptr_t ctx,
+    uintptr_t ctx_dev,
+    std::vector<uintptr_t> devices,
+    int this_device,
+    int master_device,
+    at::Tensor& tensor,
+    uintptr_t shbuf_dev,
+    size_t shbuf_size,
+    at::Tensor& abort_flag
+)
+{
+    // No lugar: o chamador ja escreveu a contribuicao dele na fatia do proprio rank; sai com as
+    // num_ranks fatias preenchidas em todos.
+    pg_ring(ctx, ctx_dev, devices, this_device, master_device, tensor,
+            shbuf_dev, shbuf_size, abort_flag, 2);
 }

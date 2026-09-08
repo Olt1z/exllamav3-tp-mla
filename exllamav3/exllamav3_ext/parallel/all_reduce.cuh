@@ -20,6 +20,32 @@ void pg_all_reduce
     at::Tensor& abort_flag
 );
 
+void pg_reduce_scatter
+(
+    uintptr_t ctx,
+    uintptr_t ctx_dev,
+    std::vector<uintptr_t> devices,
+    int this_device,
+    int master_device,
+    at::Tensor& tensor,
+    uintptr_t shbuf_dev,
+    size_t shbuf_size,
+    at::Tensor& abort_flag
+);
+
+void pg_all_gather
+(
+    uintptr_t ctx,
+    uintptr_t ctx_dev,
+    std::vector<uintptr_t> devices,
+    int this_device,
+    int master_device,
+    at::Tensor& tensor,
+    uintptr_t shbuf_dev,
+    size_t shbuf_size,
+    at::Tensor& abort_flag
+);
+
 void pg_all_reduce_cpu
 (
     uintptr_t ctx,
