@@ -147,6 +147,40 @@ def cp_lse_local(ws_ml: torch.Tensor, n_pid: int, n_splits: int, block_h: int) -
     return lse
 
 
+def reordenar_lse_mla_denso(bruto: torch.Tensor, bsz: int, q_len: int, n_q_heads: int,
+                            block_m: int, block_h: int, block_rows: int) -> torch.Tensor:
+    """Do índice plano do workspace para a ordem (R, H), que é a que o combine entre ranks usa.
+
+    **Esta é a única função do arquivo que conhece um caminho de atenção**, e é de propósito: os
+    dois kernels acima são genéricos, e o que varia entre as famílias é só como o programa `pid` e
+    a linha `hloc` se decompõem em (consulta, cabeça). Aqui está a decomposição do
+    `_mla_decode_combine_kernel`:
+
+        h_blocks = cdiv(n_q_heads, BLOCK_H);  h_block = pid % h_blocks;  batch = pid // h_blocks
+        row_q = rows % BLOCK_M;  row_h = h_block * BLOCK_H + rows // BLOCK_M
+
+    As linhas com `row_q >= q_len` ou `row_h >= n_q_heads` são preenchimento do bloco e não
+    correspondem a nada — ficam de fora. Cada novo caminho que ganhar CP escreve a sua função
+    irmã; nenhum deles mexe nos kernels.
+    """
+    dev = bruto.device
+    h_blocks = -(-n_q_heads // block_h)
+    programs = bsz * h_blocks
+    R = bsz * q_len
+
+    idx = torch.arange(programs * block_rows, device = dev)
+    pid, linhas = idx // block_rows, idx % block_rows
+    h_block, batch = pid % h_blocks, pid // h_blocks
+    row_q = linhas % block_m
+    row_h = h_block * block_h + linhas // block_m
+    valido = (row_q < q_len) & (row_h < n_q_heads)
+
+    destino = (batch * q_len + row_q) * n_q_heads + row_h
+    lse = torch.full((R * n_q_heads,), -float("inf"), dtype = torch.float32, device = dev)
+    lse[destino[valido]] = bruto[valido]
+    return lse.view(R, n_q_heads)
+
+
 def cp_combinar(
     backend,
     o_local: torch.Tensor,

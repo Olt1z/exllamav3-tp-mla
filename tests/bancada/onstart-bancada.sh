@@ -157,6 +157,13 @@ if [ -n "${SO_20:-}" ]; then
     python3 tests/bancada/provar_fatia_do_cache.py --world "$w" --tokens 2000 2>&1 \
       | tee -a /workspace/20.txt || FALHOU_20=1
   done
+  # E o CP no caminho DENSO (etapa 5): a atencao sobre a fatia intercalada tem de ser um termo
+  # exato da combinacao por log-sum-exp. Abaixo de index_topk, que e onde o denso roda.
+  { echo; echo "=== cp no caminho denso"; } | tee -a /workspace/20.txt
+  for w in 2 4; do
+    python3 tests/bancada/provar_cp_denso.py --world "$w" --tokens 1500 2>&1 \
+      | tee -a /workspace/20.txt || FALHOU_20=1
+  done
   echo "=== veredito: $([ "$FALHOU_20" = 0 ] && echo PARIDADE_OK || echo DIVERGIU)" | tee -a /workspace/20.txt
   publicar
   marco "FIM"

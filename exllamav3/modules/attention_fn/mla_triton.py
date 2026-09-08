@@ -936,6 +936,8 @@ def mla_attn_triton_decode(
     scratch: dict | None = None,
     qc: tuple | None = None,    # (scales, bits): ckv_cache is the packed int32 tensor
     qc_trans: bool = True,
+    devolver_lse: bool = False,   # context parallel: alem da saida, o log-sum-exp local por
+                                  # (linha, cabeca), em ordem (R, H). Ver modules/attention_fn/cp.py
     num_warps: int | None = None,
     num_stages: int | None = None,
 ) -> torch.Tensor:
@@ -993,6 +995,12 @@ def mla_attn_triton_decode(
     if num_splits is None:
         num_splits = max(1, min(splits_cap, triton.cdiv(max_k_len, 4 * block_n)))
     else:
+        splits_cap = max(splits_cap, num_splits)
+    if devolver_lse:
+        # O lse sai das parciais, e com num_splits = 1 elas nao existem: o kernel escreve a saida
+        # direto e o par (m, l) fica so em registrador. Dois splits e o menor preco para ter o
+        # caminho unico; o segundo pode cobrir zero chaves, e o combine ja trata isso (m = -inf).
+        num_splits = max(2, num_splits)
         splits_cap = max(splits_cap, num_splits)
     split_len = triton.cdiv(triton.cdiv(max_k_len, num_splits), block_n) * block_n
 
@@ -1059,6 +1067,11 @@ def mla_attn_triton_decode(
                 num_warps = 4, num_stages = 1,
             )
             _dbg_sync("mla_decode_combine", q_lat.device)
+    if devolver_lse:
+        from .cp import cp_lse_local, reordenar_lse_mla_denso
+        bruto = cp_lse_local(partial_ml, programs, num_splits, block_rows)
+        lse = reordenar_lse_mla_denso(bruto, bsz, q_len, n_q_heads, block_m, block_h, block_rows)
+        return out, lse
     return out
 
 
