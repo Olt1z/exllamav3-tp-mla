@@ -89,6 +89,44 @@ def run_pending_swap_sweeps(infer_params):
     despejar_stats_de_roteamento(reg)
 
 
+_perfil_de_roteamento: dict | None = None
+_perfil_lido_de: str | None = None
+
+
+def ler_perfil_de_roteamento(caminho, key, num_experts):
+    """Selection counts for one layer from EXL3_MOE_CPU_SPLIT_STATS, or None.
+
+    Returns None -- never raises -- when the file is missing, unreadable, malformed, has no
+    entry for this layer, or has an entry of the wrong width. The pretended cycle is that the
+    first boot COLLECTS the profile (EXL3_MOE_CPU_SPLIT_STATS_OUT) and later ones USE it, so
+    the launcher wants to set both variables unconditionally; `json.load(open(path))` raised
+    FileNotFoundError on that first boot and took the model load down with it, midway, since
+    this runs per layer (42 times on a GLM-5.3-Flash).
+
+    A width mismatch is a profile from a DIFFERENT model: permuting by it would place experts
+    by the wrong index, silently. Cached across layers: the file is the same for all of them.
+    """
+    global _perfil_de_roteamento, _perfil_lido_de
+    if not caminho:
+        return None
+    if _perfil_lido_de != caminho:
+        _perfil_lido_de = caminho
+        _perfil_de_roteamento = None
+        try:
+            with open(caminho) as f:
+                lido = json.load(f)
+            if isinstance(lido, dict):
+                _perfil_de_roteamento = lido
+        except (OSError, ValueError):
+            _perfil_de_roteamento = None
+    if not _perfil_de_roteamento:
+        return None
+    contagens = _perfil_de_roteamento.get(key)
+    if not isinstance(contagens, list) or len(contagens) != num_experts:
+        return None
+    return contagens
+
+
 def despejar_stats_de_roteamento(reg):
     """Write per-layer routing counts to EXL3_MOE_CPU_SPLIT_STATS_OUT, in the shape that
     EXL3_MOE_CPU_SPLIT_STATS reads back: {layer_key: [count per ROUTER expert id]}.
@@ -496,26 +534,25 @@ class BlockSparseMLP_CPU:
         # via the install message (the child re-reads it from its own checkpoint handle)
         self._split_dynamic = os.environ.get("EXL3_MOE_CPU_SWAP", "1") != "0" \
             and not self.tid2eid_key
-        stats_path = os.environ.get("EXL3_MOE_CPU_SPLIT_STATS")
-        if stats_path and self._split_dynamic:
-            # Static placement from a stats file only applies with dynamic swapping disabled
-            print(f" !! {self.key}: EXL3_MOE_CPU_SPLIT_STATS ignored, set EXL3_MOE_CPU_SWAP=0 to use it")
-            stats_path = None
-        if stats_path and self.tid2eid_key:
+        stats_path = None if self.tid2eid_key else os.environ.get("EXL3_MOE_CPU_SPLIT_STATS")
+        if self.tid2eid_key and os.environ.get("EXL3_MOE_CPU_SPLIT_STATS"):
             print(f" !! {self.key}: tid2eid remap present, tail placement unpermuted")
-            stats_path = None
-        if stats_path:
-            import json
-            counts = json.load(open(stats_path)).get(self.key)
-            if counts is not None and len(counts) == self.num_experts:
-                perm = sorted(range(self.num_experts), key = lambda e: -counts[e])
-                self._split_perm = perm
-                if self.gated:
-                    self.gates = [self.gates[e] for e in perm]
-                self.ups = [self.ups[e] for e in perm]
-                self.downs = [self.downs[e] for e in perm]
-            else:
-                print(f" !! {self.key}: no routing stats for layer, tail placement unpermuted")
+        # A profile that EXISTS wins over dynamic placement: it is measured routing from real
+        # work, while the sweep has to rediscover the same thing every boot, from cold, inside
+        # the user's first requests. Missing file falls through to dynamic, which is what makes
+        # "collect on the first boot, use on the next" work without the launcher knowing which
+        # boot this is.
+        counts = ler_perfil_de_roteamento(stats_path, self.key, self.num_experts)
+        if counts is not None:
+            self._split_dynamic = False
+            perm = sorted(range(self.num_experts), key = lambda e: -counts[e])
+            self._split_perm = perm
+            if self.gated:
+                self.gates = [self.gates[e] for e in perm]
+            self.ups = [self.ups[e] for e in perm]
+            self.downs = [self.downs[e] for e in perm]
+        elif stats_path and not self._split_dynamic:
+            print(f" !! {self.key}: no usable routing stats, tail placement unpermuted")
 
         self.device = torch.device(device)
         self._cpu_split_register(

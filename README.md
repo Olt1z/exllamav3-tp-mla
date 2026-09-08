@@ -152,7 +152,7 @@ cada token. Dois caminhos corrigem isso, e o segundo ganhou o lado que faltava:
 | `EXL3_MOE_CPU_SWAP_INTERVAL` | `128` | Passos de decode entre varreduras |
 | `EXL3_MOE_CPU_SWAP_FLOOR` | `8.0` | Piso para promover, em múltiplos da expectativa uniforme |
 | `EXL3_MOE_CPU_SWAP_HYST` | `2.0` | Razão quente/frio exigida para trocar |
-| `EXL3_MOE_CPU_SPLIT_STATS` | — | Colocação **estática** por um perfil de roteamento; exige `EXL3_MOE_CPU_SWAP=0` |
+| `EXL3_MOE_CPU_SPLIT_STATS` | — | Colocação **estática** por um perfil de roteamento; quando o arquivo existe, vence a dinâmica |
 | `EXL3_MOE_CPU_SPLIT_STATS_OUT` | — | **Escreve** esse perfil enquanto o modelo serve (deste fork) |
 
 Os padrões do modo dinâmico são conservadores: com 288 experts, o piso de 8× a expectativa
@@ -163,10 +163,21 @@ agente terminam antes. Para uso interativo vale afrouxar — `EXL3_MOE_CPU_SWAP_
 O caminho estático é o mais forte, porque a colocação já nasce certa e vale para toda máquina
 futura. Só faltava produzir o arquivo: **`EXL3_MOE_CPU_SPLIT_STATS_OUT=<caminho>`** despeja as
 contagens por camada, indexadas por id de roteador, no formato que `EXL3_MOE_CPU_SPLIT_STATS` lê
-de volta. Escreve depois de cada varredura, e não no encerramento, porque máquina alugada
+de volta.
+
+Apontar as **duas** variáveis para o mesmo caminho fecha o ciclo sozinho: na primeira subida o
+arquivo não existe, a colocação dinâmica age e o perfil é colhido; nas seguintes o perfil existe e
+manda. Arquivo ausente, ilegível, corrompido ou de outro modelo (largura diferente) volta para a
+dinâmica sem derrubar o carregamento — antes um `FileNotFoundError` levava o modelo junto, no meio
+da carga. Escreve depois de cada varredura, e não no encerramento, porque máquina alugada
 costuma morrer sem desligar limpo; a troca é atômica. Sirva um dia de trabalho **real** com o
 despejo ligado — perfil de prompt sintético roteia perto do uniforme e não ensina nada — e depois
 suba com `EXL3_MOE_CPU_SWAP=0` e `EXL3_MOE_CPU_SPLIT_STATS` apontando para ele.
+
+Quanto isso vale, medido em 08/09/2026 no GLM-5.3-Flash com o perfil de um dia de trabalho real
+(42 camadas MoE, 48,3 milhões de seleções de expert): mandando para a RAM os **198 experts mais
+frios** de cada camada em vez dos 198 últimos por índice, a fração das leituras que cai na memória
+lenta vai de **68,8 % para 22,3 %** — **3,1× menos**, sem mudar quantos experts moram lá.
 
 Medido num modelo de 321 B (180 GB em EXL3 4 bpw) numa placa de 94 GB com 314 GB de RAM:
 
