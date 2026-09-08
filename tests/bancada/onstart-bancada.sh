@@ -112,7 +112,7 @@ python3 tests/bancada/reparar_kv_b_proj.py /workspace/corte
 # SO_16=1 roda so isto; precisa de 2 placas.
 if [ -n "${SO_16:-}" ]; then
   marco "16. overhead do decode: backend, fio do all-reduce, contagem por expert"
-  PG="python3 tests/bancada/perfil_gerador.py -m /workspace/corte --tokens 4096 --novos 256"
+  PG="timeout 600 python3 tests/bancada/perfil_gerador.py -m /workspace/corte --tokens 4096 --novos 256"
   FILTRO="decode|prefill|Error|Traceback|CUDA out of memory"
 
   marco "16a. custo unitario: bincount contra scatter_add_, sem modelo"
