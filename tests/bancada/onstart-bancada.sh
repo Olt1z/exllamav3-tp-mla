@@ -145,6 +145,13 @@ if [ -n "${SO_20:-}" ]; then
     torchrun --nproc_per_node="$placas" tests/bancada/provar_coletivos.py \
       --cabecas "${CABECAS:-64}" --latente "${LATENTE:-512}" 2>&1 | tee -a /workspace/20.txt \
       || FALHOU_20=1
+    # E o subgrupo: dcp = metade das placas, que e o ponto de operacao BOM (dcp = tp replica os
+    # pesos de atencao). So o NCCL tem subgrupo; o nativo se declara fora, e isso e esperado.
+    if [ "$placas" -ge 4 ]; then
+      torchrun --nproc_per_node="$placas" tests/bancada/provar_coletivos.py \
+        --cabecas "${CABECAS:-64}" --dcp $(( placas / 2 )) 2>&1 | tee -a /workspace/20.txt \
+        || FALHOU_20=1
+    fi
   done
   # E os dois kernels Triton da peca compartilhada do CP, que nunca rodaram: _cp_lse_kernel
   # contra o logsumexp do torch, e _cp_correct_kernel com os ranks emulados numa placa so

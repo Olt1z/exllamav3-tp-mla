@@ -89,6 +89,10 @@ class TPBackendNCCL:
             init_method = init_method,
         )
         self.mp_warmup_nccl(device)
+        # Grupo de context parallel. Sem CP e um grupo so, que e o mundo inteiro.
+        self.cp_group = None
+        self.cp_world = 1
+        self.cp_rank = 0
         self.fallback = TPBackendNative(
             device,
             active_devices,
@@ -98,6 +102,31 @@ class TPBackendNCCL:
             uuid,
             shbuf_size
         )
+
+
+    def configurar_cp(self, dcp: int):
+        """Monta o subgrupo de context parallel: `dcp` placas por grupo, `world/dcp` grupos.
+
+        O rank `r` fica no grupo `r // dcp`, com `cp_rank = r % dcp` -- placas vizinhas no mesmo
+        grupo, que e onde o interconector costuma ser melhor.
+
+        `dist.new_group` e coletivo: TODO rank tem de criar TODOS os grupos, na mesma ordem, mesmo
+        os que nao vai usar. Chamar so o seu trava o resto do mundo.
+        """
+        assert self.world_size % dcp == 0, \
+            f"dcp {dcp} tem de dividir o mundo {self.world_size}"
+        self.cp_world = dcp
+        self.cp_rank = self.rank % dcp
+        if dcp == 1:
+            self.cp_group = None
+            return
+        for g in range(self.world_size // dcp):
+            ranks = list(range(g * dcp, (g + 1) * dcp))
+            grupo = dist.new_group(ranks = ranks)
+            if self.rank in ranks:
+                self.cp_group = grupo
+        # Nao repassa ao fallback: ele so faz gather/broadcast, e recusaria justamente o
+        # caso (dcp < tp) para o qual o NCCL esta sendo usado.
 
 
     def mp_warmup_nccl(self, device):
@@ -161,7 +190,8 @@ class TPBackendNCCL:
         no combine precisa ser exata, e o payload cruza o LIMIAR_FIO_BF16 assim que entra rascunho
         de decode (q_len 8 leva a 4 MiB em TP4). Arredondar aqui seria o mesmo defeito que o
         all-reduce já teve, mas em silêncio e no lugar onde a exatidão é o ponto."""
-        dist.all_gather_into_tensor(out_tensor, tensor, async_op = False)
+        dist.all_gather_into_tensor(out_tensor, tensor, group = self.cp_group,
+                                    async_op = False)
 
 
     def reduce_scatter(self, out_tensor: torch.Tensor, tensor: torch.Tensor):
@@ -171,7 +201,8 @@ class TPBackendNCCL:
         No context parallel isto é o combine e o head-scatter na MESMA operação: cada rank sai com
         as parciais das suas cabeças já somadas, no formato que o o_proj quer. Mesma regra do
         all_gather quanto ao fp32 — sem estreitar."""
-        dist.reduce_scatter_tensor(out_tensor, tensor, async_op = False)
+        dist.reduce_scatter_tensor(out_tensor, tensor, group = self.cp_group,
+                                   async_op = False)
 
 
     def gather(
@@ -264,6 +295,9 @@ class TPBackendNative:
         self.device = device
         self.max_num_devices = max(active_devices) + 1
         self.active_devices = active_devices
+        # Context parallel: sem CP e um grupo so. configurar_cp() valida o que o anel suporta.
+        self.cp_world = 1
+        self.cp_rank = 0
         self.shbuf_size = shbuf_size
         self.master = master
         self.cpu = cpu
@@ -522,6 +556,30 @@ class TPBackendNative:
         #         self.shbuf_size,
         #         self.abort_flag
         #     )
+
+
+    def configurar_cp(self, dcp: int):
+        """O anel nativo só cobre o grupo INTEIRO. Dois subgrupos concorrentes se atrapalham em
+        dois lugares, e nenhum é conserto pequeno:
+
+        1. `reduce_stage_produced`/`consumed` são indexados por **rank dentro da máscara**
+           (`parallel/all_reduce.cu`), então o rank 0 de cada subgrupo escreve no mesmo slot.
+           Consertável indexando por device, com um `nth_device(mask, rank)` no kernel.
+        2. `pg_barrier_inner` usa uma **época global única** (`ctx->barrier_epoch`): o
+           coordenador de um subgrupo a incrementa e solta os não-coordenadores do OUTRO. Isso
+           exigiria época por grupo no PGContext, que muda a estrutura compartilhada.
+
+        Até lá, `dcp < tp` roda no NCCL, que tem subgrupo nativo. A conta que justifica a
+        preguiça: o nativo ganha 2,5 % de decode do NCCL, e o CP decide entre caber e não caber.
+        """
+        if dcp not in (1, len(self.active_devices)):
+            raise NotImplementedError(
+                f"backend nativo so faz context parallel sobre o grupo inteiro "
+                f"(dcp = 1 ou {len(self.active_devices)}), pedido dcp = {dcp}. "
+                f"Rode com EXLLAMA_TP_BACKEND=nccl, que tem subgrupo."
+            )
+        self.cp_world = dcp
+        self.cp_rank = self.active_devices.index(self.device) if dcp > 1 else 0
 
 
     def all_gather(self, out_tensor: torch.Tensor, tensor: torch.Tensor):

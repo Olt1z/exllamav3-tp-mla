@@ -44,6 +44,9 @@ def main():
     p.add_argument("--latente", type = int, default = 512)
     p.add_argument("--repeticoes", type = int, default = 200)
     p.add_argument("--qlens", type = str, default = "1,8")
+    p.add_argument("--dcp", type = int, default = 0,
+                   help = "grau de context parallel; 0 = mundo inteiro. Com dcp < mundo o "
+                          "coletivo corre em subgrupo, que so o NCCL tem")
     a = p.parse_args()
 
     rank = int(os.environ["RANK"])
@@ -51,11 +54,12 @@ def main():
     torch.cuda.set_device(local)
 
     devices = list(range(int(os.environ["WORLD_SIZE"])))
-    if a.cabecas % len(devices):
+    grau = a.dcp or len(devices)
+    if a.cabecas % grau or len(devices) % grau:
         # world 3 com H 64: as fatias nao dividem, e a prova 20 morreu aqui antes de eu ver o
         # resto. Sair limpo e melhor que arrastar um traceback para dentro do relatorio.
         if int(os.environ["RANK"]) == 0:
-            print(f"\npulando {len(devices)} placas: H={a.cabecas} nao divide\n")
+            print(f"\npulando {len(devices)} placas dcp {grau}: nao divide\n")
         raise SystemExit(0)
     b = TPBackendNCCL(
         device = local,
@@ -66,16 +70,42 @@ def main():
         uuid = os.environ.get("MASTER_PORT", "prova2b"),
     )
     nativo = b.fallback
-    N = len(devices)
+    dcp = grau
+    b.configurar_cp(dcp)
+    subgrupo = dcp < len(devices)
+    if subgrupo:
+        # O anel nativo nao faz subgrupo (epoca de barreira unica); so o NCCL entra na comparacao
+        try:
+            nativo.configurar_cp(dcp)
+            nativo_ok = True
+        except NotImplementedError as e:
+            nativo_ok = False
+            if rank == 0:
+                print(f"\nbackend nativo fora desta rodada: {e}")
+    else:
+        nativo.configurar_cp(dcp)
+        nativo_ok = True
+    N = dcp
     H, D = a.cabecas, a.latente
 
     if rank == 0:
-        print(f"\n{N} placas · {torch.cuda.get_device_name(local)} · H {H} · latente {D}\n")
+        print(f"\n{len(devices)} placas · dcp {dcp}"
+              f"{' (subgrupo)' if subgrupo else ''} · {torch.cuda.get_device_name(local)} · "
+              f"H {H} · latente {D}\n")
         print(f"{'caso':<34} {'paridade':>22} {'nccl':>9} {'nativo':>9} {'razão':>7}")
 
     falhas = []
 
     def comparar(nome, ex_nccl, ex_nativo, saida_nccl, saida_nativo, exato):
+        if not nativo_ok:
+            # Sem o nativo nao ha o que comparar; roda o NCCL so para exercitar o subgrupo
+            ex_nccl()
+            torch.cuda.synchronize()
+            t_n = medir(ex_nccl, a.repeticoes)
+            if rank == 0:
+                print(f"{nome:<34} {'so nccl (subgrupo)':>22} {t_n*1e6:>7.1f} µs {'-':>9} {'-':>7}")
+            dist.barrier()
+            return
         ex_nccl(); ex_nativo()
         torch.cuda.synchronize()
         if exato:
