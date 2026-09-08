@@ -37,7 +37,7 @@ publicar() {
 import os
 from huggingface_hub import HfApi
 api = HfApi(token=os.environ["HF_TOKEN"])
-for f in ("bancada.log", "resumo.txt", "build.log", "10.txt", "10-cobertura.txt", "10-convert.txt", "11.txt", "11-solo.txt", "11-p0.txt", "11-p1.txt", "11-duas.txt", "12.txt", "13.txt", "14.txt", "15.txt", "16.txt", "18.txt", "banda.txt"):
+for f in ("bancada.log", "resumo.txt", "build.log", "10.txt", "10-cobertura.txt", "10-convert.txt", "11.txt", "11-solo.txt", "11-p0.txt", "11-p1.txt", "11-duas.txt", "12.txt", "13.txt", "14.txt", "15.txt", "16.txt", "18.txt", "19.txt", "banda.txt"):
     p = f"/workspace/{f}"
     if os.path.exists(p):
         api.upload_file(path_or_fileobj=p, path_in_repo=f"saidas/tp-mla/$PROVA_ID/{f}", repo_id="$REPO_SAIDAS")
@@ -65,6 +65,38 @@ if [ -n "${SO_15:-}" ]; then
     { echo; echo "=== $placas placas"; } | tee -a /workspace/15.txt
     torchrun --nproc_per_node="$placas" tests/bancada/medir_allreduce.py \
       --hidden "${HIDDEN:-4096}" --camadas "${CAMADAS:-90}" 2>&1 | tee -a /workspace/15.txt
+  done
+  publicar
+  marco "FIM"
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------------------------
+# 19. O portão da etapa 1 do context parallel: quanto custa UM coletivo a mais por camada MLA,
+# sobre as parciais de atenção em fp32. Como a 15, só precisa do torch da imagem — não compila a
+# extensão nem baixa o corte, então a máquina vive ~5 min. SO_19=1 roda só isto; 2+ placas.
+#
+# A pergunta é LANÇAMENTO, não banda: a prova 18 mediu que o coletivo em decode é limitado pela
+# CPU emitir. Mede as três formas (all_reduce de slot, que é a única que a extensão já faz hoje;
+# all_gather; AG(lse)+reduce-scatter, o estado da arte) com q_len 1 e 8 — o 8 é o rascunho do
+# DFlash 2, que multiplica o payload e cruza o limiar que estreita o fio para bf16.
+#
+# H_g depende do par (tp, dcp): com tp=dcp o rank calcula todas as 64 cabeças; com dcp = tp/2 ele
+# calcula 32. Por isso as duas larguras em cada mundo.
+if [ -n "${SO_19:-}" ]; then
+  marco "19. custo do coletivo do context parallel, sem modelo"
+  cd /workspace && rm -rf fork-cp && git clone -q --depth 1 -b "$BRANCH" "$FORK" fork-cp && cd fork-cp
+  git log --oneline -1
+  N=$(nvidia-smi --list-gpus | wc -l)
+  { echo "=== topologia"; nvidia-smi topo -m 2>&1 | head -20; } | tee /workspace/19.txt
+  for placas in $(seq 2 "$N"); do
+    for cabecas in 64 32; do
+      if [ $(( cabecas % placas )) -ne 0 ]; then continue; fi
+      { echo; echo "=== $placas placas · H_g $cabecas"; } | tee -a /workspace/19.txt
+      torchrun --nproc_per_node="$placas" tests/bancada/medir_cp.py \
+        --cabecas "$cabecas" --latente "${LATENTE:-512}" \
+        --camadas-mla "${CAMADAS_MLA:-11}" 2>&1 | tee -a /workspace/19.txt
+    done
   done
   publicar
   marco "FIM"
