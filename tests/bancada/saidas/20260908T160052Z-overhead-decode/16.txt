@@ -1,0 +1,46 @@
+
+NVIDIA GeForce RTX 3090 · 288 experts · 42 camadas MoE por token
+
+caso                         como               parede   enfileirar   por token
+decode, 1 token x top-8      bincount          54.7 µs      54.7 µs     2.30 ms
+decode, 1 token x top-8      scatter_add_      21.5 µs      21.4 µs     0.90 ms
+
+rascunho, 8 tokens x top-8   bincount          54.3 µs      54.2 µs     2.28 ms
+rascunho, 8 tokens x top-8   scatter_add_      21.8 µs      21.7 µs     0.92 ms
+
+A diferença entre as duas linhas 'por token' é o que a troca economiza no passo,
+contra os 26 ms medidos no motor cru.
+
+=== nccl | fio bf16-antigo | rodada 1
+TP nccl chunk 4096 · 4096    prefill   4096 tok em     238 ms =  17187 tok/s · decode 256 tok = 272.8 tok/s
+=== nccl | fio bf16-antigo | rodada 2
+TP nccl chunk 4096 · 4096    prefill   4096 tok em     228 ms =  17942 tok/s · decode 256 tok = 269.7 tok/s
+=== nccl | fio bf16-antigo | rodada 3
+TP nccl chunk 4096 · 4096    prefill   4096 tok em     225 ms =  18238 tok/s · decode 256 tok = 273.5 tok/s
+=== nccl | fio fp32-novo | rodada 1
+TP nccl chunk 4096 · 4096    prefill   4096 tok em     286 ms =  14337 tok/s · decode 256 tok = 274.9 tok/s
+=== nccl | fio fp32-novo | rodada 2
+TP nccl chunk 4096 · 4096    prefill   4096 tok em     301 ms =  13628 tok/s · decode 256 tok = 275.4 tok/s
+=== nccl | fio fp32-novo | rodada 3
+TP nccl chunk 4096 · 4096    prefill   4096 tok em     283 ms =  14450 tok/s · decode 256 tok = 274.9 tok/s
+=== native | fio bf16-antigo | rodada 1
+TP native chunk 4096 · 4096  prefill   4096 tok em     240 ms =  17100 tok/s · decode 256 tok = 280.5 tok/s
+=== native | fio bf16-antigo | rodada 2
+TP native chunk 4096 · 4096  prefill   4096 tok em     255 ms =  16043 tok/s · decode 256 tok = 281.0 tok/s
+=== native | fio bf16-antigo | rodada 3
+TP native chunk 4096 · 4096  prefill   4096 tok em     236 ms =  17384 tok/s · decode 256 tok = 280.8 tok/s
+=== native | fio fp32-novo | rodada 1
+TP native chunk 4096 · 4096  prefill   4096 tok em     238 ms =  17182 tok/s · decode 256 tok = 279.2 tok/s
+=== native | fio fp32-novo | rodada 2
+TP native chunk 4096 · 4096  prefill   4096 tok em     252 ms =  16223 tok/s · decode 256 tok = 280.6 tok/s
+=== native | fio fp32-novo | rodada 3
+TP native chunk 4096 · 4096  prefill   4096 tok em     240 ms =  17066 tok/s · decode 256 tok = 280.3 tok/s
+=== revertido para bincount:
+ exllamav3/modules/block_sparse_mlp.py | 17 ++---------------
+ 1 file changed, 2 insertions(+), 15 deletions(-)
+=== bincount | nccl | fp32-novo | rodada 1
+TP nccl chunk 4096 · 4096    prefill   4096 tok em     294 ms =  13923 tok/s · decode 256 tok = 274.1 tok/s
+=== bincount | nccl | fp32-novo | rodada 2
+TP nccl chunk 4096 · 4096    prefill   4096 tok em     290 ms =  14131 tok/s · decode 256 tok = 273.2 tok/s
+=== bincount | nccl | fp32-novo | rodada 3
+TP nccl chunk 4096 · 4096    prefill   4096 tok em     298 ms =  13740 tok/s · decode 256 tok = 275.0 tok/s
