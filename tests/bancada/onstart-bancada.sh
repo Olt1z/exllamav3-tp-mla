@@ -37,7 +37,7 @@ publicar() {
 import os
 from huggingface_hub import HfApi
 api = HfApi(token=os.environ["HF_TOKEN"])
-for f in ("bancada.log", "resumo.txt", "build.log", "10.txt", "10-cobertura.txt", "10-convert.txt", "11.txt", "11-solo.txt", "11-p0.txt", "11-p1.txt", "11-duas.txt", "12.txt", "13.txt", "14.txt", "15.txt", "16.txt", "banda.txt"):
+for f in ("bancada.log", "resumo.txt", "build.log", "10.txt", "10-cobertura.txt", "10-convert.txt", "11.txt", "11-solo.txt", "11-p0.txt", "11-p1.txt", "11-duas.txt", "12.txt", "13.txt", "14.txt", "15.txt", "16.txt", "18.txt", "banda.txt"):
     p = f"/workspace/{f}"
     if os.path.exists(p):
         api.upload_file(path_or_fileobj=p, path_in_repo=f"saidas/tp-mla/$PROVA_ID/{f}", repo_id="$REPO_SAIDAS")
@@ -151,6 +151,39 @@ if [ -n "${SO_16:-}" ]; then
       | grep -E "$FILTRO" | tee -a /workspace/16.txt || true
   done
   git checkout HEAD -- exllamav3/modules/block_sparse_mlp.py
+
+  publicar
+  marco "FIM"
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------------------------
+# 18. Backend do TP, decidido por medida: NCCL contra nativo, e o caminho de GPU que o upstream
+# deixou comentado.
+#
+# A 16 mediu no corte que o nativo faz +2,5 % de decode (nao paga o despacho do
+# torch.distributed) e -5 % de prefill (reduz 67 MB por chunk na CPU do host). A logica original
+# do upstream (MAX_CPU_REDUCE) separava os dois regimes -- CPU no pequeno, GPU no grande -- e
+# esta comentada. EXL3_TP_REDUCE_GPU=1 a religa. Se funcionar, o nativo ganha nos dois.
+#
+# Nenhum dos dois caminhos nativos usa P2P: ambos operam sobre memoria de HOST compartilhada
+# (PORTABLE|MAPPED). O caminho de GPU pode simplesmente nao subir -- e o que a prova descobre.
+# SO_18=1 roda so isto; precisa de 2 placas.
+if [ -n "${SO_18:-}" ]; then
+  marco "18. backend do TP: nccl, nativo, nativo com reduce de GPU"
+  PG="timeout 900 python3 tests/bancada/perfil_gerador.py -m /workspace/corte --tokens 4096,16384 --novos 256 --cache 32768"
+  FILTRO="decode|prefill|Error|Traceback|CUDA|abort|timeout"
+
+  for cfg in "nccl::" "native::" "native:1:"; do
+    BACKEND="$(echo "$cfg" | cut -d: -f1)"
+    GPUREDUCE="$(echo "$cfg" | cut -d: -f2)"
+    NOME="$BACKEND${GPUREDUCE:+-reduce-gpu}"
+    for r in 1 2 3; do
+      echo "=== $NOME | rodada $r" | tee -a /workspace/18.txt
+      EXL3_TP_REDUCE_GPU="${GPUREDUCE:-0}" $PG --tp --backend "$BACKEND" 2>&1 \
+        | grep -E "$FILTRO" | tee -a /workspace/18.txt || true
+    done
+  done
 
   publicar
   marco "FIM"

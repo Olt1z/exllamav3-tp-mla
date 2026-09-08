@@ -20,6 +20,13 @@ GLOBALS_SIZE = 128*1024
 SHBUF_SIZE = 16 * 1024 ** 2
 # 17 slots (16 devices + accumulator) x 2MB: 8 ring stages of the 256KB reduce chunk size
 SHBUF_SIZE_R = 17 * 8 * 256 * 1024
+# Acima de quantos bytes o backend NATIVO reduz na GPU em vez de na CPU do host. 2 MiB é o
+# MAX_CPU_REDUCE do upstream (SHBUF_SIZE_R // 17 // 256 * 256), que fica acima de qualquer
+# coletiva de decode (8 KB por token) e abaixo de qualquer chunk de prefill (67 MB em 4096
+# tokens). Desligado por padrão: o caminho de GPU está comentado no upstream desde antes do
+# fork e não sabemos por quê -- EXL3_TP_REDUCE_GPU=1 liga para medir.
+LIMIAR_REDUCE_NA_GPU = int(os.environ.get("EXL3_TP_LIMIAR_REDUCE_GPU", 2 * 1024 ** 2))
+REDUZIR_GRANDE_NA_GPU = os.environ.get("EXL3_TP_REDUCE_GPU", "0") == "1"
 # Acima de quantos bytes de payload fp32 compensa estreitar o fio para bf16 (ver all_reduce do
 # backend NCCL). 1 MiB fica com folga acima do decode (8 KB por token, mesmo com rascunho) e com
 # folga abaixo do prefill (um chunk de 4096 tokens são 67 MB), então nenhum dos dois anda no
@@ -442,7 +449,31 @@ class TPBackendNative:
 
 
     def all_reduce(self, tensor: torch.Tensor, contribution: bool = True):
-        # if tensor.numel() * 2 < MAX_CPU_REDUCE:
+        # O upstream deixou o caminho de GPU comentado e reduz TUDO na CPU do host. Para o
+        # decode isso é bom -- 8 KB por coletiva, e a CPU não paga o despacho do
+        # torch.distributed que o NCCL paga (medido em 08/09: nativo +2,5 % de decode). Para o
+        # prefill é ruim: um chunk de 4096 tokens são 67 MB atravessando o PCIe para somar no
+        # host, e o nativo fica 5 % atrás do NCCL.
+        #
+        # A lógica original do upstream (`MAX_CPU_REDUCE`) já separava os dois regimes; aqui ela
+        # volta atrás de um interruptor, para medir antes de decidir. O kernel de GPU também NÃO
+        # usa P2P: ele opera sobre o mesmo buffer de host compartilhado (registrado
+        # PORTABLE|MAPPED), então não é ele o suspeito do erro de peer-access da A100 de 05/09.
+        # Exige payload múltiplo de 16 bytes (TORCH_CHECK no kernel), daí a guarda.
+        nbytes = tensor.numel() * tensor.element_size()
+        if REDUZIR_GRANDE_NA_GPU and nbytes >= LIMIAR_REDUCE_NA_GPU and nbytes % 16 == 0:
+            ext.pg_all_reduce(
+                self.ptr_g,
+                self.dev_g,
+                self.active_devices,
+                self.device,
+                self.active_devices[0],
+                tensor,
+                self.dev_b,
+                self.shbuf_size,
+                self.abort_flag
+            )
+            return
         ext.pg_all_reduce_cpu(
             self.ptr_g,
             self.dev_g,
