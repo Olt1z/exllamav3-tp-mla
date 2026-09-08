@@ -1,0 +1,16 @@
+[
+ {
+  "prompt": "dificil",
+  "entrada_tok": 30134,
+  "saida_tok": 4547,
+  "prefill_tps": 1642.1,
+  "decode_tps": 25.6,
+  "draft_pct": null,
+  "fonte": "cliente",
+  "segundos": 195.8,
+  "exato": {
+   "soma": false,
+   "agulha": true
+  }
+ }
+]

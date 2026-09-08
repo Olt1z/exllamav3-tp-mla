@@ -1,0 +1,46 @@
+[
+ {
+  "prompt": "curto/1",
+  "entrada_tok": 68,
+  "saida_tok": 600,
+  "prefill_tps": 48.3,
+  "decode_tps": 50.6,
+  "draft_pct": null,
+  "fonte": "cliente",
+  "segundos": 13.2
+ },
+ {
+  "prompt": "curto/2",
+  "entrada_tok": 66,
+  "saida_tok": 600,
+  "prefill_tps": 47.3,
+  "decode_tps": 53.8,
+  "draft_pct": null,
+  "fonte": "cliente",
+  "segundos": 12.5
+ },
+ {
+  "prompt": "longo",
+  "entrada_tok": 5449,
+  "saida_tok": 200,
+  "prefill_tps": 1025.9,
+  "decode_tps": 98.8,
+  "draft_pct": null,
+  "fonte": "cliente",
+  "segundos": 7.3
+ },
+ {
+  "prompt": "dificil",
+  "entrada_tok": 30135,
+  "saida_tok": 2000,
+  "prefill_tps": 1650.9,
+  "decode_tps": 74.7,
+  "draft_pct": null,
+  "fonte": "cliente",
+  "segundos": 45.0,
+  "exato": {
+   "soma": false,
+   "agulha": false
+  }
+ }
+]
