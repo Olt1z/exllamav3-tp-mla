@@ -1111,8 +1111,21 @@ class BlockSparseMLP(BlockSparseMLP_CPU, Module):
                 token_sorted = flat_token[order]
                 weight_sorted = flat_weight[order]
 
-                # Count how many assignments per expert
-                expert_count = torch.bincount(flat_expert_local, minlength = E + 1)
+                # Count how many assignments per expert.
+                #
+                # scatter_add_ instead of torch.bincount: bincount on CUDA reads
+                # `self.max()` back to the host to size its output, even when minlength
+                # already fixes it (SummaryOps.cu). That is a device sync per MoE layer --
+                # 42 per token on the GLM-5.3-Flash -- on the same critical path where the
+                # per-expert count readback below was already removed for costing ~33% idle.
+                # The ids are guaranteed in [0, E] by the sentinel above, which is the same
+                # precondition bincount needed.
+                expert_count = torch.zeros(E + 1, dtype = torch.long, device = flat_expert_local.device)
+                expert_count.scatter_add_(
+                    0,
+                    flat_expert_local.long(),
+                    torch.ones_like(flat_expert_local, dtype = torch.long),
+                )
 
                 def run_fused(num_active):
                     # Gateless: the up module stands in for the gate pointer tables (the kernel
