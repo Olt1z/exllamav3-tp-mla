@@ -10,10 +10,11 @@ as primeiras `num_ranks-1` iterações acumulam, o que É reduce-scatter, e as �
 
 Sobre exatidão, e a diferença importa:
 
-  all_gather      é CÓPIA. Tem de bater BIT A BIT, em qualquer dtype. Se não bater, é defeito.
-  reduce_scatter  é SOMA, e o anel soma numa ordem diferente do NCCL. Em ponto flutuante isso
-                  NÃO é bit a bit e exigir isso seria um portão errado. Testa-se com int32, onde
-                  a soma é associativa e a exatidão é obrigatória, e com fp32 sob tolerância.
+  all_gather      é CÓPIA (por uint4). Tem de bater BIT A BIT, e aceita qualquer dtype.
+  reduce_scatter  ACUMULA, e o anel reinterpreta 16 B como float4: é fp32 e só fp32. A ordem de
+                  soma difere da do NCCL, então em geral não é bit a bit. Testa-se com fp32
+                  carregando inteiros pequenos, que são exatos e tornam a soma associativa (aí a
+                  exatidão é obrigatória), e com fp32 aleatório sob tolerância.
 
 As geometrias são as reais do CP: o lse (minúsculo, e é ele que pega o cálculo de `threads` do
 upstream de jeito errado — 256 B por rank contra um estágio de 512) e a saída pesada de atenção.
@@ -50,6 +51,12 @@ def main():
     torch.cuda.set_device(local)
 
     devices = list(range(int(os.environ["WORLD_SIZE"])))
+    if a.cabecas % len(devices):
+        # world 3 com H 64: as fatias nao dividem, e a prova 20 morreu aqui antes de eu ver o
+        # resto. Sair limpo e melhor que arrastar um traceback para dentro do relatorio.
+        if int(os.environ["RANK"]) == 0:
+            print(f"\npulando {len(devices)} placas: H={a.cabecas} nao divide\n")
+        raise SystemExit(0)
     b = TPBackendNCCL(
         device = local,
         active_devices = devices,
@@ -98,12 +105,17 @@ def main():
                  lambda: nativo.all_gather(g_nat, lse),
                  g_nccl, g_nat, exato = True)
 
-        # 2. reduce_scatter da saída pesada, em int32: a soma é associativa, então a exatidão é
-        #    obrigatória e uma divergência aqui é defeito, não arredondamento
-        pesada_i = torch.randint(-1000, 1000, (H, q, D), device = local, dtype = torch.int32)
-        r_nccl_i = torch.empty((H // N, q, D), device = local, dtype = torch.int32)
-        r_nat_i = torch.empty((H // N, q, D), device = local, dtype = torch.int32)
-        comparar(f"q{q} reduce_scatter int32 ({H*q*D*4//N} B/rank)",
+        # 2. reduce_scatter com fp32 carregando INTEIROS pequenos: exatos em fp32, então a soma
+        #    é associativa e a exatidão passa a ser obrigatória mesmo com ordem diferente.
+        #
+        #    Aqui NÃO cabe testar int32, e a prova 20 me ensinou isso: o anel acumula
+        #    reinterpretando 16 B como float4 (`a.x += b.x`), então soma qualquer dtype como se
+        #    fosse float. Com int32 o resultado é lixo -- não é defeito do reduce_scatter, é o
+        #    contrato da primitiva, que agora tem TORCH_CHECK.
+        pesada_i = torch.randint(-1000, 1000, (H, q, D), device = local).float()
+        r_nccl_i = torch.empty((H // N, q, D), device = local, dtype = torch.float32)
+        r_nat_i = torch.empty((H // N, q, D), device = local, dtype = torch.float32)
+        comparar(f"q{q} reduce_scatter fp32 inteiro ({H*q*D*4//N} B/rank)",
                  lambda: b.reduce_scatter(r_nccl_i, pesada_i.clone()),
                  lambda: nativo.reduce_scatter(r_nat_i, pesada_i.clone()),
                  r_nccl_i, r_nat_i, exato = True)

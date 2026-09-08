@@ -283,6 +283,24 @@ static void pg_ring
     size_t data_size = tensor.numel() * tensor.element_size();
     TORCH_CHECK(data_size % 16 == 0, "data_size must be multiple of 16");
 
+    // O anel acumula reinterpretando 16 B como float4 e somando componente a componente (ver o
+    // ramo `iter < num_ranks - 1` do kernel). Isso é fp32 e SÓ fp32: com bf16 ele soma pares de
+    // bf16 como se fossem floats, sem erro e sem aviso -- o resultado é lixo silencioso.
+    //
+    // Descoberto em 08/09/2026 pela prova 20, que reprovou reduce_scatter em int32 enquanto o
+    // mesmo caso em fp32 batia BIT A BIT com o NCCL. O caminho de GPU do all_reduce
+    // (EXL3_TP_REDUCE_GPU=1) chama isto com o hidden state, que é bf16: a prova 18 mediu a
+    // velocidade dele e concluiu que era "pior", mas media tok/s e nunca KL, então a corrupção
+    // passaria despercebida. Falhar alto é melhor que somar errado.
+    //
+    // A fase de all-gather sozinha (phase 2) NÃO acumula -- copia por uint4 -- e por isso aceita
+    // qualquer dtype.
+    TORCH_CHECK(
+        phase == 2 || tensor.scalar_type() == at::kFloat,
+        "pg_all_reduce/pg_reduce_scatter: o anel acumula em float4 e so aceita float32; recebeu ",
+        tensor.scalar_type()
+    );
+
     uint32_t device_mask = 0;
     for (int i : devices) device_mask |= (1 << i);
     long num_ranks = devices.size();
