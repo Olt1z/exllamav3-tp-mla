@@ -95,6 +95,8 @@ if has_triton:
         W_PAD: tl.constexpr,     # next pow2 (tl.arange needs it; W_TOT = 48/80/96/112 for odd widths)
         N_G: tl.constexpr,
         D_r: tl.constexpr,
+        CP_WORLD: tl.constexpr = 1,
+        CP_RANK: tl.constexpr = 0,
     ):
         """Scatter contiguously quantized latent rows plus their fp16 rope keys into the paged
         cache. Quantization itself runs in the CUDA kernel (same packed format as the MHA cache);
@@ -104,19 +106,24 @@ if has_triton:
         pos = row - batch * append_len
 
         abs_pos = tl.load(cache_seqlens + batch) + pos
+        dono = True
+        if CP_WORLD > 1:
+            dono = (abs_pos % CP_WORLD) == CP_RANK
+            abs_pos = abs_pos // CP_WORLD
         page = abs_pos // page_size
         page_off = abs_pos - page * page_size
         phys = tl.load(block_table + batch * num_pages_per_seq + page)
         tok = phys * page_size + page_off
 
         w = tl.arange(0, W_PAD)
-        mask_w = w < W_TOT
+        mask_w = (w < W_TOT) & dono
         tl.store(qk + tok * W_TOT + w, tl.load(tmp_q + row * W_TOT + w, mask = mask_w), mask = mask_w)
         g = tl.arange(0, N_G)
-        tl.store(sk + tok * N_G + g, tl.load(tmp_s + row * N_G + g))
+        tl.store(sk + tok * N_G + g, tl.load(tmp_s + row * N_G + g), mask = (g >= 0) & dono)
         if D_r > 0:
             r = tl.arange(0, D_r)
-            tl.store(kpe_cache + tok * D_r + r, tl.load(kpe_new + row * D_r + r))
+            tl.store(kpe_cache + tok * D_r + r, tl.load(kpe_new + row * D_r + r),
+                     mask = (r >= 0) & dono)
 
 
     @triton.jit(do_not_specialize = ["append_len", "num_pages_per_seq"])
@@ -132,6 +139,8 @@ if has_triton:
         page_size: tl.constexpr,
         D_c: tl.constexpr,
         D_r: tl.constexpr,
+        CP_WORLD: tl.constexpr = 1,   # context parallel: o token p mora no rank p % CP_WORLD,
+        CP_RANK: tl.constexpr = 0,    # na posicao local p // CP_WORLD. Em 1/0 isto some.
     ):
         """Append one chunk of latent + rope rows to the paged cache. Both widths move in one
         launch; the ext fp16 append kernel requires K and V to be the same shape, which they are
@@ -141,6 +150,12 @@ if has_triton:
         pos = row - batch * append_len
 
         abs_pos = tl.load(cache_seqlens + batch) + pos
+        # Mascara em vez de return antecipado: o return no meio de um kernel Triton e fragil, e a
+        # escrita mascarada custa o mesmo. Quem nao e dono calcula um endereco valido e nao grava.
+        dono = True
+        if CP_WORLD > 1:
+            dono = (abs_pos % CP_WORLD) == CP_RANK
+            abs_pos = abs_pos // CP_WORLD
         page = abs_pos // page_size
         page_off = abs_pos - page * page_size
         phys = tl.load(block_table + batch * num_pages_per_seq + page)
@@ -148,11 +163,13 @@ if has_triton:
 
         offs_c = tl.arange(0, D_c)
         tl.store(ckv_cache + tok * D_c + offs_c,
-                 tl.load(ckv_new + row * D_c + offs_c))
+                 tl.load(ckv_new + row * D_c + offs_c),
+                 mask = (offs_c >= 0) & dono)
         if D_r > 0:
             offs_r = tl.arange(0, D_r)
             tl.store(kpe_cache + tok * D_r + offs_r,
-                     tl.load(kpe_new + row * D_r + offs_r))
+                     tl.load(kpe_new + row * D_r + offs_r),
+                     mask = (offs_r >= 0) & dono)
 
 
     @triton.jit(do_not_specialize = ["append_len", "num_pages_per_seq"])
@@ -167,6 +184,8 @@ if has_triton:
         D: tl.constexpr,
         DST_D: tl.constexpr = 0,   # plane row width when packing (0 = D); rows land at DST_OFF
         DST_OFF: tl.constexpr = 0,
+        CP_WORLD: tl.constexpr = 1,
+        CP_RANK: tl.constexpr = 0,
     ):
         """Single-plane variant of _mla_kv_update_kernel, for the per-token indexer-key rows
         of DSA-on-MLA layers (GLM-5.2). The DST_D/DST_OFF variant packs a D-wide source into
@@ -176,6 +195,10 @@ if has_triton:
         pos = row - batch * append_len
 
         abs_pos = tl.load(cache_seqlens + batch) + pos
+        dono = True
+        if CP_WORLD > 1:
+            dono = (abs_pos % CP_WORLD) == CP_RANK
+            abs_pos = abs_pos // CP_WORLD
         page = abs_pos // page_size
         page_off = abs_pos - page * page_size
         phys = tl.load(block_table + batch * num_pages_per_seq + page)
@@ -183,7 +206,9 @@ if has_triton:
 
         offs = tl.arange(0, D)
         dst_d = DST_D if DST_D > 0 else D
-        tl.store(plane_cache + tok * dst_d + DST_OFF + offs, tl.load(rows_new + row * D + offs))
+        tl.store(plane_cache + tok * dst_d + DST_OFF + offs,
+                 tl.load(rows_new + row * D + offs),
+                 mask = (offs >= 0) & dono)
 
 
     @triton.jit(do_not_specialize = ["R"])
@@ -803,6 +828,8 @@ def mla_kv_append(
     kpe_cache: torch.Tensor,
     block_table: torch.Tensor,
     cache_seqlens: torch.Tensor,
+    cp_world: int = 1,
+    cp_rank: int = 0,
 ):
     bsz, length, D_c = ckv_new.shape
     D_r = kpe_new.shape[-1]
@@ -813,6 +840,7 @@ def mla_kv_append(
         _mla_kv_update_kernel[(bsz * length,)](
             ckv_new, kpe_new, ckv_cache, kpe_cache, block_table, cache_seqlens,
             block_table.shape[1], length, page_size, D_c, D_r,
+            CP_WORLD = cp_world, CP_RANK = cp_rank,
             num_warps = 4, num_stages = 2,
         )
     _dbg_sync("mla_kv_append", ckv_new.device)
@@ -823,6 +851,8 @@ def mla_plane_append(
     plane_cache: torch.Tensor,  # (pages, page_size, D) or any layout flattening to that
     block_table: torch.Tensor,
     cache_seqlens: torch.Tensor,
+    cp_world: int = 1,
+    cp_rank: int = 0,
 ):
     """Append per-token rows to a paged fp16 side plane (DSA indexer keys)."""
     bsz, length, D = rows_new.shape
@@ -833,6 +863,7 @@ def mla_plane_append(
         _mla_plane_update_kernel[(bsz * length,)](
             rows_new.contiguous(), plane_cache, block_table, cache_seqlens,
             block_table.shape[1], length, page_size, D,
+            CP_WORLD = cp_world, CP_RANK = cp_rank,
             num_warps = 2, num_stages = 2,
         )
     _dbg_sync("mla_plane_append", rows_new.device)
@@ -847,6 +878,8 @@ def mla_kv_quant_append(
     block_table: torch.Tensor,
     cache_seqlens: torch.Tensor,
     bits: int,
+    cp_world: int = 1,
+    cp_rank: int = 0,
     scratch: dict | None = None,
 ):
     """Quantize new latent rows straight into the paged cache and copy their rope keys.
@@ -877,6 +910,7 @@ def mla_kv_quant_append(
             qk, sk, kpe_cache, block_table, cache_seqlens,
             block_table.shape[1], length, page_size,
             w_tot, triton.next_power_of_2(w_tot), groups, D_r,
+            CP_WORLD = cp_world, CP_RANK = cp_rank,
             num_warps = 2, num_stages = 2,
         )
     _dbg_sync("mla_kv_quant_scatter", ckv_new.device)

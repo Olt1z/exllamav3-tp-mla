@@ -3,6 +3,7 @@ from typing_extensions import override
 import torch
 from ..constants import PAGE_SIZE
 from .cache import CacheLayer
+from .cp_layout import comprimento_local, paginas_para
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from ..modules import MLAttention
@@ -34,14 +35,18 @@ class CacheLayer_MLA_fp16(CacheLayer):
         attention: MLAttention,
         cache_id: int,
         max_num_tokens: int,
+        cp_world: int = 1,
+        cp_rank: int = 0,
     ):
         super().__init__(config, attention, cache_id, max_num_tokens)
+        # Context parallel: a capacidade LOGICA continua max_num_tokens; o que cai por world e a
+        # alocacao por placa. Ver cache/cp_layout.py.
+        self.cp_world = cp_world
+        self.cp_rank = cp_rank
 
-        assert max_num_tokens % PAGE_SIZE == 0, \
-            f"max_num_tokens must be a multiple of {PAGE_SIZE}."
 
         if attention:
-            pages = max_num_tokens // PAGE_SIZE
+            pages = paginas_para(max_num_tokens, PAGE_SIZE, cp_world)
             self.kv_lora_rank = attention.kv_lora_rank
             self.qk_rope_head_dim = attention.qk_rope_head_dim
             self.shape_c = (pages, PAGE_SIZE, 1, self.kv_lora_rank)
@@ -125,6 +130,7 @@ class CacheLayer_MLA_fp16(CacheLayer):
             k.reshape(k.shape[0], length, self.kv_lora_rank),
             v.reshape(v.shape[0], length, self.qk_rope_head_dim),
             self.k, self.v, block_table, cache_seqlens,
+            self.cp_world, self.cp_rank,
         )
 
 
@@ -135,6 +141,7 @@ class CacheLayer_MLA_fp16(CacheLayer):
         mla_plane_append(
             k_idx.reshape(k_idx.shape[0], length, self.shape_i[-1]),
             self.k_idx, block_table, cache_seqlens,
+            self.cp_world, self.cp_rank,
         )
 
 
@@ -151,12 +158,23 @@ class CacheLayer_MLA_fp16(CacheLayer):
         """Append newly completed pooled keys, shaped (bsz, n_new, index_head_dim);
         pool_seqlens counts existing complete pools per row (cache_seqlens // kpool)."""
         from ..modules.attention_fn.mla_triton import mla_plane_append
+        # Sob CP este plano NAO e calculavel localmente: uma entrada agrupa `kpool` tokens
+        # globais CONSECUTIVOS, e o intercalamento por token espalha esses tokens entre os ranks.
+        # Nenhum rank tem o grupo inteiro. Nao ha conserto neste arquivo -- e obstaculo da etapa
+        # de top-k distribuido. Falhar alto, porque a alternativa e um indice silenciosamente
+        # errado que so aparece como qualidade pior.
+        assert self.cp_world == 1, (
+            "plano agrupado do indexador (k_pool) nao tem versao sob context parallel: o "
+            "agrupamento e sobre tokens globais consecutivos, que o CP reparte entre os ranks"
+        )
         mla_plane_append(pool_keys, self.k_pool, block_table, pool_seqlens)
 
 
     @override
     def copy_page(self, source: CacheLayer_MLA_fp16, from_page: int, to_page: int, num_tokens: int):
         assert self.shape_c == source.shape_c and self.shape_r == source.shape_r
+        # num_tokens vem do gerador em tokens GLOBAIS; este rank copia so as linhas dele
+        num_tokens = comprimento_local(num_tokens, self.cp_world, self.cp_rank)
         self.k[to_page, :num_tokens, :, :].copy_(source.k[from_page, :num_tokens, :, :], non_blocking = True)
         self.v[to_page, :num_tokens, :, :].copy_(source.v[from_page, :num_tokens, :, :], non_blocking = True)
         if self.k_idx is not None:
@@ -192,7 +210,9 @@ class CacheLayer_MLA_fp16(CacheLayer):
             "cls": CacheLayer_MLA_fp16,
             "args": {
                 "cache_id": self.cache_id,
-                "max_num_tokens": self.max_num_tokens
+                "max_num_tokens": self.max_num_tokens,
+                "cp_world": self.cp_world,
+                "cp_rank": self.cp_rank,
             }
         }
 
@@ -222,11 +242,13 @@ class CacheLayer_MLA_quant(CacheLayer):
         k_bits: int,
         v_bits: int | None = None,
         compand_a: float = 0.0,
+        cp_world: int = 1,
+        cp_rank: int = 0,
     ):
         super().__init__(config, attention, cache_id, max_num_tokens)
+        self.cp_world = cp_world
+        self.cp_rank = cp_rank
 
-        assert max_num_tokens % PAGE_SIZE == 0, \
-            f"max_num_tokens must be a multiple of {PAGE_SIZE}."
         assert 2 <= k_bits <= 8, "quantized MLA cache must be from 2 to 8 bits"
         assert compand_a == 0.0, \
             "compander is not supported by the online-dequant loaders (same as the MHA qc path)"
@@ -236,7 +258,7 @@ class CacheLayer_MLA_quant(CacheLayer):
         self.v_bits = v_bits
 
         if attention:
-            pages = max_num_tokens // PAGE_SIZE
+            pages = paginas_para(max_num_tokens, PAGE_SIZE, cp_world)
             self.kv_lora_rank = attention.kv_lora_rank
             self.qk_rope_head_dim = attention.qk_rope_head_dim
             assert self.kv_lora_rank % 32 == 0
@@ -333,6 +355,8 @@ class CacheLayer_MLA_quant(CacheLayer):
             block_table,
             cache_seqlens,
             self.bits,
+            self.cp_world,
+            self.cp_rank,
         )
 
 
@@ -343,6 +367,7 @@ class CacheLayer_MLA_quant(CacheLayer):
         mla_plane_append(
             k_idx.reshape(k_idx.shape[0], length, self.shape_i[-1]),
             self.k_idx, block_table, cache_seqlens,
+            self.cp_world, self.cp_rank,
         )
 
 
@@ -357,12 +382,22 @@ class CacheLayer_MLA_quant(CacheLayer):
     def update_pool_direct(self, pool_seqlens: torch.Tensor, block_table: torch.Tensor,
                            pool_keys: torch.Tensor):
         from ..modules.attention_fn.mla_triton import mla_plane_append
+        # Sob CP este plano NAO e calculavel localmente: uma entrada agrupa `kpool` tokens
+        # globais CONSECUTIVOS, e o intercalamento por token espalha esses tokens entre os ranks.
+        # Nenhum rank tem o grupo inteiro. Nao ha conserto neste arquivo -- e obstaculo da etapa
+        # de top-k distribuido. Falhar alto, porque a alternativa e um indice silenciosamente
+        # errado que so aparece como qualidade pior.
+        assert self.cp_world == 1, (
+            "plano agrupado do indexador (k_pool) nao tem versao sob context parallel: o "
+            "agrupamento e sobre tokens globais consecutivos, que o CP reparte entre os ranks"
+        )
         mla_plane_append(pool_keys, self.k_pool, block_table, pool_seqlens)
 
 
     @override
     def copy_page(self, source: CacheLayer_MLA_quant, from_page: int, to_page: int, num_tokens: int):
         assert self.qshape == source.qshape and self.shape_r == source.shape_r
+        num_tokens = comprimento_local(num_tokens, self.cp_world, self.cp_rank)
         self.qk[to_page, :num_tokens, :].copy_(source.qk[from_page, :num_tokens, :], non_blocking = True)
         self.sk[to_page, :num_tokens, :].copy_(source.sk[from_page, :num_tokens, :], non_blocking = True)
         self.v[to_page, :num_tokens, :, :].copy_(source.v[from_page, :num_tokens, :, :], non_blocking = True)
@@ -404,5 +439,7 @@ class CacheLayer_MLA_quant(CacheLayer):
                 "max_num_tokens": self.max_num_tokens,
                 "k_bits": self.k_bits,
                 "v_bits": self.v_bits,
+                "cp_world": self.cp_world,
+                "cp_rank": self.cp_rank,
             }
         }

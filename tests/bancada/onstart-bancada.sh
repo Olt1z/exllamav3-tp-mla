@@ -150,6 +150,13 @@ if [ -n "${SO_20:-}" ]; then
   # contra o logsumexp do torch, e _cp_correct_kernel com os ranks emulados numa placa so
   { echo; echo "=== kernels do cp.py"; } | tee -a /workspace/20.txt
   python3 -m exllamav3.modules.attention_fn.cp 2>&1 | tee -a /workspace/20.txt || FALHOU_20=1
+  # E a fatia por rank do cache (etapa 4): world caches no mesmo device, a uniao tem de dar a
+  # referencia sem CP. Uma placa so, sem torchrun -- e o que prova a escrita mascarada.
+  { echo; echo "=== fatia do cache por rank"; } | tee -a /workspace/20.txt
+  for w in 2 4; do
+    python3 tests/bancada/provar_fatia_do_cache.py --world "$w" --tokens 2000 2>&1 \
+      | tee -a /workspace/20.txt || FALHOU_20=1
+  done
   echo "=== veredito: $([ "$FALHOU_20" = 0 ] && echo PARIDADE_OK || echo DIVERGIU)" | tee -a /workspace/20.txt
   publicar
   marco "FIM"

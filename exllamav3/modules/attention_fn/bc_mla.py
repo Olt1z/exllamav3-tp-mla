@@ -246,17 +246,19 @@ class BCMLA:
                 {"tmp_q": "*i32", "tmp_s": "*fp16", "kpe_new": "*fp16", "qk": "*i32",
                  "sk": "*fp16", "kpe_cache": "*fp16", "block_table": "*i32",
                  "cache_seqlens": "*i32", "num_pages_per_seq": "i32", "append_len": "i32"}
-                | {n: "constexpr" for n in ("page_size", "W_TOT", "W_PAD", "N_G", "D_r")},
+                | {n: "constexpr" for n in ("page_size", "W_TOT", "W_PAD", "N_G", "D_r",
+                                            "CP_WORLD", "CP_RANK")},
                 dict(page_size = PAGE_SIZE, W_TOT = w_tot,
-                     W_PAD = triton.next_power_of_2(w_tot), N_G = groups, D_r = D_r),
+                     W_PAD = triton.next_power_of_2(w_tot), N_G = groups, D_r = D_r,
+                     CP_WORLD = 1, CP_RANK = 0),
                 2, 2)
         else:
             k_append = _compile_kernel(dev, _mla_kv_update_kernel,
                 {"ckv_new": "*fp16", "kpe_new": "*fp16", "ckv_cache": "*fp16",
                  "kpe_cache": "*fp16", "block_table": "*i32", "cache_seqlens": "*i32",
                  "num_pages_per_seq": "i32", "append_len": "i32"}
-                | {n: "constexpr" for n in ("page_size", "D_c", "D_r")},
-                dict(page_size = PAGE_SIZE, D_c = D_c, D_r = D_r),
+                | {n: "constexpr" for n in ("page_size", "D_c", "D_r", "CP_WORLD", "CP_RANK")},
+                dict(page_size = PAGE_SIZE, D_c = D_c, D_r = D_r, CP_WORLD = 1, CP_RANK = 0),
                 4, 2)
 
         # Same tuning as the dispatch wrapper (mla_attn_triton_decode)
@@ -413,10 +415,12 @@ class BCMLA:
                 dict(eps = float(self.idx_norm_eps), D = Di), 2, 1)
             plane_sig = {"rows_new": "*fp16", "plane_cache": "*fp16", "block_table": "*i32",
                  "cache_seqlens": "*i32", "num_pages_per_seq": "i32", "append_len": "i32"} \
-                | {n: "constexpr" for n in ("page_size", "D", "DST_D", "DST_OFF")}
+                | {n: "constexpr" for n in ("page_size", "D", "DST_D", "DST_OFF",
+                                            "CP_WORLD", "CP_RANK")}
             k_plane_append = _compile_kernel(dev, _mla_plane_update_kernel, plane_sig,
                 dict(page_size = PAGE_SIZE, D = Di,
-                     DST_D = 2 * Di if P else 0, DST_OFF = 0), 2, 2)
+                     DST_D = 2 * Di if P else 0, DST_OFF = 0,
+                     CP_WORLD = 1, CP_RANK = 0), 2, 2)
 
         gidx = pool_idx = None
         k_gate_append = k_pool_update = k_pool_expand = None
@@ -425,7 +429,8 @@ class BCMLA:
             gidx = sbuf("bcm_gidx", R_pad, Di)
             gidx.zero_()
             k_gate_append = _compile_kernel(dev, _mla_plane_update_kernel, plane_sig,
-                dict(page_size = PAGE_SIZE, D = Di, DST_D = 2 * Di, DST_OFF = Di), 2, 2)
+                dict(page_size = PAGE_SIZE, D = Di, DST_D = 2 * Di, DST_OFF = Di,
+                     CP_WORLD = 1, CP_RANK = 0), 2, 2)
             k_pool_update = _compile_kernel(dev, _dsa_pool_update_kernel,
                 {"plane": "*fp16", "pool_plane": "*fp16", "ape": "*fp32",
                  "block_table": "*i32", "cache_seqlens": "*i32",
