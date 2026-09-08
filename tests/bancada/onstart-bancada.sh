@@ -37,7 +37,7 @@ publicar() {
 import os
 from huggingface_hub import HfApi
 api = HfApi(token=os.environ["HF_TOKEN"])
-for f in ("bancada.log", "resumo.txt", "build.log", "10.txt", "10-cobertura.txt", "10-convert.txt", "11.txt", "11-solo.txt", "11-p0.txt", "11-p1.txt", "11-duas.txt", "12.txt", "13.txt", "14.txt", "15.txt", "16.txt"):
+for f in ("bancada.log", "resumo.txt", "build.log", "10.txt", "10-cobertura.txt", "10-convert.txt", "11.txt", "11-solo.txt", "11-p0.txt", "11-p1.txt", "11-duas.txt", "12.txt", "13.txt", "14.txt", "15.txt", "16.txt", "banda.txt"):
     p = f"/workspace/{f}"
     if os.path.exists(p):
         api.upload_file(path_or_fileobj=p, path_in_repo=f"saidas/tp-mla/$PROVA_ID/{f}", repo_id="$REPO_SAIDAS")
@@ -77,6 +77,14 @@ cd /workspace && rm -rf exllamav3-tp-mla
 git clone -q -b "$BRANCH" "$FORK" exllamav3-tp-mla && cd exllamav3-tp-mla
 git log --oneline -1
 pip install -q -r requirements.txt
+
+# A banda real do host, em TODA bancada: custa ~10 s e so precisa do torch da imagem, entao
+# cada prova futura vira um ponto de calibracao de graca. A formula do planejador
+# (bandaDaRamDoHost: nucleos x 4,8, teto 600) e uma reta por DOIS pontos, ambos de EPYC 9654,
+# e o fallback de 77 GB/s ja se mostrou 7,8x abaixo do real numa maquina. Mede tambem o par
+# EM CONTENCAO, que e o regime do decode e nao da para deduzir das medidas isoladas.
+marco "2b. banda do host (dram, pcie, contencao)"
+python3 tests/bancada/medir_banda.py 2>&1 | tee /workspace/banda.txt || true
 # A 1.4.8 exige setuptools >= 77 no pyproject; com --no-build-isolation vale o da imagem, que é mais velho
 pip install -q -U "setuptools>=77" wheel
 CAP=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -1)
