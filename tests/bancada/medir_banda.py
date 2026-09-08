@@ -102,11 +102,19 @@ def main():
     perda_pcie = 100 * (1 - saida["pcie"] / h2d) if h2d else 0
     print(f"           perda {perda_dram:>7.0f} %          perda {perda_pcie:>7.0f} %")
 
-    # o que o hub teria previsto (bandaDaRamDoHost, família EPYC 9xxx/TR PRO)
-    previsto = min(600, nucleos * 4.8)
-    erro = 100 * (previsto / dram - 1) if dram else 0
-    print(f"\nfórmula do hub para {nucleos} vCPU: {previsto:.0f} GB/s "
-          f"({erro:+.0f} % contra o medido); fallback RAM_BW_GBS = 77\n")
+    modelo = "desconhecida"
+    try:
+        for linha in open("/proc/cpuinfo"):
+            if linha.startswith("model name"):
+                modelo = linha.split(":", 1)[1].strip()
+                break
+    except OSError:
+        pass
+    print(f"\ncpu: {modelo}  ·  {nucleos} vCPU")
+    print("Comparar com `bandaDaRamDoHost` do hub (cpu-do-host.ts) usando ESTE nome e estes\n"
+          "núcleos. Não reproduzir a fórmula aqui: ela tem um ramo por família, e a versão\n"
+          "simplificada que ficava nesta linha errou por 5× num EPYC 7C13 ao aplicar a curva\n"
+          "do Zen 4 a um Milan.\n")
 
 
 if __name__ == "__main__":

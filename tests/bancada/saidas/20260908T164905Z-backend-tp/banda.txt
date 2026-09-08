@@ -1,0 +1,12 @@
+
+128 vCPU · 64 threads · working set 2.0 GiB por buffer
+
+dram (leitura, 64 threads)    103.0 GB/s
+pcie h2d                          24.9 GB/s
+pcie d2h                          22.4 GB/s
+
+contenção: dram     91.2 GB/s   pcie     12.8 GB/s
+           perda      11 %          perda      48 %
+
+fórmula do hub para 128 vCPU: 600 GB/s (+482 % contra o medido); fallback RAM_BW_GBS = 77
+

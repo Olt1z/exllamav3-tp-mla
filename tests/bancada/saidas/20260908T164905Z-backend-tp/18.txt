@@ -1,0 +1,27 @@
+=== nccl | rodada 1
+TP nccl chunk 4096 · 4096    prefill   4096 tok em     234 ms =  17516 tok/s · decode 256 tok = 252.8 tok/s
+TP nccl chunk 4096 · 16384   prefill  16384 tok em     898 ms =  18251 tok/s · decode 256 tok = 248.9 tok/s
+=== nccl | rodada 2
+TP nccl chunk 4096 · 4096    prefill   4096 tok em     232 ms =  17647 tok/s · decode 256 tok = 253.8 tok/s
+TP nccl chunk 4096 · 16384   prefill  16384 tok em     858 ms =  19085 tok/s · decode 256 tok = 255.1 tok/s
+=== nccl | rodada 3
+TP nccl chunk 4096 · 4096    prefill   4096 tok em     229 ms =  17859 tok/s · decode 256 tok = 254.6 tok/s
+TP nccl chunk 4096 · 16384   prefill  16384 tok em     861 ms =  19032 tok/s · decode 256 tok = 251.9 tok/s
+=== native | rodada 1
+TP native chunk 4096 · 4096  prefill   4096 tok em     230 ms =  17832 tok/s · decode 256 tok = 260.6 tok/s
+TP native chunk 4096 · 16384 prefill  16384 tok em     907 ms =  18057 tok/s · decode 256 tok = 257.3 tok/s
+=== native | rodada 2
+TP native chunk 4096 · 4096  prefill   4096 tok em     233 ms =  17615 tok/s · decode 256 tok = 260.2 tok/s
+TP native chunk 4096 · 16384 prefill  16384 tok em     930 ms =  17620 tok/s · decode 256 tok = 257.9 tok/s
+=== native | rodada 3
+TP native chunk 4096 · 4096  prefill   4096 tok em     232 ms =  17671 tok/s · decode 256 tok = 259.5 tok/s
+TP native chunk 4096 · 16384 prefill  16384 tok em     904 ms =  18114 tok/s · decode 256 tok = 258.4 tok/s
+=== native-reduce-gpu | rodada 1
+TP native chunk 4096 · 4096  prefill   4096 tok em     272 ms =  15083 tok/s · decode 256 tok = 260.0 tok/s
+TP native chunk 4096 · 16384 prefill  16384 tok em    1073 ms =  15273 tok/s · decode 256 tok = 257.8 tok/s
+=== native-reduce-gpu | rodada 2
+TP native chunk 4096 · 4096  prefill   4096 tok em     280 ms =  14612 tok/s · decode 256 tok = 260.3 tok/s
+TP native chunk 4096 · 16384 prefill  16384 tok em    1124 ms =  14572 tok/s · decode 256 tok = 258.4 tok/s
+=== native-reduce-gpu | rodada 3
+TP native chunk 4096 · 4096  prefill   4096 tok em     276 ms =  14816 tok/s · decode 256 tok = 257.3 tok/s
+TP native chunk 4096 · 16384 prefill  16384 tok em    1050 ms =  15601 tok/s · decode 256 tok = 259.7 tok/s
