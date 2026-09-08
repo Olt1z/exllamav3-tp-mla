@@ -35,7 +35,7 @@ publicar() {
 import os
 from huggingface_hub import HfApi
 api = HfApi(token=os.environ["HF_TOKEN"])
-for f in ("bancada.log", "resumo.txt", "build.log", "10.txt", "10-cobertura.txt", "10-convert.txt", "11.txt", "11-solo.txt", "11-p0.txt", "11-p1.txt", "11-duas.txt", "12.txt", "13.txt", "14.txt"):
+for f in ("bancada.log", "resumo.txt", "build.log", "10.txt", "10-cobertura.txt", "10-convert.txt", "11.txt", "11-solo.txt", "11-p0.txt", "11-p1.txt", "11-duas.txt", "12.txt", "13.txt", "14.txt", "15.txt"):
     p = f"/workspace/{f}"
     if os.path.exists(p):
         api.upload_file(path_or_fileobj=p, path_in_repo=f"saidas/tp-mla/$PROVA_ID/{f}", repo_id="$REPO_SAIDAS")
@@ -46,6 +46,29 @@ trap 'echo "=== FALHOU · linha $LINENO"; publicar' ERR
 marco "1. dependências"
 apt-get update -qq && apt-get install -y -qq git > /dev/null
 pip install -q huggingface_hub
+
+# ---------------------------------------------------------------------------------------------
+# 15. Quanto custa um all-reduce do TP, isolado do modelo. Só precisa do torch da imagem: não
+# compila a extensão nem baixa o corte, então a máquina vive ~5 min em vez de 40. SO_15=1 roda só
+# isto; duas placas ou mais. HIDDEN/CAMADAS descrevem o modelo que se quer extrapolar (o
+# GLM-5.3-Flash tem hidden 4096 e 45 camadas, ou seja 90 all-reduces por token).
+if [ -n "${SO_15:-}" ]; then
+  marco "15. custo do all-reduce (NCCL), sem modelo"
+  cd /workspace && rm -rf fork-ar && git clone -q --depth 1 -b "$BRANCH" "$FORK" fork-ar && cd fork-ar
+  git log --oneline -1
+  N=$(nvidia-smi --list-gpus | wc -l)
+  # a topologia decide se a coletiva anda entre placas ou desce ao host
+  { echo "=== topologia"; nvidia-smi topo -m 2>&1 | head -20; } | tee /workspace/15.txt
+  for placas in $(seq 2 "$N"); do
+    { echo; echo "=== $placas placas"; } | tee -a /workspace/15.txt
+    torchrun --nproc_per_node="$placas" tests/bancada/medir_allreduce.py \
+      --hidden "${HIDDEN:-4096}" --camadas "${CAMADAS:-90}" 2>&1 | tee -a /workspace/15.txt
+  done
+  publicar
+  marco "FIM"
+  exit 0
+fi
+
 
 marco "2. fork $FORK @ $BRANCH"
 cd /workspace && rm -rf exllamav3-tp-mla
