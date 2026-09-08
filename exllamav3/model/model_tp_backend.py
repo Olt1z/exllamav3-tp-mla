@@ -20,6 +20,11 @@ GLOBALS_SIZE = 128*1024
 SHBUF_SIZE = 16 * 1024 ** 2
 # 17 slots (16 devices + accumulator) x 2MB: 8 ring stages of the 256KB reduce chunk size
 SHBUF_SIZE_R = 17 * 8 * 256 * 1024
+# Acima de quantos bytes de payload fp32 compensa estreitar o fio para bf16 (ver all_reduce do
+# backend NCCL). 1 MiB fica com folga acima do decode (8 KB por token, mesmo com rascunho) e com
+# folga abaixo do prefill (um chunk de 4096 tokens são 67 MB), então nenhum dos dois anda no
+# limiar. Ajustável por EXLLAMA_TP_LIMIAR_FIO_BF16, em bytes; 0 manda tudo em fp32.
+LIMIAR_FIO_BF16 = int(os.environ.get("EXLLAMA_TP_LIMIAR_FIO_BF16", 1 << 20))
 SHBUF_SIZE_S = 16 * 1024
 SHBUF_SIZE_LL = 16 * 1024
 # MAX_CPU_REDUCE = SHBUF_SIZE_R // 17 // 256 * 256
@@ -118,7 +123,17 @@ class TPBackendNCCL:
 
 
     def all_reduce(self, tensor: torch.Tensor, contribution: bool = True):
-        if tensor.dtype == torch.float32:
+        # Passar fp32 pelo fio como bf16 corta o tráfego pela metade, e no prefill isso paga: um
+        # all-reduce de 2048 tokens custa 4,3 ms em duas placas, onde os três kernels da conversão
+        # custam 0,2. No decode não paga nada. O hidden de um token são 8 KB, o fio nunca é o
+        # gargalo, e a conversão responde por ~50 dos ~85 µs da coletiva — nas 90 por token do
+        # GLM-5.3 dá ~4 ms, contra um passo de 26. Medido em 08/09/2026 numa bancada de 4× 3090
+        # sem P2P (tests/bancada/medir_allreduce.py, saidas/20260908T152401Z-allreduce).
+        #
+        # Abaixo do limiar o fio vai em fp32, que o NCCL reduz nativamente. Sai de graça o
+        # arredondamento que fazia o TP divergir da placa única em modelo de saída fp32 — no
+        # decode a comparação passa a ser contra a base crua, não contra `--simular-fio-bf16`.
+        if tensor.dtype == torch.float32 and tensor.numel() * 4 >= LIMIAR_FIO_BF16:
             temp = tensor.to(torch.bfloat16)
             dist.all_reduce(temp, async_op = False)
             temp = temp.to(torch.float32)

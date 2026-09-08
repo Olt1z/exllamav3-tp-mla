@@ -1,0 +1,109 @@
+=== BANCADA tp-mla · 2026-09-08T15:26:23Z
+name, memory.total [MiB], compute_cap
+NVIDIA GeForce RTX 3090, 24576 MiB, 8.6
+NVIDIA GeForce RTX 3090, 24576 MiB, 8.6
+NVIDIA GeForce RTX 3090, 24576 MiB, 8.6
+NVIDIA GeForce RTX 3090, 24576 MiB, 8.6
+torch 2.8.0+cu128 cuda 12.8 gpus 4
+=== 1. dependências · 2026-09-08T15:26:25Z
+WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+=== 15. custo do all-reduce (NCCL), sem modelo · 2026-09-08T15:26:31Z
+b90a33a bancada: medir o custo do all-reduce do TP isolado do modelo (SO_15)
+=== topologia
+	[4mGPU0	GPU1	GPU2	GPU3	CPU Affinity	NUMA Affinity	GPU NUMA ID[0m
+GPU0	 X 	PHB	NODE	NODE	0-127	0		N/A
+GPU1	PHB	 X 	NODE	NODE	0-127	0		N/A
+GPU2	NODE	NODE	 X 	PHB	0-127	0		N/A
+GPU3	NODE	NODE	PHB	 X 	0-127	0		N/A
+
+Legend:
+
+  X    = Self
+  SYS  = Connection traversing PCIe as well as the SMP interconnect between NUMA nodes (e.g., QPI/UPI)
+  NODE = Connection traversing PCIe as well as the interconnect between PCIe Host Bridges within a NUMA node
+  PHB  = Connection traversing PCIe as well as a PCIe Host Bridge (typically the CPU)
+  PXB  = Connection traversing multiple PCIe bridges (without traversing the PCIe Host Bridge)
+  PIX  = Connection traversing at most a single PCIe bridge
+  NV#  = Connection traversing a bonded set of # NVLinks
+
+=== 2 placas
+W0908 15:26:34.262000 916 site-packages/torch/distributed/run.py:774] 
+W0908 15:26:34.262000 916 site-packages/torch/distributed/run.py:774] *****************************************
+W0908 15:26:34.262000 916 site-packages/torch/distributed/run.py:774] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+W0908 15:26:34.262000 916 site-packages/torch/distributed/run.py:774] *****************************************
+
+2 placas · NVIDIA GeForce RTX 3090 · hidden 4096 · 90 all-reduces por token
+
+  P2P 0↔1: NÃO — a coletiva desce à memória do host
+
+ tokens     bytes   bf16 serial   fp32 serial  bf16 paralelo  enfileirar   por token (bf16 serial)
+/opt/conda/lib/python3.11/site-packages/torch/distributed/distributed_c10d.py:4807: UserWarning: No device id is provided via `init_process_group` or `barrier `. Using the current device set by the user. 
+  warnings.warn(  # warn only once
+/opt/conda/lib/python3.11/site-packages/torch/distributed/distributed_c10d.py:4807: UserWarning: No device id is provided via `init_process_group` or `barrier `. Using the current device set by the user. 
+  warnings.warn(  # warn only once
+      1     8192 B       64.6 µs       89.9 µs        29.4 µs     64.5 µs     5.81 ms
+      4    32768 B       30.5 µs       81.8 µs        32.5 µs     30.3 µs     2.74 ms
+      8    65536 B       43.1 µs      109.2 µs        42.0 µs     33.3 µs     3.88 ms
+   2048 16777216 B     4323.6 µs     4516.0 µs      4344.5 µs     31.1 µs   389.12 ms
+
+O passo de decode medido na etapa 4 foi 26 ms. A coluna da direita é quanto
+desse passo é só coletiva; 'bf16 paralelo' é o piso se elas pudessem se sobrepor.
+
+
+=== 3 placas
+W0908 15:26:43.141000 1110 site-packages/torch/distributed/run.py:774] 
+W0908 15:26:43.141000 1110 site-packages/torch/distributed/run.py:774] *****************************************
+W0908 15:26:43.141000 1110 site-packages/torch/distributed/run.py:774] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+W0908 15:26:43.141000 1110 site-packages/torch/distributed/run.py:774] *****************************************
+
+3 placas · NVIDIA GeForce RTX 3090 · hidden 4096 · 90 all-reduces por token
+
+  P2P 0↔1: NÃO — a coletiva desce à memória do host
+  P2P 0↔2: NÃO — a coletiva desce à memória do host
+
+ tokens     bytes   bf16 serial   fp32 serial  bf16 paralelo  enfileirar   por token (bf16 serial)
+/opt/conda/lib/python3.11/site-packages/torch/distributed/distributed_c10d.py:4807: UserWarning: No device id is provided via `init_process_group` or `barrier `. Using the current device set by the user. 
+  warnings.warn(  # warn only once
+/opt/conda/lib/python3.11/site-packages/torch/distributed/distributed_c10d.py:4807: UserWarning: No device id is provided via `init_process_group` or `barrier `. Using the current device set by the user. 
+  warnings.warn(  # warn only once
+/opt/conda/lib/python3.11/site-packages/torch/distributed/distributed_c10d.py:4807: UserWarning: No device id is provided via `init_process_group` or `barrier `. Using the current device set by the user. 
+  warnings.warn(  # warn only once
+      1     8192 B       63.5 µs       85.7 µs        40.6 µs     63.5 µs     5.72 ms
+      4    32768 B       45.7 µs       83.5 µs        46.0 µs     30.5 µs     4.12 ms
+      8    65536 B       90.1 µs      106.7 µs        89.2 µs     33.4 µs     8.10 ms
+   2048 16777216 B     8535.8 µs     8651.8 µs      8540.5 µs     30.3 µs   768.22 ms
+
+O passo de decode medido na etapa 4 foi 26 ms. A coluna da direita é quanto
+desse passo é só coletiva; 'bf16 paralelo' é o piso se elas pudessem se sobrepor.
+
+
+=== 4 placas
+W0908 15:26:56.310000 1338 site-packages/torch/distributed/run.py:774] 
+W0908 15:26:56.310000 1338 site-packages/torch/distributed/run.py:774] *****************************************
+W0908 15:26:56.310000 1338 site-packages/torch/distributed/run.py:774] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+W0908 15:26:56.310000 1338 site-packages/torch/distributed/run.py:774] *****************************************
+
+4 placas · NVIDIA GeForce RTX 3090 · hidden 4096 · 90 all-reduces por token
+
+  P2P 0↔1: NÃO — a coletiva desce à memória do host
+  P2P 0↔2: NÃO — a coletiva desce à memória do host
+  P2P 0↔3: NÃO — a coletiva desce à memória do host
+
+ tokens     bytes   bf16 serial   fp32 serial  bf16 paralelo  enfileirar   por token (bf16 serial)
+/opt/conda/lib/python3.11/site-packages/torch/distributed/distributed_c10d.py:4807: UserWarning: No device id is provided via `init_process_group` or `barrier `. Using the current device set by the user. 
+  warnings.warn(  # warn only once
+/opt/conda/lib/python3.11/site-packages/torch/distributed/distributed_c10d.py:4807: UserWarning: No device id is provided via `init_process_group` or `barrier `. Using the current device set by the user. 
+  warnings.warn(  # warn only once
+/opt/conda/lib/python3.11/site-packages/torch/distributed/distributed_c10d.py:4807: UserWarning: No device id is provided via `init_process_group` or `barrier `. Using the current device set by the user. 
+  warnings.warn(  # warn only once
+/opt/conda/lib/python3.11/site-packages/torch/distributed/distributed_c10d.py:4807: UserWarning: No device id is provided via `init_process_group` or `barrier `. Using the current device set by the user. 
+  warnings.warn(  # warn only once
+      1     8192 B       36.8 µs       82.9 µs        34.5 µs     36.6 µs     3.31 ms
+      4    32768 B       56.6 µs       99.4 µs        59.1 µs     35.1 µs     5.10 ms
+      8    65536 B      103.7 µs      110.3 µs       102.8 µs     31.2 µs     9.33 ms
+   2048 16777216 B    12141.0 µs    12207.6 µs     12109.1 µs     32.5 µs   1092.69 ms
+
+O passo de decode medido na etapa 4 foi 26 ms. A coluna da direita é quanto
+desse passo é só coletiva; 'bf16 paralelo' é o piso se elas pudessem se sobrepor.
+
+=== publicando em Olt1z/quantizacao-bl4ck0ut/saidas/tp-mla/20260908T152401Z · 2026-09-08T15:27:12Z
