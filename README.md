@@ -135,8 +135,38 @@ comportaria os pesos: os experts roteados moram na RAM e um worker de CPU os cal
 | `EXL3_MOE_CPU_SPLIT=N` | Os **N experts de cauda de cada camada** vão para a CPU, com colocação dinâmica entre quente e frio |
 | `EXL3_MOE_CPU_THREADS` | Threads do worker; o padrão é metade dos núcleos |
 
-Exigências: experts com codebook **`mul1`** e modo de divisão por camadas — as duas variáveis são
-**recusadas em silêncio** sob tensor parallel, e o modelo carrega inteiro na placa.
+Exigências: experts com codebook **`mul1`**. Sob **tensor parallel** o split funciona desde 07/09
+no modo de canais (`EXL3_TP_MOE_TENSOR_SPLIT=1` junto com `EXL3_MOE_CPU_SPLIT`), contribuição
+deste fork; o offload de camada inteira (`EXL3_MOE_CPU_OFFLOAD`) continua só na divisão por
+camadas, porque é lá que a camada existe inteira num lugar só.
+
+### Quais experts moram na RAM
+
+`EXL3_MOE_CPU_SPLIT=N` manda os **N últimos por índice**, que é uma escolha arbitrária: o
+roteamento de um MoE é muito desigual, e mandar experts quentes para a memória lenta custa caro em
+cada token. Dois caminhos corrigem isso, e o segundo ganhou o lado que faltava:
+
+| Variável | Padrão | Para quê |
+|---|---|---|
+| `EXL3_MOE_CPU_SWAP` | `1` | Colocação dinâmica: promove o expert mais quente da CPU ao slot do mais frio da GPU |
+| `EXL3_MOE_CPU_SWAP_INTERVAL` | `128` | Passos de decode entre varreduras |
+| `EXL3_MOE_CPU_SWAP_FLOOR` | `8.0` | Piso para promover, em múltiplos da expectativa uniforme |
+| `EXL3_MOE_CPU_SWAP_HYST` | `2.0` | Razão quente/frio exigida para trocar |
+| `EXL3_MOE_CPU_SPLIT_STATS` | — | Colocação **estática** por um perfil de roteamento; exige `EXL3_MOE_CPU_SWAP=0` |
+| `EXL3_MOE_CPU_SPLIT_STATS_OUT` | — | **Escreve** esse perfil enquanto o modelo serve (deste fork) |
+
+Os padrões do modo dinâmico são conservadores: com 288 experts, o piso de 8× a expectativa
+uniforme exige 28 acertos num mesmo expert dentro da janela de 128 passos, e respostas curtas de
+agente terminam antes. Para uso interativo vale afrouxar — `EXL3_MOE_CPU_SWAP_INTERVAL=32`,
+`EXL3_MOE_CPU_SWAP_FLOOR=2`.
+
+O caminho estático é o mais forte, porque a colocação já nasce certa e vale para toda máquina
+futura. Só faltava produzir o arquivo: **`EXL3_MOE_CPU_SPLIT_STATS_OUT=<caminho>`** despeja as
+contagens por camada, indexadas por id de roteador, no formato que `EXL3_MOE_CPU_SPLIT_STATS` lê
+de volta. Escreve depois de cada varredura, e não no encerramento, porque máquina alugada
+costuma morrer sem desligar limpo; a troca é atômica. Sirva um dia de trabalho **real** com o
+despejo ligado — perfil de prompt sintético roteia perto do uniforme e não ensina nada — e depois
+suba com `EXL3_MOE_CPU_SWAP=0` e `EXL3_MOE_CPU_SPLIT_STATS` apontando para ele.
 
 Medido num modelo de 321 B (180 GB em EXL3 4 bpw) numa placa de 94 GB com 314 GB de RAM:
 
@@ -151,8 +181,12 @@ Medido num modelo de 321 B (180 GB em EXL3 4 bpw) numa placa de 94 GB com 314 GB
 
 </div>
 
-**O prefill não paga.** O motor faz streaming dos experts pela placa na leitura do prompt, em vez
-de calculá-los na CPU. O custo aparece só no decode, e é quase linear na fração que está na RAM.
+**O prefill paga menos que o decode, mas paga.** O motor faz streaming dos experts pela placa na
+leitura do prompt em vez de calculá-los na CPU, e num corte de poucas camadas o custo some. No
+modelo inteiro ele aparece: medido em 08/09 no mesmo modelo de 321 B, em 2 placas com 28,8 % dos
+experts na RAM, o prefill ficou em **1,65k tok/s** contra 4,2–4,8k em 4 placas com tudo na VRAM.
+Metade das placas explica cerca de metade da diferença; o resto é o offload. O decode continua
+sendo onde dói, e é quase linear na fração que está na RAM.
 
 ---
 
@@ -169,6 +203,8 @@ As que este fork acrescenta ou torna configuráveis:
 | `EXL3_PIN_STATE` | `1` | Estado de calibração em memória pinada, na conversão |
 | `EXL3_CONVERT_TIMING` | — | Tempo por fase e por grupo, na conversão |
 | `EXL3_GSCALE_STAGE2_STRIDE` | — | Passo da etapa fina da busca de escala |
+| `EXL3_TP_MOE_TENSOR_SPLIT` | — | Experts na RAM sob tensor parallel, no modo de canais |
+| `EXL3_MOE_CPU_SPLIT_STATS_OUT` | — | Despeja o perfil de roteamento por camada, para a colocação estática |
 
 ---
 

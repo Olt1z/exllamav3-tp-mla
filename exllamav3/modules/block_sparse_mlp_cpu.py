@@ -1,5 +1,6 @@
 from __future__ import annotations
 from typing_extensions import override
+import json
 import os
 import torch
 from ..ext import exllamav3_ext as ext
@@ -85,6 +86,45 @@ def run_pending_swap_sweeps(infer_params):
         total += n
     if total and os.environ.get("EXL3_MOE_CPU_SWAP_DEBUG"):
         print(f" -- expert swap sweep: {total} swaps", flush = True)
+    despejar_stats_de_roteamento(reg)
+
+
+def despejar_stats_de_roteamento(reg):
+    """Write per-layer routing counts to EXL3_MOE_CPU_SPLIT_STATS_OUT, in the shape that
+    EXL3_MOE_CPU_SPLIT_STATS reads back: {layer_key: [count per ROUTER expert id]}.
+
+    The read side existed and the write side did not, so frequency-guided placement could
+    only ever use counts produced by hand. Counts are indexed by router id (the checkpoint's
+    own expert order), never by physical slot, so a profile collected with dynamic swapping
+    ON -- where experts move between devices -- stays valid as a static placement later.
+
+    Written after every sweep rather than at unload: a rented machine is usually destroyed
+    without a clean shutdown, and a profile that only exists at exit is a profile that never
+    exists. Atomic via temp file + replace, so being killed mid-write leaves the previous
+    file intact.
+    """
+    caminho = os.environ.get("EXL3_MOE_CPU_SPLIT_STATS_OUT")
+    if not caminho:
+        return
+    contagens = {}
+    for m in reg:
+        total = getattr(m, "_split_hist_total", None)
+        if total is None:
+            continue
+        # A janela viva ainda não foi somada ao total nas camadas cujo sweep saiu cedo, e
+        # perdê-la inteira distorce mais que contá-la duas vezes numa camada ou outra.
+        vivo = getattr(m, "_split_hist", None)
+        atual = total if vivo is None else total + vivo
+        contagens[m.key] = [round(v, 3) for v in atual.tolist()]
+    if not contagens:
+        return
+    tmp = f"{caminho}.tmp"
+    try:
+        with open(tmp, "w") as f:
+            json.dump(contagens, f)
+        os.replace(tmp, caminho)
+    except OSError as e:
+        print(f" !! EXL3_MOE_CPU_SPLIT_STATS_OUT: {e}", flush = True)
 
 
 class BlockSparseMLP_CPU:
@@ -172,6 +212,11 @@ class BlockSparseMLP_CPU:
             dev = torch.device(self.device)
             self._split_map = torch.arange(self.num_experts, dtype = torch.long, device = dev)
             self._split_hist = torch.zeros(self.num_experts, dtype = torch.float, device = dev)
+            # Total sem decaimento, só para EXL3_MOE_CPU_SPLIT_STATS_OUT: `_split_hist` é
+            # dividido pela metade a cada varredura para a colocação seguir o roteamento
+            # RECENTE, o que é certo para a varredura e errado para um perfil durável — os
+            # tokens do fim da sessão pesariam ordens de grandeza mais que os do começo
+            self._split_hist_total = torch.zeros(self.num_experts, dtype = torch.float, device = dev)
             self._split_selcpu_t = None
             self._swap_tick_count = 0
             ip2 = self.config.infer_params
@@ -199,6 +244,7 @@ class BlockSparseMLP_CPU:
                     reg.remove(self)
                 self._split_map = None
                 self._split_hist = None
+                self._split_hist_total = None
         if self.cpu_offload:
             host = getattr(self, "cpu_host", None)
             if host is not None:
@@ -585,6 +631,7 @@ class BlockSparseMLP_CPU:
         self._split_dynamic = False
         self._split_map = None
         self._split_hist = None
+        self._split_hist_total = None
         self._split_saved = None
         self._cpu_split_register(tail["gates"], tail["ups"], tail["downs"])
         self.cpu_split_first = first
@@ -654,6 +701,8 @@ class BlockSparseMLP_CPU:
                 assert mp.sort().values.equal(torch.arange(self.num_experts)), \
                     f"{self.key}: placement map is not a permutation after sweep"
             self._split_map.copy_(mp.to(self._split_map.device))
+        if getattr(self, "_split_hist_total", None) is not None:
+            self._split_hist_total.add_(self._split_hist)
         self._split_hist.mul_(0.5)
         return nswaps
 
