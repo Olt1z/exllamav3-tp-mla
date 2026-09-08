@@ -23,7 +23,9 @@ SHBUF_SIZE_R = 17 * 8 * 256 * 1024
 # Acima de quantos bytes de payload fp32 compensa estreitar o fio para bf16 (ver all_reduce do
 # backend NCCL). 1 MiB fica com folga acima do decode (8 KB por token, mesmo com rascunho) e com
 # folga abaixo do prefill (um chunk de 4096 tokens são 67 MB), então nenhum dos dois anda no
-# limiar. Ajustável por EXLLAMA_TP_LIMIAR_FIO_BF16, em bytes; 0 manda tudo em fp32.
+# limiar. Ajustável por EXLLAMA_TP_LIMIAR_FIO_BF16, em bytes, e é o interruptor da medição A/B:
+# 0 nunca é maior que o payload e manda TUDO em bf16 (o comportamento antigo); um valor gigante
+# nunca é alcançado e manda tudo em fp32.
 LIMIAR_FIO_BF16 = int(os.environ.get("EXLLAMA_TP_LIMIAR_FIO_BF16", 1 << 20))
 SHBUF_SIZE_S = 16 * 1024
 SHBUF_SIZE_LL = 16 * 1024

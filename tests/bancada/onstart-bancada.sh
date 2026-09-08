@@ -26,6 +26,8 @@ REPO_SAIDAS="${REPO_SAIDAS:-Olt1z/quantizacao-bl4ck0ut}"
 # do coletivo nativo e o grupo aborta ("Synchronization timeout", visto em 06/09 no 4c)
 export EXLLAMA_TP_SYNC_TIMEOUT="${EXLLAMA_TP_SYNC_TIMEOUT:-600}"
 PROVA_ID="${PROVA_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
+# commit que trocou bincount por scatter_add_ no MoE; o 16c reverte so este arquivo
+SHA_SCATTER="${SHA_SCATTER:-dbea7e1}"
 nvidia-smi --query-gpu=name,memory.total,compute_cap --format=csv
 python3 -c "import torch; print('torch', torch.__version__, 'cuda', torch.version.cuda, 'gpus', torch.cuda.device_count())"
 
@@ -35,7 +37,7 @@ publicar() {
 import os
 from huggingface_hub import HfApi
 api = HfApi(token=os.environ["HF_TOKEN"])
-for f in ("bancada.log", "resumo.txt", "build.log", "10.txt", "10-cobertura.txt", "10-convert.txt", "11.txt", "11-solo.txt", "11-p0.txt", "11-p1.txt", "11-duas.txt", "12.txt", "13.txt", "14.txt", "15.txt"):
+for f in ("bancada.log", "resumo.txt", "build.log", "10.txt", "10-cobertura.txt", "10-convert.txt", "11.txt", "11-solo.txt", "11-p0.txt", "11-p1.txt", "11-duas.txt", "12.txt", "13.txt", "14.txt", "15.txt", "16.txt"):
     p = f"/workspace/{f}"
     if os.path.exists(p):
         api.upload_file(path_or_fileobj=p, path_in_repo=f"saidas/tp-mla/$PROVA_ID/{f}", repo_id="$REPO_SAIDAS")
@@ -94,6 +96,58 @@ PY
 du -sh /workspace/corte
 # Artefato da esteira antiga com kv_b_proj em treliça: repara antes de carregar
 python3 tests/bancada/reparar_kv_b_proj.py /workspace/corte
+
+# ---------------------------------------------------------------------------------------------
+# 16. As tres saidas do overhead do decode, na mesma maquina:
+#   (a) backend nativo contra NCCL -- a prova 15 mediu 36 us so para EMITIR a coletiva, contra
+#       5-10 de um lancamento de kernel; o resto e torch.distributed, que o nativo nao paga
+#       porque chama ext.pg_all_reduce_cpu direto do C++;
+#   (b) o fio do all-reduce em fp32 contra bf16, que a prova 15 mediu em 83 contra 37 us por
+#       coletiva, mas nunca dentro do modelo;
+#   (c) scatter_add_ contra bincount na contagem por expert.
+#
+# O corte tem 4 camadas: 8 all-reduces por token contra 90 do inteiro, e UMA camada MoE contra
+# 42. Os efeitos aqui sao ~10x menores que em producao, e (c) deve sumir no ruido do passo --
+# por isso o custo unitario de (c) e medido isolado, em 16a, sem modelo.
+# SO_16=1 roda so isto; precisa de 2 placas.
+if [ -n "${SO_16:-}" ]; then
+  marco "16. overhead do decode: backend, fio do all-reduce, contagem por expert"
+  PG="python3 tests/bancada/perfil_gerador.py -m /workspace/corte --tokens 4096 --novos 256"
+  FILTRO="decode|prefill|Error|Traceback|CUDA out of memory"
+
+  marco "16a. custo unitario: bincount contra scatter_add_, sem modelo"
+  python3 tests/bancada/medir_contagem.py 2>&1 | tee /workspace/16.txt
+
+  marco "16b. decode no corte, TP2: NCCL contra nativo, fio fp32 contra bf16"
+  # limiar 0 nunca e maior que o payload => tudo em bf16 (o comportamento antigo)
+  # limiar gigante nunca e alcancado    => tudo em fp32 (o novo, que so muda o decode)
+  for backend in nccl native; do
+    for fio in 0:bf16-antigo 999999999999:fp32-novo; do
+      LIMIAR="${fio%%:*}"
+      NOME="${fio##*:}"
+      for r in 1 2 3; do
+        echo "=== $backend | fio $NOME | rodada $r" | tee -a /workspace/16.txt
+        EXLLAMA_TP_LIMIAR_FIO_BF16="$LIMIAR" $PG --tp --backend "$backend" 2>&1 \
+          | grep -E "$FILTRO" | tee -a /workspace/16.txt || true
+      done
+    done
+  done
+
+  marco "16c. a mesma matriz com o bincount de volta, para isolar (c) no modelo"
+  git checkout "$SHA_SCATTER~1" -- exllamav3/modules/block_sparse_mlp.py
+  echo "=== revertido para bincount:" | tee -a /workspace/16.txt
+  git diff --stat HEAD -- exllamav3/modules/block_sparse_mlp.py | tee -a /workspace/16.txt
+  for r in 1 2 3; do
+    echo "=== bincount | nccl | fp32-novo | rodada $r" | tee -a /workspace/16.txt
+    EXLLAMA_TP_LIMIAR_FIO_BF16=999999999999 $PG --tp --backend nccl 2>&1 \
+      | grep -E "$FILTRO" | tee -a /workspace/16.txt || true
+  done
+  git checkout HEAD -- exllamav3/modules/block_sparse_mlp.py
+
+  publicar
+  marco "FIM"
+  exit 0
+fi
 
 if [ -z "${SO_7:-}" ] && [ -z "${SO_8:-}" ] && [ -z "${SO_9:-}" ] && [ -z "${SO_10:-}" ] && [ -z "${SO_11:-}" ] && [ -z "${SO_12:-}" ] && [ -z "${SO_13:-}" ] && [ -z "${SO_14:-}" ]; then
 marco "3b. teste por bloco: original × importado por TP, bloco a bloco e filho a filho"
