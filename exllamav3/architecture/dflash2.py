@@ -142,8 +142,16 @@ class DFlash2Model(DFlashModel):
         unary, candidates = self.draft_logits_topk(state, params)              # (b, n, k)
         anchor = params["dflash2_anchor_ids"].to(state.device)
         dev = state.device
+        # `state[:, 1:]` is a non-contiguous slice, and `hidden_projection` ends up in
+        # `Linear.forward`, which does `x.view(-1, x.shape[-1])` -- that raises on a
+        # non-contiguous tensor. It never showed up under TP because `.to(dev)` crosses
+        # devices there and the copy silently makes it contiguous; with autosplit the
+        # target state is already on `dev`, `.to` is a no-op and the view blows up mid
+        # generation. Measured 2026-09-08 on a 5x RTX 5090 autosplit box: "RuntimeError:
+        # view size is not compatible with input tensor's size and stride", which aborts
+        # the request and makes TabbyAPI reload the whole model.
         path, conf = self.candidate_selector.select(
-            state[:, 1:].to(dev), unary[:, 1:].to(dev), candidates[:, 1:].to(dev), anchor,
+            state[:, 1:].to(dev).contiguous(), unary[:, 1:].to(dev), candidates[:, 1:].to(dev), anchor,
         )
         # position 0: the plain argmax, kept only for shape
         p0 = candidates[:, :1].to(dev).gather(-1, unary[:, :1].to(dev).argmax(-1, keepdim = True))[..., 0]
