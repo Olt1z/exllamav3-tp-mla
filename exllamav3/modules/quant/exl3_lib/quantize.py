@@ -866,6 +866,16 @@ def finalize_capture_H(H_data: dict, quant_args: dict, verbose: bool):
         # Switch to uncalibrated fallback if no input activations or diagonal is too small (few activations)
         count = H_data["count"] - int(H_data["dropped"]) if "dropped" in H_data else H_data["count"]
         if count == 0:
+            # Dos tres caminhos que caem no fallback nao calibrado, so o da Hessiana
+            # nao-finita avisava. Num MoE de 288 experts este e o que pode acontecer sem
+            # ninguem ver: um expert que o roteamento do corpus nunca escolhe nao tem UMA
+            # amostra e sai quantizado como se nao houvesse calibracao.
+            #
+            # Nao e o caso do corpus atual -- a rodada do Flash abliterated mediu os 36.288
+            # modulos (42 camadas x 288 experts x 3 projecoes) com ZERO em fallback. O aviso
+            # existe para o dia em que o corpus encolher ou o modelo tiver mais experts, e
+            # porque a alternativa e descobrir isso pela qualidade do artefato.
+            print(f" !! No calibration samples for {H_data.get('first_key')}, using uncalibrated fallback")
             q_fallback = True
             diag_mean = 0.0
         else:
@@ -883,6 +893,13 @@ def finalize_capture_H(H_data: dict, quant_args: dict, verbose: bool):
                 diag_mean = 0.0
             else:
                 q_fallback = diag_mean < 1e-20
+                if q_fallback:
+                    # Ha amostras, mas tao poucas (ou tao pequenas) que a diagonal e ruido:
+                    # o resultado e o mesmo do caso acima, e ficava igualmente mudo.
+                    print(
+                        f" !! Degenerate Hessian for {H_data.get('first_key')} "
+                        f"({count:,} samples, diagonal mean {diag_mean:.3e}), using uncalibrated fallback"
+                    )
 
         # Regularize diagonal
         H.diagonal().add_(quant_args.get("sigma_reg", 0.025) * diag_mean)
