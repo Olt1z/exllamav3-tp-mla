@@ -34,6 +34,22 @@ REDUZIR_GRANDE_NA_GPU = os.environ.get("EXL3_TP_REDUCE_GPU", "0") == "1"
 # 0 nunca é maior que o payload e manda TUDO em bf16 (o comportamento antigo); um valor gigante
 # nunca é alcançado e manda tudo em fp32.
 LIMIAR_FIO_BF16 = int(os.environ.get("EXLLAMA_TP_LIMIAR_FIO_BF16", 1 << 20))
+
+# O context parallel precisa de all_gather e reduce_scatter, que o backend nativo ainda não tem.
+# A prova 19 (08/09/2026) mediu que só o par AG(lse) + reduce_scatter cabe no passo de decode: o
+# all_reduce de slot, que seria a saída sem primitiva nova, custa 17 ms por token em TP4 com
+# rascunho, contra um passo de 26.
+#
+# O porte para o nativo já tem forma conhecida e é pequeno: pg_all_reduce_kernel É um anel de duas
+# fases -- as primeiras (num_ranks - 1) iterações acumulam, que é exatamente reduce-scatter, e as
+# últimas (num_ranks - 1) copiam, que é exatamente all-gather. Basta um seletor de fase no laço,
+# com a convenção de que o rank r é dono do segmento (r + 1) % num_ranks. Não é kernel novo.
+_SEM_CP_NO_NATIVO = (
+    "context parallel exige all_gather/reduce_scatter, que o backend nativo ainda não implementa. "
+    "Rode com EXLLAMA_TP_BACKEND=nccl, ou porte a fase do anel em parallel/all_reduce.cu "
+    "(as duas fases do all-reduce já SÃO reduce-scatter e all-gather)."
+)
+
 SHBUF_SIZE_S = 16 * 1024
 SHBUF_SIZE_LL = 16 * 1024
 # MAX_CPU_REDUCE = SHBUF_SIZE_R // 17 // 256 * 256
@@ -149,6 +165,28 @@ class TPBackendNCCL:
             tensor.copy_(temp)
         else:
             dist.all_reduce(tensor, async_op = False)
+
+
+    def all_gather(self, out_tensor: torch.Tensor, tensor: torch.Tensor):
+        """Concatena a contribuição de cada rank ao longo da dimensão 0 de out_tensor, que tem de
+        ser (world_size, *tensor.shape) e contígua.
+
+        Existe para o context parallel. Ao contrário do all_reduce acima, NÃO estreita fp32 para
+        bf16 em nenhum tamanho: quem trafega aqui são parciais de atenção `(acc, m, l)` cuja soma
+        no combine precisa ser exata, e o payload cruza o LIMIAR_FIO_BF16 assim que entra rascunho
+        de decode (q_len 8 leva a 4 MiB em TP4). Arredondar aqui seria o mesmo defeito que o
+        all-reduce já teve, mas em silêncio e no lugar onde a exatidão é o ponto."""
+        dist.all_gather_into_tensor(out_tensor, tensor, async_op = False)
+
+
+    def reduce_scatter(self, out_tensor: torch.Tensor, tensor: torch.Tensor):
+        """Soma sobre os ranks e entrega a cada um a sua fatia da dimensão 0 de tensor, que tem de
+        ser (world_size, *out_tensor.shape) e contígua.
+
+        No context parallel isto é o combine e o head-scatter na MESMA operação: cada rank sai com
+        as parciais das suas cabeças já somadas, no formato que o o_proj quer. Mesma regra do
+        all_gather quanto ao fp32 — sem estreitar."""
+        dist.reduce_scatter_tensor(out_tensor, tensor, async_op = False)
 
 
     def gather(
@@ -499,6 +537,14 @@ class TPBackendNative:
         #         self.shbuf_size,
         #         self.abort_flag
         #     )
+
+
+    def all_gather(self, out_tensor: torch.Tensor, tensor: torch.Tensor):
+        raise NotImplementedError(_SEM_CP_NO_NATIVO)
+
+
+    def reduce_scatter(self, out_tensor: torch.Tensor, tensor: torch.Tensor):
+        raise NotImplementedError(_SEM_CP_NO_NATIVO)
 
 
     def gather(
