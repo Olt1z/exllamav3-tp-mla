@@ -1,0 +1,29 @@
+=== regua: TP4 dcp 1
+carga: 37 s, dispositivos [1, 2, 3, 0], cp_world 1
+pagina logica: 256 tokens · 64 paginas · 16384 tokens no pool
+prompts: A 1489 · B 1494 · C 11 tokens
+A: 24 tokens · reaproveitou 0 paginas (0 tokens) · texto: 'Localizedyahsizes�断琪 Compactogo atolitanigniteendesacon唤功喜 m'
+B: 24 tokens · reaproveitou 5 paginas (1280 tokens) · texto: 'Localizedece托 endeab托 Compact3托ynes Schweobersteinenfbiblooq'
+C: 24 tokens · reaproveitou 0 paginas (0 tokens) · texto: 'Injectedebyduração miniatureEROarchytommytasktombla timetabl'
+OK
+
+=== TP4 dcp 2
+carga: 42 s, dispositivos [1, 2, 3, 0], cp_world 2
+pagina logica: 512 tokens · 32 paginas · 16384 tokens no pool
+prompts: A 1489 · B 1494 · C 11 tokens
+A: 24 tokens · reaproveitou 0 paginas (0 tokens) · texto: 'Localizedyahsizes�断琪 Compacteftaps就近 decentralizationriteogo'
+B: 24 tokens · reaproveitou 2 paginas (1024 tokens) · texto: ' Localization�krasia托SSFife5 polled报销gin budgets Thatcherizm'
+C: 24 tokens · reaproveitou 0 paginas (0 tokens) · texto: 'Injectedebyduração miniatureEROarchytommytasktomorrowedBytra'
+A: KL do passo 0 nan · top-1 igual 29% em 24 passos · prefixo reaproveitado igual em tokens: sim
+B: KL do passo 0 nan · top-1 igual 0% em 24 passos · prefixo reaproveitado igual em tokens: NAO
+
+=== TP4 dcp 4
+carga: 37 s, dispositivos [1, 2, 3, 0], cp_world 4
+pagina logica: 1024 tokens · 16 paginas · 16384 tokens no pool
+prompts: A 1489 · B 1494 · C 11 tokens
+A: 24 tokens · reaproveitou 0 paginas (0 tokens) · texto: 'LocalizedyahgetPosterbum疼ead5rubergaponerdegon忧 enchanted po'
+B: 24 tokens · reaproveitou 1 paginas (1024 tokens) · texto: ' Localization�krasia托SSFifeaixbz庭_sv4 Deadlyogolapsyu ash5de'
+C: 24 tokens · reaproveitou 0 paginas (0 tokens) · texto: 'Injectedebyduração miniatureEROarchytommytask completion ins'
+A: KL do passo 0 nan · top-1 igual 8% em 24 passos · prefixo reaproveitado igual em tokens: sim
+B: KL do passo 0 nan · top-1 igual 4% em 24 passos · prefixo reaproveitado igual em tokens: NAO
+=== veredito: DIVERGIU

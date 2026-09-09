@@ -1,0 +1,35 @@
+=== 28c · 96838e5 bancada: prefixo comum de A e B entre 1024 e 1280, para reaproveitar o mesmo em todo grau · 05:22:35
+--- regua: TP4 dcp 1
+carga: 38 s, dispositivos [1, 2, 3, 0], cp_world 1
+pagina logica: 256 tokens · 64 paginas · 16384 tokens no pool
+prompts: A 1104 · B 1109 · C 11 tokens
+prefixo comum A/B: 1097 tokens -> B deve reaproveitar 1024 tokens em paginas de 256
+A: 24 tokens · reaproveitou 0 paginas (0 tokens) · texto: 'vtLogs压缩叔 Miltonissima\xadtionmarkbearer/cart_logging/cartosan冻'
+B: 24 tokens · reaproveitou 4 paginas (1024 tokens) · texto: 'packet压缩sessionierdegon negligentlyzioni的责任ussion命中-filterbu'
+C: 24 tokens · reaproveitou 0 paginas (0 tokens) · texto: 'Injectedebyduração miniatureEROarchytommytasktombla timetabl'
+OK
+--- TP4 dcp 2
+carga: 39 s, dispositivos [1, 2, 3, 0], cp_world 2
+pagina logica: 512 tokens · 32 paginas · 16384 tokens no pool
+prompts: A 1104 · B 1109 · C 11 tokens
+prefixo comum A/B: 1097 tokens -> B deve reaproveitar 1024 tokens em paginas de 512
+A: 24 tokens · reaproveitou 0 paginas (0 tokens) · texto: 'vtLogs压缩叔 Miltonissima\xadtionmarkbearer/cart抱isman bubbling ou'
+B: 24 tokens · reaproveitou 2 paginas (1024 tokens) · texto: 'packet压缩 outnumber genomesitanrub�mile温命 endeпоч的生命 enumerom'
+C: 24 tokens · reaproveitou 0 paginas (0 tokens) · texto: 'Injectedebyduração miniatureEROarchytommytasktomorrowedBytra'
+A: KL do passo 0 0.00042 · top-1 do passo 0 igual · top-1 igual 42% em 24 passos de greedy livre
+B: KL do passo 0 0.04463 · top-1 do passo 0 igual · top-1 igual 8% em 24 passos de greedy livre
+C: KL do passo 0 0.00182 · top-1 do passo 0 igual · top-1 igual 46% em 24 passos de greedy livre
+OK
+--- TP4 dcp 4
+carga: 35 s, dispositivos [1, 2, 3, 0], cp_world 4
+pagina logica: 1024 tokens · 16 paginas · 16384 tokens no pool
+prompts: A 1104 · B 1109 · C 11 tokens
+prefixo comum A/B: 1097 tokens -> B deve reaproveitar 1024 tokens em paginas de 1024
+A: 24 tokens · reaproveitou 0 paginas (0 tokens) · texto: 'vtLogs压缩叔 Milton-properties smackenheimesserunity颜enticator '
+B: 24 tokens · reaproveitou 1 paginas (1024 tokens) · texto: 'packetizzolukshotisser ende顾 Guyisser PhotonicslutERPlut Bru'
+C: 24 tokens · reaproveitou 0 paginas (0 tokens) · texto: 'Injectedebyduração miniatureEROarchytommytask completion ins'
+A: KL do passo 0 0.00042 · top-1 do passo 0 igual · top-1 igual 21% em 24 passos de greedy livre
+B: KL do passo 0 0.09738 · top-1 do passo 0 igual · top-1 igual 4% em 24 passos de greedy livre
+C: KL do passo 0 0.00158 · top-1 do passo 0 igual · top-1 igual 42% em 24 passos de greedy livre
+OK
+=== FIM 28c · 05:26:00
