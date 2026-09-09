@@ -122,6 +122,13 @@ def main():
         tp_dev_limits = tp_dev_limits,
     )
     print(f"carga: {time.time() - t0:.0f} s, dispositivos {model.active_devices}")
+    # VRAM ocupada por placa depois da carga (pesos + cache + estáticos): é a medida de "caber"
+    # que o context parallel existe para mudar; lida do driver, não do alocador do torch
+    ocupada = []
+    for d in range(torch.cuda.device_count()):
+        livre, total = torch.cuda.mem_get_info(d)
+        ocupada.append(f"{(total - livre) / 2**30:.1f}")
+    print(f"vram por placa (GiB): {ocupada}")
     if args.simular_fio_bf16:
         n = 0
         for blk in model.modules:

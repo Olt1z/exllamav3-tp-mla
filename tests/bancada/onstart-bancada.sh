@@ -37,7 +37,7 @@ publicar() {
 import os
 from huggingface_hub import HfApi
 api = HfApi(token=os.environ["HF_TOKEN"])
-for f in ("bancada.log", "resumo.txt", "build.log", "10.txt", "10-cobertura.txt", "10-convert.txt", "11.txt", "11-solo.txt", "11-p0.txt", "11-p1.txt", "11-duas.txt", "12.txt", "13.txt", "14.txt", "15.txt", "16.txt", "18.txt", "19.txt", "20.txt", "24.txt", "banda.txt"):
+for f in ("bancada.log", "resumo.txt", "build.log", "10.txt", "10-cobertura.txt", "10-convert.txt", "11.txt", "11-solo.txt", "11-p0.txt", "11-p1.txt", "11-duas.txt", "12.txt", "13.txt", "14.txt", "15.txt", "16.txt", "18.txt", "19.txt", "20.txt", "24.txt", "27.txt", "banda.txt"):
     p = f"/workspace/{f}"
     if os.path.exists(p):
         api.upload_file(path_or_fileobj=p, path_in_repo=f"saidas/tp-mla/$PROVA_ID/{f}", repo_id="$REPO_SAIDAS")
@@ -193,6 +193,44 @@ PY
 du -sh /workspace/corte
 # Artefato da esteira antiga com kv_b_proj em treliça: repara antes de carregar
 python3 tests/bancada/reparar_kv_b_proj.py /workspace/corte
+
+# ---------------------------------------------------------------------------------------------
+# 27. O GANHO do context parallel, no modelo INTEIRO (etapa 13 do plano). O corte prova correcao
+# por centavos e nao mede ganho (uma placa fez 174 tok/s e TP4 fez 164). Aqui o modelo e o que
+# vier em CORTE (o Flash inteiro e o primeiro caso), em 4 placas de 96 GB. Duas medidas:
+#   (a) CABER a 1M: TP4 com dcp 1, 2 e 4 e o autosplit, so a carga e 8 tokens -- a VRAM por
+#       placa depois da carga e o numero; onde estourar, o erro fica no log;
+#   (b) VELOCIDADE a CONTEXTO_27 (100k) tokens: regua TP4 dcp 1 (salva), TP4 dcp 2 (o arranjo
+#       de producao) e o AUTOSPLIT, que e o que o hub usa hoje quando o TP nao cabe -- tok/s de
+#       decode e tempo de prefill, com KL contra a regua.
+# Tudo no NCCL (o nativo recusa CP) e com o grafo ligado (GRAFO_27=0 desliga dos dois lados).
+if [ -n "${SO_27:-}" ]; then
+  marco "27. o ganho no modelo inteiro"
+  export EXL3_BC_ATTN=${GRAFO_27:-1}
+  N=$(nvidia-smi --list-gpus | wc -l)
+  S="timeout 3600 python3 tests/tp_mla_smoke.py -m /workspace/corte --backend nccl"
+  F="carga:|vram por placa|prompt:|decode:|KL|Error|Traceback|out of memory|OOM|NotImplemented|assert"
+  { echo "=== maquina"; nvidia-smi --query-gpu=name,memory.total --format=csv,noheader | head -4; lscpu | grep "Model name"; } | tee /workspace/27.txt
+  { echo; echo "=== (a) caber a 1M · cache 1048576"; } | tee -a /workspace/27.txt
+  for dcp in 1 2 4; do
+    { echo; echo "--- TP$N dcp $dcp"; } | tee -a /workspace/27.txt
+    $S --tp --dcp $dcp --cache 1048576 --tokens 8 2>&1 | grep -E "$F" | tail -8 | tee -a /workspace/27.txt
+  done
+  { echo; echo "--- autosplit (sem TP)"; } | tee -a /workspace/27.txt
+  $S --cache 1048576 --tokens 8 2>&1 | grep -E "$F" | tail -8 | tee -a /workspace/27.txt
+  CTX=${CONTEXTO_27:-100000}; CACHE=$(( (CTX + 4096 + 8191) / 8192 * 8192 ))
+  { echo; echo "=== (b) velocidade a $CTX tokens · cache $CACHE · $(date -u +%H:%M:%S)"; } | tee -a /workspace/27.txt
+  { echo; echo "--- regua: TP$N dcp 1 · $(date -u +%H:%M:%S)"; } | tee -a /workspace/27.txt
+  $S --tp --cache $CACHE --prefill-tokens $CTX --tokens 64 --save /workspace/27-regua.pt 2>&1 | grep -E "$F" | tee -a /workspace/27.txt
+  { echo; echo "--- TP$N dcp 2 · $(date -u +%H:%M:%S)"; } | tee -a /workspace/27.txt
+  $S --tp --dcp 2 --cache $CACHE --prefill-tokens $CTX --compare /workspace/27-regua.pt 2>&1 | grep -E "$F" | tee -a /workspace/27.txt
+  { echo; echo "--- autosplit · $(date -u +%H:%M:%S)"; } | tee -a /workspace/27.txt
+  $S --cache $CACHE --prefill-tokens $CTX --compare /workspace/27-regua.pt 2>&1 | grep -E "$F" | tee -a /workspace/27.txt
+  echo "=== FIM 27 · $(date -u +%H:%M:%S)" | tee -a /workspace/27.txt
+  publicar
+  marco "FIM"
+  exit 0
+fi
 
 # ---------------------------------------------------------------------------------------------
 # 24. O forward sob context parallel (etapa 5c), no modelo inteiro: e a primeira vez que o plano
