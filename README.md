@@ -8,9 +8,9 @@
 </p>
 
 <p align="center">
-  <b>Tensor parallel para os modelos de atenção latente</b> que o ExLlamaV3 ainda gera<br>
-  numa placa por vez — mais um grafo CUDA que aceita atenção em 16 bits,<br>
-  um rascunho DFlash&nbsp;2 e um conversor mais rápido.
+  <b>Tensor parallel e context parallel para os modelos de atenção latente</b><br>
+  que o ExLlamaV3 ainda gera numa placa por vez — mais um grafo CUDA que aceita<br>
+  atenção em 16 bits, um rascunho DFlash&nbsp;2 e um conversor mais rápido.
 </p>
 
 <p align="center">
@@ -25,6 +25,7 @@
 | | O que faz | Efeito medido |
 |---|---|---|
 | **TP na `MLAttention`** | Fatia as cabeças de query entre as placas e replica o latente | Destrava GLM-5.3, GLM-5.3-Flash, DeepSeek V3/V3.1/R1, Kimi K2 e Mistral-4 em várias placas |
+| **Context parallel na MLA** | Reparte o cache pela SEQUÊNCIA e junta as parciais pelo `lse` | **1M de tokens em 2 placas** de 96 GB; o cache latente cai para `1/N` por placa e custa 4–5 % de decode |
 | **Atenção fp16 no grafo CUDA** | `BC_MLAttention` e `BC_GatedDeltaNetSplit` aceitam projeções em 16 bits | **+37 % a +69 %** de decode, KL ≤ 0,00007 |
 | **Rascunho DFlash 2** | Arquitetura de rascunho própria, com taps no modelo alvo | 2,9–4,4 tokens aceitos por rodada; ganha do MTP em todos os prompts |
 | **Conversor mais rápido** | Captura sem sincronizar, estado em memória pinada, cronômetro por fase | **1,7×** mais rápido e KL melhor (0,00249 contra 0,00422) |
@@ -53,8 +54,9 @@ GLM-5.3 (rope 64, nope 192), ao Flash (NoPE, nope 256, k-pool) e ao DeepSeek V3.
 O mesmo trabalho destravou a variante **KDA** do `GatedDeltaNet` (projeções `q`/`k`/`v`
 separadas, portas `f`/`g`, sem `z_proj`), que o Flash usa em 34 das suas 45 camadas.
 
-Cada rank guarda uma cópia inteira do cache latente. É MQA: uma cabeça só, sem por onde fatiar
-por cabeça — a mesma escolha que vLLM e TensorRT-LLM fazem.
+Cada rank guarda uma cópia inteira do cache latente: é MQA, uma cabeça só, sem por onde fatiar
+por cabeça — a mesma escolha que vLLM e TensorRT-LLM fazem. Quem quer contexto longo reparte esse
+cache pelo outro eixo, o da sequência: é o [context parallel](#context-parallel-o-cache-repartido-pela-sequência).
 
 ### Prazo dos coletivos, configurável
 
@@ -62,6 +64,90 @@ O backend nativo aborta o grupo quando um rank espera demais num coletivo. O ups
 dentro do kernel; aqui o prazo vive no `PGContext` e vem de `EXLLAMA_TP_SYNC_TIMEOUT`. A primeira
 geração compila os kernels Triton dos caminhos MLA e KDA em cada rank, e o mestre ainda compila
 os do rascunho — 90 s estouram numa máquina sã.
+
+---
+
+## Context parallel: o cache repartido pela sequência
+
+Sob tensor parallel o cache latente é replicado inteiro em cada placa, e a 1M de tokens é ele que
+decide se o modelo cabe. O context parallel reparte esse cache pelo eixo que sobra, o da
+**sequência**: o token `p` mora no rank `p % N`, cada rank calcula a atenção sobre a sua fatia, e
+as parciais viram o resultado exato por um `all_gather` do `lse` seguido de um `reduce_scatter`
+das saídas ponderadas. São dois coletivos pequenos, e juntos custam menos que o único
+all-reduce que a versão ingênua (trocar as saídas inteiras entre os ranks) exigiria — que é o que
+mata essa versão assim que entra um rascunho e o payload multiplica por `q_len`.
+
+A fatia é **intercalada**, não contígua, e isso não é detalhe: a chave rope carrega a posição
+original, então a atenção sobre uma fatia intercalada é um termo exato da combinação e os kernels
+não precisam saber que faltam tokens no meio. De quebra, a carga causal se equilibra sozinha entre
+os ranks, sem o zigzag que um shard contíguo exigiria.
+
+| Peça | Sob context parallel |
+|---|---|
+| cache latente e rope | repartido, `1/N` por placa |
+| plano do indexador DSA, k-pool | replicados, em páginas de `PAGE_SIZE × N` |
+| `q_proj`, `q_b_proj`, `w_uk_flat` | faixa do grupo — cada rank calcula todas as cabeças do grupo |
+| `w_uv_flat`, `o_proj` | sub-faixa do rank, depois do reduce-scatter |
+| página lógica do gerador | `PAGE_SIZE × N` tokens |
+
+Vale nos dois regimes da DSA (denso e esparso acima de `index_topk`), no prefill em chunk, com
+rascunho (`q_len > 1`) e **dentro do grafo CUDA**, onde o bloco gravado vira duas fases com o
+combine em eager no meio. O grau é qualquer divisor do grau de TP — `dcp = 2` num TP4 reparte o
+cache entre pares de placas e replica só entre os pares, o que costuma render mais que repartir
+entre todas.
+
+```python
+model.load(tensor_p = True, tp_options = {"dcp": 2})    # ou EXL3_DCP=2, para quem não expõe tp_options
+```
+
+### Quanto libera, e quanto custa
+
+Cache de 1M no GLM-5.3-Flash (4 bpw, 11 camadas com cache), 4× RTX PRO 6000 de 96 GB:
+
+<div align="center">
+
+| Arranjo | VRAM por placa |
+|---|---|
+| TP4 | 57,5 GiB |
+| TP4 · CP 2 | 52,0 GiB |
+| TP4 · CP 4 | 49,5 GiB |
+| autosplit, sem TP | 91,0 · 82,3 · 0,5 · 0,5 GiB |
+
+</div>
+
+A série é `11 camadas × 1 GB × (1/N)` ao pé da letra. O preço, nas mesmas quatro placas, a 97k
+tokens de contexto e com o grafo ligado:
+
+<div align="center">
+
+| Arranjo | prefill | decode | KL / top-1 contra TP4 |
+|---|---|---|---|
+| TP4 | 4.700 tok/s | 59,1 tok/s | régua |
+| TP4 · CP 2 | 4.454 tok/s | 56,9 tok/s | 0,002 / 98 % |
+
+</div>
+
+**4 a 5 % de decode** em troca do cache repartido. No caminho esparso o CP chega a ficar *mais
+rápido* que o TP puro — 150 contra 125 tok/s a 3.000 tokens, num modelo de prova de 4 camadas em
+4× RTX 3090 —, porque cada rank só percorre os tokens selecionados que possui.
+
+### 1M de contexto em duas placas
+
+GLM-5.3-Flash 4 bpw servido por TabbyAPI em **2× RTX PRO 6000 WS** de 96 GB, CP 2, cache de
+16 bits, grafo CUDA ligado:
+
+<div align="center">
+
+| Prompt | Prefill | Decode | VRAM por placa |
+|---|---|---|---|
+| 199.494 tokens | 59 s · 3.405 tok/s | 60,6 tok/s | — |
+| 959.667 tokens | 323 s · 2.991 tok/s | 59,6 tok/s | 96,5 / 95,6 GB |
+
+</div>
+
+O decode a 1M é igual ao de 200k: o cache repartido não pesa no passo. E os quatro marcadores
+plantados em 5 %, 35 %, 65 % e 95 % do prompt voltaram exatos nos dois tamanhos — velocidade sem
+recuperação não é contexto longo, é contexto grande (`tests/bancada/recuperacao_longa.py`).
 
 ---
 
@@ -135,10 +221,10 @@ comportaria os pesos: os experts roteados moram na RAM e um worker de CPU os cal
 | `EXL3_MOE_CPU_SPLIT=N` | Os **N experts de cauda de cada camada** vão para a CPU, com colocação dinâmica entre quente e frio |
 | `EXL3_MOE_CPU_THREADS` | Threads do worker; o padrão é metade dos núcleos |
 
-Exigências: experts com codebook **`mul1`**. Sob **tensor parallel** o split funciona desde 07/09
-no modo de canais (`EXL3_TP_MOE_TENSOR_SPLIT=1` junto com `EXL3_MOE_CPU_SPLIT`), contribuição
-deste fork; o offload de camada inteira (`EXL3_MOE_CPU_OFFLOAD`) continua só na divisão por
-camadas, porque é lá que a camada existe inteira num lugar só.
+Exigências: experts com codebook **`mul1`**. Sob **tensor parallel** o split funciona no modo de
+canais (`EXL3_TP_MOE_TENSOR_SPLIT=1` junto com `EXL3_MOE_CPU_SPLIT`), contribuição deste fork; o
+offload de camada inteira (`EXL3_MOE_CPU_OFFLOAD`) continua só na divisão por camadas, porque é lá
+que a camada existe inteira num lugar só.
 
 ### Quais experts moram na RAM
 
@@ -168,13 +254,12 @@ de volta.
 Apontar as **duas** variáveis para o mesmo caminho fecha o ciclo sozinho: na primeira subida o
 arquivo não existe, a colocação dinâmica age e o perfil é colhido; nas seguintes o perfil existe e
 manda. Arquivo ausente, ilegível, corrompido ou de outro modelo (largura diferente) volta para a
-dinâmica sem derrubar o carregamento — antes um `FileNotFoundError` levava o modelo junto, no meio
-da carga. Escreve depois de cada varredura, e não no encerramento, porque máquina alugada
-costuma morrer sem desligar limpo; a troca é atômica. Sirva um dia de trabalho **real** com o
+dinâmica sem derrubar o carregamento. Escreve depois de cada varredura, e não no encerramento,
+porque máquina alugada costuma morrer sem desligar limpo; a troca é atômica. Sirva um dia de trabalho **real** com o
 despejo ligado — perfil de prompt sintético roteia perto do uniforme e não ensina nada — e depois
 suba com `EXL3_MOE_CPU_SWAP=0` e `EXL3_MOE_CPU_SPLIT_STATS` apontando para ele.
 
-Quanto isso vale, medido em 08/09/2026 no GLM-5.3-Flash com o perfil de um dia de trabalho real
+Quanto isso vale, medido no GLM-5.3-Flash com o perfil de um dia de trabalho real
 (42 camadas MoE, 48,3 milhões de seleções de expert): mandando para a RAM os **198 experts mais
 frios** de cada camada em vez dos 198 últimos por índice, a fração das leituras que cai na memória
 lenta vai de **68,8 % para 22,3 %** — **3,1× menos**, sem mudar quantos experts moram lá.
@@ -194,8 +279,8 @@ Medido num modelo de 321 B (180 GB em EXL3 4 bpw) numa placa de 94 GB com 314 GB
 
 **O prefill paga menos que o decode, mas paga.** O motor faz streaming dos experts pela placa na
 leitura do prompt em vez de calculá-los na CPU, e num corte de poucas camadas o custo some. No
-modelo inteiro ele aparece: medido em 08/09 no mesmo modelo de 321 B, em 2 placas com 28,8 % dos
-experts na RAM, o prefill ficou em **1,65k tok/s** contra 4,2–4,8k em 4 placas com tudo na VRAM.
+modelo inteiro ele aparece: no mesmo modelo de 321 B, em 2 placas com 28,8 % dos experts na RAM, o
+prefill ficou em **1,65k tok/s** contra 4,2–4,8k em 4 placas com tudo na VRAM.
 Metade das placas explica cerca de metade da diferença; o resto é o offload. O decode continua
 sendo onde dói, e é quase linear na fração que está na RAM.
 
@@ -207,6 +292,7 @@ As que este fork acrescenta ou torna configuráveis:
 
 | Variável | Padrão | Para quê |
 |---|---|---|
+| `EXL3_DCP` | `1` | Grau de context parallel, para quem carrega sem `tp_options` (TabbyAPI). Tem de dividir o grau de TP |
 | `EXLLAMA_TP_SYNC_TIMEOUT` | `90` | Prazo dos coletivos nativos, em segundos |
 | `EXL3_BC_GDN` | `1` | Caminho fundido do KDA no grafo CUDA |
 | `EXL3_BC_GDN_TRACE` | — | Traço do caminho do KDA |
@@ -216,6 +302,10 @@ As que este fork acrescenta ou torna configuráveis:
 | `EXL3_GSCALE_STAGE2_STRIDE` | — | Passo da etapa fina da busca de escala |
 | `EXL3_TP_MOE_TENSOR_SPLIT` | — | Experts na RAM sob tensor parallel, no modo de canais |
 | `EXL3_MOE_CPU_SPLIT_STATS_OUT` | — | Despeja o perfil de roteamento por camada, para a colocação estática |
+
+O caminho de grafo da MLA compartilha o interruptor do upstream: `EXL3_BC_ATTN=0` desliga, e
+`EXL3_BC_ATTN_TRACE=1` diz módulo a módulo por que o grafo foi recusado — útil quando um artefato
+com atenção em 16 bits ou uma geometria inesperada faz o motor cair no despacho sem avisar.
 
 ---
 
@@ -242,10 +332,20 @@ pip install git+https://github.com/Olt1z/exllamav3-tp-mla@<commit>
 ## Testes
 
 ```sh
-python tests/tp_mla_smoke.py --tp        # carrega em 2 placas e compara com a placa única
-python tests/test_tp_mla_import.py       # importação exata da MLAttention fatiada
-python tests/test_dflash2_referencia.py  # o rascunho contra a implementação de referência
+python tests/tp_mla_smoke.py --tp             # carrega em 2 placas e compara com a placa única
+python tests/test_tp_mla_import.py            # importação exata da MLAttention fatiada
+python tests/test_dflash2_referencia.py       # o rascunho contra a implementação de referência
+python tests/bancada/provar_plano_cp.py       # o plano de context parallel, SEM GPU
+python tests/bancada/provar_cp_denso.py       # combine denso contra a placa única
+python tests/bancada/provar_cp_esparso.py     # combine esparso, acima de index_topk
+python tests/bancada/provar_fatia_do_cache.py # a união das fatias reproduz o cache inteiro, bit a bit
 ```
+
+Contra um servidor já no ar, `tests/bancada/recuperacao_longa.py URL TOKEN --tokens 200000,1000000`
+planta marcadores em posições percentuais do prompt e exige os quatro de volta, exatos. Ele
+desconfia do próprio resultado: nonce na primeira linha (senão o cache de prefixo responde pelo
+modelo), `prompt_tokens` do servidor batendo o alvo (senão o contexto foi truncado em silêncio) e
+tokens em cache iguais a zero.
 
 O teste de fumaça gera 64 tokens greedy e compara os logits com a placa única. A comparação é
 por KL contra o ruído medido entre duas execuções idênticas: o ExLlamaV3 não é determinístico bit
