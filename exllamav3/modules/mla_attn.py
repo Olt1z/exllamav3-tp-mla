@@ -1181,9 +1181,16 @@ class MLAttention(Module):
             ([self.q_a_proj] if self.q_a_proj is not None else []) + \
             ([self.idx_wq_b, self.idx_wk, self.idx_weights] if self.idx_wq_b is not None else [])
         storage_d = sum(m.storage_size() for m in replicated)
-        # The cache is replicated per rank (see cache/mla.py tp_export)
+        # Sem context parallel o cache e replicado em cada rank (cache/mla.py tp_export). Com CP
+        # o latente reparte e o plano do indexador continua replicado, e QUEM SABE dizer quanto
+        # sobra e a propria camada de cache, que e onde as formas vivem -- perguntar a ela em vez
+        # de repetir a regra aqui evita que as duas definicoes divirjam no primeiro modelo que
+        # tiver um plano a mais.
+        # Guardado para o tp_export: e aqui que o grau escolhido pelo plano chega ao modulo,
+        # e o export acontece depois, no mesmo processo.
+        self._dcp = int(options.get("dcp", 1) or 1)
         for cl in self.cache_layers:
-            storage_d += cl.storage_size()
+            storage_d += cl.storage_size_sob_cp(self._dcp)
         H, D_c = self.num_q_heads, self.kv_lora_rank
         storage_s = self.q_proj.storage_size() + self.o_proj.storage_size()
         storage_s += D_c * H * (self.qk_nope_head_dim + self.v_head_dim) * torch.half.itemsize  # W_UK, W_UV
@@ -1337,8 +1344,15 @@ class MLAttention(Module):
             cache_layers = exported["cache_layers"]
             if len(cache_layers):
                 module.has_split_cache = True
+                # O cp_rank e a posicao DESTA placa dentro do grupo de CP, e so aqui isso e
+                # conhecido. Sem ele todo rank do grupo guardaria a mesma fatia da sequencia e o
+                # modelo carregaria normalmente, produzindo saida errada em silencio.
+                rank = local_context.get("rank", 0)
                 for cl in cache_layers:
-                    cli = cl["cls"](None, module, **cl["args"])
+                    dcp = int(cl["args"].get("cp_world", 1) or 1)
+                    cli = cl["cls"](None, module,
+                                    cp_rank = (rank % dcp) if dcp > 1 else 0,
+                                    **cl["args"])
                     module.cache_layers.append(cli)
                     module.tp_cache_lookup[cl["args"]["cache_id"]] = cli
 

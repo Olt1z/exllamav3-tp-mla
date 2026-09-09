@@ -81,6 +81,16 @@ class CacheLayer(ABC):
     def storage_size(self):
         pass
 
+
+    def storage_size_sob_cp(self, cp_world: int) -> int:
+        """Quanto esta camada ocupa POR PLACA com grau de context parallel `cp_world`.
+
+        O padrão é não ganhar nada: uma camada que não sabe repartir continua replicada, e o
+        alocador tem de contar o pior caso. Quem sabe repartir sobrescreve -- e a regra de qual
+        plano reparte e qual replica vive junto das FORMAS, não no alocador, senão as duas
+        definições divergem no primeiro modelo que tiver um plano a mais."""
+        return self.storage_size()
+
     @abstractmethod
     def overhead_size(self):
         pass

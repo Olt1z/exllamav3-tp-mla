@@ -51,6 +51,7 @@ class TPAllocator:
         num_tokens: int,
         output_num_tokens: int,
         dev_limits: dict = None,
+        dcp: int = 1,
     ):
         """
         Estimate and plan a tensor-parallel split across devices with uneven capacity.
@@ -72,6 +73,11 @@ class TPAllocator:
         self.estimate_overhead = None
         self.num_devices = None
         self.plan = None
+        # Context parallel: `dcp` placas por grupo. As placas de um grupo recebem AS MESMAS
+        # cabeças (os mesmos canais) e repartem a SEQUÊNCIA entre si. Então o canal é distribuído
+        # por GRUPO, não por placa, e a capacidade do grupo é a da placa mais apertada dele --
+        # dar a um grupo mais canais do que o seu menor membro aguenta estoura essa placa.
+        self.dcp = dcp
 
 
     def initial_split(
@@ -82,8 +88,22 @@ class TPAllocator:
         active_devices = [i for i in range(self.num_devices) if max_mem[i] > 0]
         if not active_devices:
             raise RuntimeError("Insufficient VRAM in split for model and cache")
+        if self.num_devices % self.dcp:
+            raise RuntimeError(
+                f"dcp {self.dcp} tem de dividir o numero de placas {self.num_devices}"
+            )
         storage_sum = [0] * self.num_devices
         overhead_max = [0] * self.num_devices
+
+        n_grupos = self.num_devices // self.dcp
+
+        def por_grupo(v):
+            """Reduz uma lista por placa a uma por grupo, pelo MENOR membro."""
+            return [min(v[g * self.dcp:(g + 1) * self.dcp]) for g in range(n_grupos)]
+
+        def por_placa(v):
+            """Espalha uma lista por grupo de volta para as placas do grupo."""
+            return [v[d // self.dcp] for d in range(self.num_devices)]
 
         for c in self.components:
 
@@ -103,9 +123,13 @@ class TPAllocator:
                 if dev_limit is not None:
                     top_k_mask_(rem_mem_s, dev_limit)
 
-            # Perform split
+            # Perform split. Sob CP o canal vai para o GRUPO e depois se espalha; sem CP
+            # (dcp = 1) `por_grupo`/`por_placa` sao identidade e isto e o codigo de sempre.
             channels = c.channels_to_split
-            split = ratio_split(channels, rem_mem_s, chunk_size = 1)
+            if self.dcp > 1:
+                split = por_placa(ratio_split(channels, por_grupo(rem_mem_s), chunk_size = 1))
+            else:
+                split = ratio_split(channels, rem_mem_s, chunk_size = 1)
             c.current_split = split
 
             # Active devices on layer: those that actually received channels. A device with free
@@ -171,9 +195,13 @@ class TPAllocator:
             key = c.key
             idx_end = 0
             cw = c.channel_width or 1
-            for dev in range(self.num_devices):
+            # Sob CP as placas de um grupo recebem A MESMA faixa de canais e repartem a sequencia
+            # entre si; acumular por placa daria a cada uma um pedaco diferente do modelo, que e o
+            # oposto do que o CP faz. Com dcp = 1 o passo e 1 e isto e o laco de sempre.
+            for dev in range(0, self.num_devices, self.dcp):
                 idx_beg = idx_end
                 idx_end += c.current_split[dev]
-                plan[dev][key] = (idx_beg * cw, idx_end * cw, c.channel_unit)
+                for d in range(dev, dev + self.dcp):
+                    plan[d][key] = (idx_beg * cw, idx_end * cw, c.channel_unit)
         self.plan = plan
         return self.plan

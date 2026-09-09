@@ -538,11 +538,17 @@ class Model_TPMixin:
         components = []
         for m in modules:
             components += m.make_tp_allocation(tp_options)
+        # Grau de context parallel: quantas placas repartem a SEQUENCIA entre si em vez de
+        # repartir as cabecas. Tem de dividir o numero de placas. dcp = 1 e o comportamento de
+        # sempre; dcp = tp replica os pesos de atencao, entao o ponto bom fica no meio -- e por
+        # isso ele e um botao do plano, nunca constante.
+        dcp = int(tp_options.get("dcp", 1) or 1)
         allocator = TPAllocator(
             components,
             num_tokens = max_chunk_size,
             output_num_tokens = max_output_size,
             dev_limits = dev_limits,
+            dcp = dcp,
         )
         allocator.initial_split(max_mem)
         if verbose:

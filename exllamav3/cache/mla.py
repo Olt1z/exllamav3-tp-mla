@@ -43,6 +43,7 @@ class CacheLayer_MLA_fp16(CacheLayer):
         # alocacao por placa. Ver cache/cp_layout.py.
         self.cp_world = cp_world
         self.cp_rank = cp_rank
+        self.attention_ref = attention
 
 
         if attention:
@@ -205,6 +206,18 @@ class CacheLayer_MLA_fp16(CacheLayer):
                 (np.prod(self.shape_p) if self.shape_p else 0)) * torch.half.itemsize
 
 
+    def storage_size_sob_cp(self, cp_world: int) -> int:
+        # O latente e a chave rope REPARTEM; o plano do indexador REPLICA (ver a nota das formas
+        # em __init__). Contar o indexador como repartido faria o alocador prometer uma economia
+        # que não existe, e o modelo estouraria a placa no primeiro contexto longo.
+        if cp_world <= 1:
+            return self.storage_size()
+        principal = (np.prod(self.shape_c) + np.prod(self.shape_r)) * torch.half.itemsize
+        indexador = ((np.prod(self.shape_i) if self.shape_i else 0) +
+                     (np.prod(self.shape_p) if self.shape_p else 0)) * torch.half.itemsize
+        return int(principal // cp_world + indexador)
+
+
     @override
     def overhead_size(self):
         return 0
@@ -219,8 +232,12 @@ class CacheLayer_MLA_fp16(CacheLayer):
             "args": {
                 "cache_id": self.cache_id,
                 "max_num_tokens": self.max_num_tokens,
-                "cp_world": self.cp_world,
-                "cp_rank": self.cp_rank,
+                # O grau vem do modulo de atencao, que o guardou quando o alocador o consultou
+                # -- o cache do processo pai e sempre cp_world = 1. O cp_rank NAO entra aqui: so
+                # o importador sabe qual placa e, e exportar um valor so daria a mesma fatia a
+                # todos os ranks do grupo, que e o defeito mais silencioso possivel (tudo carrega,
+                # e a saida so fica errada).
+                "cp_world": getattr(self.attention_ref, "_dcp", 1) if self.attention_ref else 1,
             }
         }
 
@@ -256,6 +273,7 @@ class CacheLayer_MLA_quant(CacheLayer):
         super().__init__(config, attention, cache_id, max_num_tokens)
         self.cp_world = cp_world
         self.cp_rank = cp_rank
+        self.attention_ref = attention
 
         assert 2 <= k_bits <= 8, "quantized MLA cache must be from 2 to 8 bits"
         assert compand_a == 0.0, \
@@ -432,6 +450,17 @@ class CacheLayer_MLA_quant(CacheLayer):
         )
 
 
+    def storage_size_sob_cp(self, cp_world: int) -> int:
+        # Mesma regra da classe fp16; aqui o principal e o pacote int32 + escalas + rope
+        if cp_world <= 1:
+            return self.storage_size()
+        principal = (np.prod(self.qshape) * torch.int.itemsize +
+                     (np.prod(self.sshape) + np.prod(self.shape_r)) * torch.half.itemsize)
+        indexador = ((np.prod(self.shape_i) if self.shape_i else 0) +
+                     (np.prod(self.shape_p) if self.shape_p else 0)) * torch.half.itemsize
+        return int(principal // cp_world + indexador)
+
+
     @override
     def overhead_size(self):
         # Contiguous quantization temporaries for one row (scaled by chunk length at runtime)
@@ -448,7 +477,10 @@ class CacheLayer_MLA_quant(CacheLayer):
                 "max_num_tokens": self.max_num_tokens,
                 "k_bits": self.k_bits,
                 "v_bits": self.v_bits,
-                "cp_world": self.cp_world,
-                "cp_rank": self.cp_rank,
+                # O grau vem do PLANO (o alocador decidiu), nao do cache do processo pai, que
+                # e sempre 1. O cp_rank nao entra aqui: so o importador sabe qual placa e, e
+                # exportar um valor so daria a mesma fatia a todos os ranks do grupo -- que e o
+                # defeito mais silencioso possivel, porque tudo carrega e a saida so fica errada.
+                "cp_world": (plan or {}).get("dcp", 1),
             }
         }
