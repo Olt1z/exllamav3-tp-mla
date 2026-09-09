@@ -1,0 +1,22 @@
+=== 27b · (b) velocidade a 100000 · a3dacda bancada: o smoke faz o prefill em chunks, e imprime o tempo dele · 04:30:41
+--- regua: TP4 dcp 1 · 04:30:41
+carga: 74 s, dispositivos [1, 2, 3, 0]
+vram por placa (GiB): ['42.1', '42.0', '42.0', '42.0']
+prompt: 97264 tokens
+prefill: 97263 tokens em 20.7 s = 4700 tok/s
+decode: 48 tokens (após 16 de aquecimento) em 0.81 s = 59.10 tok/s
+--- TP4 dcp 2 · 04:32:32
+carga: 73 s, dispositivos [1, 2, 3, 0]
+vram por placa (GiB): ['41.6', '41.5', '41.5', '41.5']
+prompt: 97264 tokens
+prefill: 97263 tokens em 21.8 s = 4454 tok/s
+decode: 48 tokens (após 16 de aquecimento) em 0.84 s = 56.91 tok/s
+KL média 0.00201  KL máx 0.03105  |dif| máx 2.359  top-1 igual 98.4%
+--- autosplit · 04:34:24
+carga: 12 s, dispositivos [0, 1, 2, 3]
+vram por placa (GiB): ['93.5', '64.3', '0.5', '0.5']
+prompt: 97264 tokens
+prefill: 97263 tokens em 31.1 s = 3127 tok/s
+decode: 48 tokens (após 16 de aquecimento) em 0.88 s = 54.31 tok/s
+KL média 0.00440  KL máx 0.04492  |dif| máx 3.324  top-1 igual 100.0%
+=== FIM 27b · 04:35:19

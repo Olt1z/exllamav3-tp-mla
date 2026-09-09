@@ -1,0 +1,101 @@
+=== BANCADA tp-mla · 2026-09-09T04:01:18Z
+name, memory.total [MiB], compute_cap
+NVIDIA RTX PRO 6000 Blackwell Workstation Edition, 97887 MiB, 12.0
+NVIDIA RTX PRO 6000 Blackwell Workstation Edition, 97887 MiB, 12.0
+NVIDIA RTX PRO 6000 Blackwell Workstation Edition, 97887 MiB, 12.0
+NVIDIA RTX PRO 6000 Blackwell Workstation Edition, 97887 MiB, 12.0
+torch 2.8.0+cu128 cuda 12.8 gpus 4
+=== 1. dependências · 2026-09-09T04:01:19Z
+WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+=== 2. fork https://github.com/Olt1z/exllamav3-tp-mla @ tp-mla · 2026-09-09T04:01:24Z
+81ef56c bancada: SO_27, o ganho do context parallel no modelo inteiro (etapa 13)
+WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+=== 2b. banda do host (dram, pcie, contencao) · 2026-09-09T04:01:36Z
+
+192 vCPU · 96 threads · working set 2.0 GiB por buffer
+
+dram (leitura, 96 threads)    347.1 GB/s
+pcie h2d                          57.5 GB/s
+pcie d2h                          56.4 GB/s
+
+contenção: dram    285.0 GB/s   pcie     57.1 GB/s
+           perda      18 %          perda       1 %
+
+cpu: AMD EPYC 9654 96-Core Processor  ·  192 vCPU
+Comparar com `bandaDaRamDoHost` do hub (cpu-do-host.ts) usando ESTE nome e estes
+núcleos. Não reproduzir a fórmula aqui: ela tem um ramo por família, e a versão
+simplificada que ficava nesta linha errou por 5× num EPYC 7C13 ao aplicar a curva
+do Zen 4 a um Milan.
+
+WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+=== compilando a extensão para sm 12.0 com MAX_JOBS=8 · 2026-09-09T04:01:58Z
+WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+exllamav3 1.4.8 ext ok
+=== 3. corte Olt1z/GLM-5.3-Flash-ABLITERATED-EXL3-4.0bpw · 2026-09-09T04:04:53Z
+Fetching 37 files:   0%|          | 0/37 [00:00<?, ?it/s]Fetching 37 files:   3%|▎         | 1/37 [00:00<00:08,  4.24it/s]Fetching 37 files:  16%|█▌        | 6/37 [00:00<00:01, 17.57it/s]Fetching 37 files:  22%|██▏       | 8/37 [00:19<00:01, 17.57it/s]Fetching 37 files:  24%|██▍       | 9/37 [03:30<14:04, 30.15s/it]Fetching 37 files:  27%|██▋       | 10/37 [05:00<18:06, 40.23s/it]Fetching 37 files:  30%|██▉       | 11/37 [05:10<14:54, 34.41s/it]Fetching 37 files:  32%|███▏      | 12/37 [05:20<12:04, 28.97s/it]Fetching 37 files:  38%|███▊      | 14/37 [05:35<07:57, 20.76s/it]Fetching 37 files:  41%|████      | 15/37 [05:36<06:02, 16.49s/it]Fetching 37 files:  43%|████▎     | 16/37 [05:37<04:29, 12.82s/it]Fetching 37 files:  46%|████▌     | 17/37 [06:59<10:06, 30.32s/it]Fetching 37 files:  49%|████▊     | 18/37 [09:58<21:59, 69.46s/it]Fetching 37 files:  51%|█████▏    | 19/37 [10:34<18:08, 60.45s/it]Fetching 37 files:  54%|█████▍    | 20/37 [10:40<12:44, 45.00s/it]Fetching 37 files:  57%|█████▋    | 21/37 [10:53<09:36, 36.03s/it]Fetching 37 files:  59%|█████▉    | 22/37 [11:02<07:00, 28.06s/it]Fetching 37 files:  62%|██████▏   | 23/37 [11:07<04:58, 21.34s/it]Fetching 37 files:  65%|██████▍   | 24/37 [11:09<03:22, 15.61s/it]Fetching 37 files:  68%|██████▊   | 25/37 [11:32<03:32, 17.67s/it]Fetching 37 files:  70%|███████   | 26/37 [11:57<03:38, 19.85s/it]Fetching 37 files:  73%|███████▎  | 27/37 [11:57<02:20, 14.06s/it]Fetching 37 files:  76%|███████▌  | 28/37 [12:01<01:39, 11.07s/it]Fetching 37 files:  78%|███████▊  | 29/37 [12:24<01:57, 14.69s/it]Fetching 37 files:  81%|████████  | 30/37 [12:25<01:12, 10.39s/it]Fetching 37 files:  84%|████████▍ | 31/37 [12:32<00:56,  9.40s/it]Fetching 37 files:  86%|████████▋ | 32/37 [13:56<02:39, 31.81s/it]Fetching 37 files:  89%|████████▉ | 33/37 [14:56<02:40, 40.19s/it]Fetching 37 files:  92%|█████████▏| 34/37 [15:04<01:31, 30.63s/it]Fetching 37 files:  95%|█████████▍| 35/37 [15:05<00:43, 21.67s/it]Fetching 37 files:  97%|█████████▋| 36/37 [15:23<00:20, 20.53s/it]Fetching 37 files: 100%|██████████| 37/37 [15:25<00:00, 14.96s/it]Fetching 37 files: 100%|██████████| 37/37 [15:25<00:00, 25.00s/it]
+168G	/workspace/corte
+nenhum kv_b_proj quantizado; nada a fazer
+=== 27. o ganho no modelo inteiro · 2026-09-09T04:20:27Z
+=== maquina
+NVIDIA RTX PRO 6000 Blackwell Workstation Edition, 97887 MiB
+NVIDIA RTX PRO 6000 Blackwell Workstation Edition, 97887 MiB
+NVIDIA RTX PRO 6000 Blackwell Workstation Edition, 97887 MiB
+NVIDIA RTX PRO 6000 Blackwell Workstation Edition, 97887 MiB
+Model name:                              AMD EPYC 9654 96-Core Processor
+
+=== (a) caber a 1M · cache 1048576
+
+--- TP4 dcp 1
+carga: 76 s, dispositivos [1, 2, 3, 0]
+vram por placa (GiB): ['57.5', '57.4', '57.4', '57.4']
+prompt: 34 tokens
+decode: 4 tokens (após 4 de aquecimento) em 0.07 s = 59.45 tok/s
+
+--- TP4 dcp 2
+carga: 77 s, dispositivos [1, 2, 3, 0]
+vram por placa (GiB): ['52.1', '52.0', '52.0', '52.0']
+prompt: 34 tokens
+decode: 4 tokens (após 4 de aquecimento) em 0.07 s = 56.45 tok/s
+
+--- TP4 dcp 4
+carga: 77 s, dispositivos [1, 2, 3, 0]
+vram por placa (GiB): ['49.6', '49.5', '49.5', '49.5']
+prompt: 34 tokens
+decode: 4 tokens (após 4 de aquecimento) em 0.07 s = 57.73 tok/s
+
+--- autosplit (sem TP)
+carga: 69 s, dispositivos [0, 1, 2, 3]
+vram por placa (GiB): ['91.0', '82.3', '0.5', '0.5']
+prompt: 34 tokens
+decode: 4 tokens (após 4 de aquecimento) em 0.07 s = 53.81 tok/s
+
+=== (b) velocidade a 100000 tokens · cache 106496 · 04:27:35
+
+--- regua: TP4 dcp 1 · 04:27:35
+GPU assert: invalid configuration argument /workspace/exllamav3-tp-mla/exllamav3/exllamav3_ext/hc_mix.cu 621
+GPU assert: invalid configuration argument /workspace/exllamav3-tp-mla/exllamav3/exllamav3_ext/hc_mix.cu 621
+GPU assert: invalid configuration argument /workspace/exllamav3-tp-mla/exllamav3/exllamav3_ext/hc_mix.cu 621
+GPU assert: invalid configuration argument /workspace/exllamav3-tp-mla/exllamav3/exllamav3_ext/hc_mix.cu 621
+=== FALHOU · linha 224
+=== publicando em Olt1z/quantizacao-bl4ck0ut/saidas/tp-mla/20260909T035913Z · 2026-09-09T04:29:00Z
+
+--- TP4 dcp 2 · 04:29:03
+Traceback (most recent call last):
+FileNotFoundError: [Errno 2] No such file or directory: '/workspace/27-regua.pt'
+=== FALHOU · linha 226
+=== publicando em Olt1z/quantizacao-bl4ck0ut/saidas/tp-mla/20260909T035913Z · 2026-09-09T04:29:10Z
+No files have been modified since last commit. Skipping to prevent empty commit.
+No files have been modified since last commit. Skipping to prevent empty commit.
+
+--- autosplit · 04:29:12
+Traceback (most recent call last):
+FileNotFoundError: [Errno 2] No such file or directory: '/workspace/27-regua.pt'
+=== FALHOU · linha 228
+=== publicando em Olt1z/quantizacao-bl4ck0ut/saidas/tp-mla/20260909T035913Z · 2026-09-09T04:29:20Z
+No files have been modified since last commit. Skipping to prevent empty commit.
+No files have been modified since last commit. Skipping to prevent empty commit.
+=== FIM 27 · 04:29:22
+=== publicando em Olt1z/quantizacao-bl4ck0ut/saidas/tp-mla/20260909T035913Z · 2026-09-09T04:29:22Z
+No files have been modified since last commit. Skipping to prevent empty commit.
+No files have been modified since last commit. Skipping to prevent empty commit.
+=== FIM · 2026-09-09T04:29:24Z

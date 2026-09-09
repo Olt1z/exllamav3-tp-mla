@@ -1,0 +1,49 @@
+=== maquina
+NVIDIA RTX PRO 6000 Blackwell Workstation Edition, 97887 MiB
+NVIDIA RTX PRO 6000 Blackwell Workstation Edition, 97887 MiB
+NVIDIA RTX PRO 6000 Blackwell Workstation Edition, 97887 MiB
+NVIDIA RTX PRO 6000 Blackwell Workstation Edition, 97887 MiB
+Model name:                              AMD EPYC 9654 96-Core Processor
+
+=== (a) caber a 1M · cache 1048576
+
+--- TP4 dcp 1
+carga: 76 s, dispositivos [1, 2, 3, 0]
+vram por placa (GiB): ['57.5', '57.4', '57.4', '57.4']
+prompt: 34 tokens
+decode: 4 tokens (após 4 de aquecimento) em 0.07 s = 59.45 tok/s
+
+--- TP4 dcp 2
+carga: 77 s, dispositivos [1, 2, 3, 0]
+vram por placa (GiB): ['52.1', '52.0', '52.0', '52.0']
+prompt: 34 tokens
+decode: 4 tokens (após 4 de aquecimento) em 0.07 s = 56.45 tok/s
+
+--- TP4 dcp 4
+carga: 77 s, dispositivos [1, 2, 3, 0]
+vram por placa (GiB): ['49.6', '49.5', '49.5', '49.5']
+prompt: 34 tokens
+decode: 4 tokens (após 4 de aquecimento) em 0.07 s = 57.73 tok/s
+
+--- autosplit (sem TP)
+carga: 69 s, dispositivos [0, 1, 2, 3]
+vram por placa (GiB): ['91.0', '82.3', '0.5', '0.5']
+prompt: 34 tokens
+decode: 4 tokens (após 4 de aquecimento) em 0.07 s = 53.81 tok/s
+
+=== (b) velocidade a 100000 tokens · cache 106496 · 04:27:35
+
+--- regua: TP4 dcp 1 · 04:27:35
+GPU assert: invalid configuration argument /workspace/exllamav3-tp-mla/exllamav3/exllamav3_ext/hc_mix.cu 621
+GPU assert: invalid configuration argument /workspace/exllamav3-tp-mla/exllamav3/exllamav3_ext/hc_mix.cu 621
+GPU assert: invalid configuration argument /workspace/exllamav3-tp-mla/exllamav3/exllamav3_ext/hc_mix.cu 621
+GPU assert: invalid configuration argument /workspace/exllamav3-tp-mla/exllamav3/exllamav3_ext/hc_mix.cu 621
+
+--- TP4 dcp 2 · 04:29:03
+Traceback (most recent call last):
+FileNotFoundError: [Errno 2] No such file or directory: '/workspace/27-regua.pt'
+
+--- autosplit · 04:29:12
+Traceback (most recent call last):
+FileNotFoundError: [Errno 2] No such file or directory: '/workspace/27-regua.pt'
+=== FIM 27 · 04:29:22
