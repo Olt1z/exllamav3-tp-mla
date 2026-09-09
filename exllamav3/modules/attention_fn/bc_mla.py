@@ -403,6 +403,13 @@ class BCMLA:
         # kpool: selection picks topk/P pools, expansion emits raw indices plus up to P-1
         # tail tokens per query row
         P = self.index_kpool
+        # Os planos do indexador (chaves, gate e pools) sao REPLICADOS sob context parallel, com
+        # paginas de PAGE_SIZE x cp_world tokens (ver `tokens_por_pagina` em cache/mla.py); so o
+        # latente tem paginas locais de PAGE_SIZE. Com 256 aqui, a posicao 4096+ lia a block
+        # table fora da tabela e o primeiro decode depois de um prompt > 4096 morria com
+        # "illegal memory access" (2x RTX PRO 6000, dcp 2, 09/09/2026). O eager ja usava
+        # `plane_cache.shape[1]`.
+        plane_page = PAGE_SIZE * self.cp_world
         if P:
             sel = self.index_topk // P
             kp = -(-(sel * P + (P - 1 if m.index_kpool_tail else 0)) // 32) * 32
@@ -434,7 +441,7 @@ class BCMLA:
                 | {n: "constexpr" for n in ("page_size", "D", "DST_D", "DST_OFF",
                                             "CP_WORLD", "CP_RANK")}
             k_plane_append = _compile_kernel(dev, _mla_plane_update_kernel, plane_sig,
-                dict(page_size = PAGE_SIZE, D = Di,
+                dict(page_size = plane_page, D = Di,
                      DST_D = 2 * Di if P else 0, DST_OFF = 0,
                      CP_WORLD = 1, CP_RANK = 0), 2, 2)
 
@@ -445,14 +452,14 @@ class BCMLA:
             gidx = sbuf("bcm_gidx", R_pad, Di)
             gidx.zero_()
             k_gate_append = _compile_kernel(dev, _mla_plane_update_kernel, plane_sig,
-                dict(page_size = PAGE_SIZE, D = Di, DST_D = 2 * Di, DST_OFF = Di,
+                dict(page_size = plane_page, D = Di, DST_D = 2 * Di, DST_OFF = Di,
                      CP_WORLD = 1, CP_RANK = 0), 2, 2)
             k_pool_update = _compile_kernel(dev, _dsa_pool_update_kernel,
                 {"plane": "*fp16", "pool_plane": "*fp16", "ape": "*fp32",
                  "block_table": "*i32", "cache_seqlens": "*i32",
                  "num_pages_per_row": "i32", "append_len": "i32"}
                 | {n: "constexpr" for n in ("page_size", "P", "D", "MAXPOOLS")},
-                dict(page_size = PAGE_SIZE, P = P, D = Di, MAXPOOLS = q_len // P + 1), 2, 1)
+                dict(page_size = plane_page, P = P, D = Di, MAXPOOLS = q_len // P + 1), 2, 1)
 
         indices = dsa_arr = ws_ml = ws_acc = None
         k_dsa_split = k_dsa_combine = None
@@ -493,7 +500,7 @@ class BCMLA:
                     H_i = Hi, H_pad = max(16, 1 << (Hi - 1).bit_length()), D_i = Di,
                     S_stride = s_max, compress_rate = P if P else 1,
                     scale = Di ** -0.5 * Hi ** -0.5, BLOCK_N = 128,
-                    SEQ = q_len, MULTIROW = mr, EPP = PAGE_SIZE // P if P else PAGE_SIZE,
+                    SEQ = q_len, MULTIROW = mr, EPP = plane_page // P if P else plane_page,
                     DEBUG_BOUNDS = 0, DEBUG_PAGES = 0,
                 )
                 k_fewq = _compile_kernel(dev, _dsa_indexer_fewq_kernel, sig, consts, 8, 2)
