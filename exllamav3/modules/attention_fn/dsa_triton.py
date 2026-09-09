@@ -989,8 +989,11 @@ def dsa_attn(
         dbg_pages = -(-pool_rows // max(page_size, 1))
     else:
         dbg_pages = 0
-    if devolver_lse:
-        # O lse sai das parciais; sem split elas nao existem. Mesma escolha do caminho denso.
+    if devolver_lse and R <= 8:
+        # Poucas consultas (decode): o lse sai das parciais do kernel dividido. No prefill (R > 8)
+        # o monolitico emite o lse sozinho (EMIT_LSE) e nao aloca workspace: forcar o dividido
+        # ali pedia ~1 GB de ws_acc por chunk de 4096 linhas, guardado numa cache por forma que
+        # nunca libera, e a 1M com 1,4 GB de folga isso estourou (OOM em 09/09/2026, 2x PRO 6000).
         n_splits = max(2, n_splits)
     if nc_block:
         n_splits = 1
