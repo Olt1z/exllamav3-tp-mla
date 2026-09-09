@@ -180,6 +180,10 @@ class MLAttention(Module):
         self.tp_cache_lookup = {}
         self.has_split_cache = False
         self.tp_reduce = False
+        # Context parallel: quantas placas repartem a SEQUENCIA com esta, e qual e esta. Sem CP
+        # e (1, 0) e nenhum caminho abaixo muda.
+        self.cp_world = 1
+        self.cp_rank = 0
         self.dispatch_cache = {}
 
         # kv_b_proj, stored ONLY in the flattened (kv_lora_rank, H * dim) form: the prefill
@@ -798,6 +802,17 @@ class MLAttention(Module):
         R = bsz * seqlen
 
         from .attention_fn.mla_triton import _dbg_sync
+        from ..cache.cp_layout import comprimentos_locais
+
+        if self.cp_world > 1 and seqlen != 1:
+            # Dois motivos, e os dois sao trabalho mapeado, nao esquecimento. Prefill sob CP e
+            # um mecanismo proprio (all-gather do latente, etapa 9). E no decode com q_len > 1 a
+            # mascara causal do kernel denso e `total - q_len + row`, que sob a fatia intercalada
+            # subtrai tokens que NAO sao deste rank: o limite precisa da posicao global (5d).
+            # Passar q_len > 1 aqui daria saida errada em silencio.
+            raise NotImplementedError(
+                f"context parallel so atende q_len = 1 por enquanto (pedido: {seqlen}); prefill "
+                f"e a etapa 9 e o rascunho a 5d do plano de CP")
 
         # Sparse DSA applies once the visible context exceeds the selection budget; below that,
         # top-k selection is all-inclusive and the dense path is bit-equivalent
@@ -907,14 +922,25 @@ class MLAttention(Module):
 
         kernel = mla_attn_triton_decode if seqlen <= MAX_DECODE_QLEN else mla_attn_triton_prefill
         extra = {}
+        pre_appended = seqlen
+        if self.cp_world > 1:
+            # O rank atende so a sua fatia intercalada: comprimento LOCAL, ja contando o chunk que
+            # o append acabou de gravar (o append recebe o global e mascara por posicao). Com
+            # q_len = 1, `q_abs = total - 1` cobre todo token local, e a chave rope ja carrega a
+            # posicao global -- por isso o kernel nao precisa saber que faltam tokens no meio.
+            cache_seqlens = comprimentos_locais(cache_seqlens + seqlen, self.cp_world, self.cp_rank)
+            pre_appended = 0
+            extra["devolver_lse"] = True
         o_lat = kernel(
             q_lat, q_pe_hm, ckv_cache, kpe_cache, block_table, cache_seqlens,
             bsz = bsz, q_len = seqlen,
             causal = causal, softmax_scale = self.sm_scale,
-            pre_appended_len = seqlen,
+            pre_appended_len = pre_appended,
             qc = qc,
             **extra,
         )
+        if self.cp_world > 1:
+            o_lat = self._cp_combinar(*o_lat, params)
 
         from .attention_fn.mla_triton import _debug_sync
         if _debug_sync:
@@ -929,8 +955,23 @@ class MLAttention(Module):
         # Unfold W_UV per head from the flat layout; the kernel emits token-major output, so it
         # feeds o_proj without a permute
         o = mla_unfold(o_lat, self.w_uv_flat, self.v_head_dim)
-        o = o.reshape(bsz, seqlen, H * self.v_head_dim)
+        o = o.reshape(bsz, seqlen, -1)     # H/cp_world cabecas depois do combine
         return self.o_proj.forward(o, params)
+
+
+    def _cp_combinar(self, o_lat, lse, params):
+        """Combina a atencao local entre os ranks do grupo de CP (etapa 5c do plano).
+
+        Entra a saida local JA normalizada, head-major `(H, R, D_c)`, e o lse local `(R, H)`.
+        Sai `(H/cp_world, R, D_c)` em fp16: o reduce-scatter do combine ja entrega a sub-faixa
+        de cabecas deste rank, que e exatamente a que w_uv_flat e o_proj receberam no tp_import."""
+        from .attention_fn.cp import cp_combinar
+        H, R, D_c = o_lat.shape
+        o, _ = cp_combinar(
+            params["backend"], o_lat, lse, R, H, D_c, self.cp_rank, self.cp_world,
+            stride_row = D_c, stride_head = R * D_c,
+        )
+        return o.to(torch.half)
 
 
     def _attend_sparse(self, q_lat, q_pe, bsz, seqlen, params, ckv_cache, kpe_cache,
@@ -954,15 +995,25 @@ class MLAttention(Module):
         # wise be the one sparse-path transient that grows with context (pages)
         bt = block_table if bsz == 1 or seqlen == 1 \
             else block_table.repeat_interleave(seqlen, dim = 0)
+        if self.cp_world > 1:
+            # O top-k e GLOBAL (o plano do indexador e replicado, etapa 6). Este rank atende so
+            # aos selecionados que POSSUI, na posicao local; os outros viram -1, que o kernel ja
+            # mascara por elemento (`in_range = idx >= 0`) -- k_len nao muda e nada e compactado.
+            w, r = self.cp_world, self.cp_rank
+            indices = torch.where((indices >= 0) & (indices % w == r), indices // w,
+                                  torch.full_like(indices, -1))
         o_lat = dsa_attn(
             q_lat, ckv_cache, kpe_cache, bt,
             indices = indices, k_len = indices.shape[1],
             scale = self.sm_scale, page_size = ckv_cache.shape[1],
             q_pe = q_pe.reshape(R, H, D_r), out_latent = True,
             qc = qc,   # packed latent pages read online (scales, bits)
+            devolver_lse = self.cp_world > 1,
         )
+        if self.cp_world > 1:
+            o_lat = self._cp_combinar(*o_lat, params)
         o = mla_unfold(o_lat, self.w_uv_flat, self.v_head_dim)
-        o = o.reshape(bsz, seqlen, H * self.v_head_dim)
+        o = o.reshape(bsz, seqlen, -1)     # H/cp_world cabecas depois do combine
         return self.o_proj.forward(o, params)
 
 
@@ -1289,6 +1340,17 @@ class MLAttention(Module):
         first, last, unit = plan[kw["key"]]
         assert unit == "heads"
         H = last - first
+        # Context parallel: as placas de um grupo recebem a MESMA faixa do plano (5b) e repartem
+        # a sequencia. Os dois lados da atencao sao fatiados por eixos DIFERENTES: o lado Q
+        # (q_proj, q_b_proj, w_uk) fica com a faixa do GRUPO, porque cada rank calcula todas as
+        # cabecas do grupo sobre a sua fatia; o lado O (w_uv, o_proj) fica com a sub-faixa do
+        # RANK, porque o reduce-scatter do combine ja entrega so H/dcp cabecas.
+        backend = local_context["backend"]
+        dcp, cp_rank = backend.cp_world, backend.cp_rank
+        assert H % dcp == 0, \
+            f"{kw['key']}: {H} cabecas do grupo nao dividem por dcp {dcp}; ajuste gpu_split ou dcp"
+        first_o = first + cp_rank * (H // dcp)
+        last_o = first_o + H // dcp
         # A "full" indexer layer publishes the top-k selection that later "shared" layers on the
         # same rank consume; a rank with no heads skips the indexer, so it cannot host one
         assert H or kw["indexer_mode"] != "full", \
@@ -1311,7 +1373,7 @@ class MLAttention(Module):
                 if split and exported.get(name) else None
 
         q_split = (True, first * D_q, last * D_q) if H else None
-        o_split = (False, first * D_v, last * D_v) if H else None
+        o_split = (False, first_o * D_v, last_o * D_v) if H else None
 
         module = MLAttention(
             config = None,
@@ -1330,13 +1392,14 @@ class MLAttention(Module):
             idx_weights = _import("idx_weights") if H else None,
         )
         module.device = device
+        module.cp_world, module.cp_rank = dcp, cp_rank
 
         if H:
             module.w_uk_flat = consumer.recv(
                 exported["w_uk_flat"], cuda = True, slice_dim = 1, first = first * D_n, last = last * D_n
             ).contiguous()
             module.w_uv_flat = consumer.recv(
-                exported["w_uv_flat"], cuda = True, slice_dim = 1, first = first * D_v, last = last * D_v
+                exported["w_uv_flat"], cuda = True, slice_dim = 1, first = first_o * D_v, last = last_o * D_v
             ).contiguous()
             module.idx_kpool_ape = consumer.recv(exported["idx_kpool_ape"], cuda = True)
             module.idx_kpool_gate = consumer.recv(exported["idx_kpool_gate"], cuda = True)
@@ -1344,15 +1407,15 @@ class MLAttention(Module):
             cache_layers = exported["cache_layers"]
             if len(cache_layers):
                 module.has_split_cache = True
-                # O cp_rank e a posicao DESTA placa dentro do grupo de CP, e so aqui isso e
-                # conhecido. Sem ele todo rank do grupo guardaria a mesma fatia da sequencia e o
-                # modelo carregaria normalmente, produzindo saida errada em silencio.
-                rank = local_context.get("rank", 0)
+                # O cp_rank e a posicao DESTA placa dentro do grupo de CP. Sem ele todo rank do
+                # grupo guardaria a mesma fatia da sequencia e o modelo carregaria normalmente,
+                # produzindo saida errada em silencio. O grau vem do backend e o do cache vem do
+                # plano (tp_export): se divergissem, o cache repartiria por um numero e a
+                # atencao combinaria por outro.
                 for cl in cache_layers:
-                    dcp = int(cl["args"].get("cp_world", 1) or 1)
-                    cli = cl["cls"](None, module,
-                                    cp_rank = (rank % dcp) if dcp > 1 else 0,
-                                    **cl["args"])
+                    assert int(cl["args"].get("cp_world", 1) or 1) == dcp, \
+                        f"{kw['key']}: cache exportado com cp_world {cl['args'].get('cp_world')}, backend com {dcp}"
+                    cli = cl["cls"](None, module, cp_rank = cp_rank, **cl["args"])
                     module.cache_layers.append(cli)
                     module.tp_cache_lookup[cl["args"]["cache_id"]] = cli
 

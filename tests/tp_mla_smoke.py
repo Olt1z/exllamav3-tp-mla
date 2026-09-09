@@ -73,6 +73,12 @@ def main():
     p.add_argument("--compare", help = "arquivo de --save para comparar (teacher forcing)")
     p.add_argument("--max-kl", type = float, help = "falha se a KL média passar deste valor")
     p.add_argument("--tp-moe-ts", action = "store_true", help = "tensor split nos experts em vez de expert parallel")
+    p.add_argument("--backend", default = "native", help = "backend do TP: native ou nccl (só o nccl tem subgrupo, exigido por 1 < dcp < tp)")
+    p.add_argument("--dcp", type = int, default = 1,
+                   help = "grau de context parallel: quantas placas repartem a SEQUÊNCIA em vez das cabeças; divide o número de placas")
+    p.add_argument("--prefill-1", action = "store_true",
+                   help = "prefill token a token pelo caminho de decode; ligado por padrão sob --dcp > 1, porque o prefill "
+                          "sob CP é a etapa 9 e ainda não existe. Use também na régua, para comparar o MESMO caminho")
     p.add_argument("--cache-bits", type = int, default = 0, help = "cache quantizado (2 a 8 bits); na MLA é a largura do latente")
     p.add_argument("--tp-dev-limits", default = None,
                    help = "paralelismo máximo por classe, ex.: 'attn=1' (só experts/MLP divididos) ou 'moe=1,mlp=1,linear=1' (só a atenção dividida)")
@@ -105,9 +111,14 @@ def main():
     except Exception as e:
         print(f"cache: (sem tamanho: {e})")
     t0 = time.time()
+    tp_options = {}
+    if args.tp_moe_ts:
+        tp_options["moe_tensor_split"] = True
+    if args.dcp > 1:
+        tp_options["dcp"] = args.dcp
     model.load(
-        tensor_p = args.tp, progressbar = True, verbose = args.tp,
-        tp_options = {"moe_tensor_split": True} if args.tp_moe_ts else None,
+        tensor_p = args.tp, tp_backend = args.backend, progressbar = True, verbose = args.tp,
+        tp_options = tp_options or None,
         tp_dev_limits = tp_dev_limits,
     )
     print(f"carga: {time.time() - t0:.0f} s, dispositivos {model.active_devices}")
@@ -136,9 +147,17 @@ def main():
     ids = tokenizer.encode(model.default_chat_prompt(pergunta), encode_special_tokens = True)
     assert ids.shape[-1] + n_tokens <= args.cache, "prompt + tokens não cabem no --cache"
     print(f"prompt: {ids.shape[-1]} tokens")
-    params = {"attn_mode": "flash_attn", "cache": cache, "past_len": 0, "batch_shape": (1, args.cache)}
-    model.prefill(input_ids = ids[:, :-1], params = params)
-    recurrent_states = params.get("recurrent_states")
+    recurrent_states = None
+    if args.prefill_1 or args.dcp > 1:
+        for j in range(ids.shape[-1] - 1):
+            params = {"attn_mode": "flash_attn", "cache": cache, "past_len": j,
+                      "batch_shape": (1, args.cache), "recurrent_states": recurrent_states}
+            model.forward(input_ids = ids[:, j:j + 1], params = params)
+            recurrent_states = params.get("recurrent_states")
+    else:
+        params = {"attn_mode": "flash_attn", "cache": cache, "past_len": 0, "batch_shape": (1, args.cache)}
+        model.prefill(input_ids = ids[:, :-1], params = params)
+        recurrent_states = params.get("recurrent_states")
 
     logits_all = []
     tokens = []

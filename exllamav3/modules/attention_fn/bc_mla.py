@@ -639,6 +639,9 @@ def build_bc_mla(module, layer):
     dev = torch.device(m.device)
     if not (
         bc_attn_enable and
+        # Sob context parallel o grafo recusa: e um orquestrador proprio, e o combine entre
+        # ranks so existe no caminho de despacho (etapa 8 do plano de CP)
+        m.cp_world == 1 and
         # NoPE models (D_r 0) compile the rope stages out; otherwise a rope instance with a
         # supported style is required
         (D_r == 0 or (

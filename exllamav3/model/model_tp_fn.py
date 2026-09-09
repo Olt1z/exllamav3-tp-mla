@@ -126,13 +126,16 @@ def mp_cpu_reduce(local_context: dict):
     backend.run_cpu_reduce_jobs()
 
 
-def mp_set_plan(local_context: dict, plan: dict, active_devices: list):
+def mp_set_plan(local_context: dict, plan: dict, active_devices: list, dcp: int = 1):
     """
     Used by TP loader, send (potentially large) plan dict once to avoid pickling with every message while loading
     the model
     """
     local_context["plan"] = plan
     local_context["active_devices"] = active_devices
+    # Context parallel: o grau chega junto com o plano, ANTES do primeiro tp_import, porque o
+    # subgrupo do NCCL e coletivo e o tp_import da atencao le cp_world/cp_rank do backend.
+    local_context["backend"].configurar_cp(dcp)
 
 
 def mp_set_consumer(local_context: dict, producer_exp: SMProducer | dict):

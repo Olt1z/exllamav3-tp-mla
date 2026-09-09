@@ -543,16 +543,6 @@ class Model_TPMixin:
         # sempre; dcp = tp replica os pesos de atencao, entao o ponto bom fica no meio -- e por
         # isso ele e um botao do plano, nunca constante.
         dcp = int(tp_options.get("dcp", 1) or 1)
-        # TRAVA: o plano ja sabe repartir por grupo e o cache ja sabe repartir a sequencia, mas a
-        # ATENCAO ainda nao combina entre os ranks. Carregar com dcp > 1 antes disso produziria
-        # saida errada em SILENCIO -- cada rank atenderia so a sua fatia e ninguem somaria. Falhar
-        # aqui e a unica opcao honesta ate a fiacao do forward fechar.
-        if dcp > 1:
-            raise NotImplementedError(
-                "dcp > 1 ainda nao esta ligado no forward da atencao: o plano e o cache ja "
-                "repartem, mas o combine entre ranks nao acontece, e o resultado seria errado "
-                "sem aviso. Ver plans/2026-09-08-context-parallel-na-mla.md, etapa 5."
-            )
         allocator = TPAllocator(
             components,
             num_tokens = max_chunk_size,
@@ -564,7 +554,7 @@ class Model_TPMixin:
         if verbose:
             allocator.print_split()
         self.plan = allocator.compile_tp_plan()
-        self.tp_worker_dispatch_wait_multi(self.active_devices, mp_set_plan, (self.plan, self.active_devices))
+        self.tp_worker_dispatch_wait_multi(self.active_devices, mp_set_plan, (self.plan, self.active_devices, dcp))
 
         # Distribution pipeline
         producer = SMProducer()

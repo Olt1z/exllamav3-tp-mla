@@ -37,7 +37,7 @@ publicar() {
 import os
 from huggingface_hub import HfApi
 api = HfApi(token=os.environ["HF_TOKEN"])
-for f in ("bancada.log", "resumo.txt", "build.log", "10.txt", "10-cobertura.txt", "10-convert.txt", "11.txt", "11-solo.txt", "11-p0.txt", "11-p1.txt", "11-duas.txt", "12.txt", "13.txt", "14.txt", "15.txt", "16.txt", "18.txt", "19.txt", "20.txt", "banda.txt"):
+for f in ("bancada.log", "resumo.txt", "build.log", "10.txt", "10-cobertura.txt", "10-convert.txt", "11.txt", "11-solo.txt", "11-p0.txt", "11-p1.txt", "11-duas.txt", "12.txt", "13.txt", "14.txt", "15.txt", "16.txt", "18.txt", "19.txt", "20.txt", "24.txt", "banda.txt"):
     p = f"/workspace/{f}"
     if os.path.exists(p):
         api.upload_file(path_or_fileobj=p, path_in_repo=f"saidas/tp-mla/$PROVA_ID/{f}", repo_id="$REPO_SAIDAS")
@@ -193,6 +193,39 @@ PY
 du -sh /workspace/corte
 # Artefato da esteira antiga com kv_b_proj em treliça: repara antes de carregar
 python3 tests/bancada/reparar_kv_b_proj.py /workspace/corte
+
+# ---------------------------------------------------------------------------------------------
+# 24. O forward sob context parallel (etapa 5c), no modelo inteiro: e a primeira vez que o plano
+# por grupo, a fatia do cache, os coletivos e o combine rodam JUNTOS. A regua e o proprio TP com
+# dcp 1 -- mesma maquina, mesmo backend, mesmo prefill token a token -- entao a unica coisa que
+# muda entre a regua e a prova e o CP. Duas rodadas: contexto curto (caminho denso) e acima de
+# index_topk (caminho esparso, que e o de producao). SO_24=1 roda so isto; precisa de 2+ placas.
+# Um comparador: dcp 2 no NCCL (subgrupo, o ponto de operacao bom) e dcp = placas nos DOIS
+# backends, que e o unico grau que o anel nativo aceita.
+if [ -n "${SO_24:-}" ]; then
+  marco "24. forward sob context parallel"
+  N=$(nvidia-smi --list-gpus | wc -l)
+  FALHOU_24=0
+  SMOKE="timeout 1800 python3 tests/tp_mla_smoke.py -m /workspace/corte --tp --prefill-1 --tokens ${TOKENS_24:-32} --cache 8192"
+  for pf in 0 "${PREFILL_ESPARSO:-3000}"; do
+    { echo; echo "=== prefill $pf · regua: TP$N dcp 1 (nccl)"; } | tee -a /workspace/24.txt
+    $SMOKE --backend nccl --prefill-tokens "$pf" --save "/workspace/24-regua-$pf.pt" 2>&1 \
+      | grep -E "prompt:|carga:|decode:|texto:|KL|FALHOU|OK$|Error|Traceback|NotImplemented|assert" | tee -a /workspace/24.txt \
+      || FALHOU_24=1
+    for cfg in "2 nccl" "$N nccl" "$N native"; do
+      dcp=${cfg% *}; be=${cfg#* }
+      [ "$dcp" -eq "$N" ] && [ "$be" = nccl ] && [ "$N" -eq 2 ] && continue   # ja rodou como "2 nccl"
+      { echo; echo "=== prefill $pf · TP$N dcp $dcp ($be)"; } | tee -a /workspace/24.txt
+      $SMOKE --backend "$be" --dcp "$dcp" --prefill-tokens "$pf" --compare "/workspace/24-regua-$pf.pt" --max-kl "${MAX_KL_24:-0.01}" 2>&1 \
+        | grep -E "prompt:|carga:|decode:|texto:|KL|FALHOU|OK$|Error|Traceback|NotImplemented|assert" | tee -a /workspace/24.txt \
+        || FALHOU_24=1
+    done
+  done
+  echo "=== veredito: $([ "$FALHOU_24" = 0 ] && echo CP_OK || echo DIVERGIU)" | tee -a /workspace/24.txt
+  publicar
+  marco "FIM"
+  exit 0
+fi
 
 # ---------------------------------------------------------------------------------------------
 # 16. As tres saidas do overhead do decode, na mesma maquina:
