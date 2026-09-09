@@ -26,6 +26,9 @@ Os valores são hex de 16 dígitos, gerados na hora: nada memorizável, nada adi
 """
 import argparse, json, random, sys, time, urllib.request, uuid
 
+# O Cloudflare na frente do hub barra a assinatura "Python-urllib" (erro 1010, 09/09/2026)
+UA = "bl4ck0ut-bancada/1.0"
+
 FRACOES_PADRAO = (0.05, 0.35, 0.65, 0.95)
 NOMES = ("ambar", "bruma", "cobalto", "dalia")
 CIDADES = ["Ouro Preto", "Belém", "Curitiba", "Recife", "Manaus", "Goiânia", "Porto Alegre", "Salvador"]
@@ -48,7 +51,7 @@ def tokens_de(url, chave, texto):
     corpo = json.dumps({"text": texto, "add_bos_token": False}).encode()
     req = urllib.request.Request(
         url.rstrip("/") + "/v1/token/encode", data = corpo,
-        headers = {"Authorization": f"Bearer {chave}", "Content-Type": "application/json"},
+        headers = {"Authorization": f"Bearer {chave}", "User-Agent": UA, "Content-Type": "application/json"},
     )
     try:
         with urllib.request.urlopen(req, timeout = 120) as r:
@@ -129,7 +132,7 @@ def perguntar(url, chave, prompt, max_tokens):
     }).encode()
     req = urllib.request.Request(
         url.rstrip("/") + "/v1/chat/completions", data = corpo,
-        headers = {"Authorization": f"Bearer {chave}", "Content-Type": "application/json"},
+        headers = {"Authorization": f"Bearer {chave}", "User-Agent": UA, "Content-Type": "application/json"},
     )
     t0 = time.time()
     t_primeiro, texto, uso, motivo = None, [], None, None
