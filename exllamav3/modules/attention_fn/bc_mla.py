@@ -708,7 +708,10 @@ def build_bc_mla(module, layer):
             m.q_a_layernorm.weight is not None
         )) and
         _proj_ok(m.kv_a_proj_with_mqa, in_features = m.hidden_size) and
-        _proj_ok(m.o_proj, in_features = H * D_v, out_features = m.hidden_size) and
+        # Sob context parallel o o_proj e a sub-faixa do rank: H / dcp cabecas de entrada. Com
+        # H * D_v aqui o grafo recusava em SILENCIO e o CP caia no despacho (prova 26: 63 tok/s
+        # com "grafo" contra 162 da regua). EXL3_BC_ATTN_TRACE=1 mostra a recusa.
+        _proj_ok(m.o_proj, in_features = (H // m.cp_world) * D_v, out_features = m.hidden_size) and
         m.kv_a_layernorm.weight is not None and
         m.w_uk_flat is not None and
         # DSA indexer layers (GLM-5.2): full layers need wq_b (EXL3 or fp16), the fp16 key/
