@@ -58,18 +58,33 @@ def tokens_de(url, chave, texto):
         return None
 
 
-def montar(url, chave, alvo, fracoes):
-    """Prompt do tamanho pedido, com os marcadores nas frações. Devolve (prompt, esperado, posições)."""
+def montar(url, chave, alvo, fracoes, margem = 0.04):
+    """Prompt do tamanho pedido, com os marcadores nas frações. Devolve (prompt, esperado, posições).
+
+    O alvo é um TETO, não uma mira: passar dele derruba o pedido inteiro com HTTP 400
+    ("Prompt length N exceeds"), e num teste de 1M isso custa o prefill inteiro para
+    descobrir. Medido em 08/09/2026: a calibração linhas->tokens de uma amostra errou ~5 %
+    para cima e estourou o contexto. Daí as duas defesas: mirar `margem` abaixo do alvo, e
+    MEDIR o prompt pronto, encolhendo até caber de fato.
+    """
     esperado = {nome: f"{random.getrandbits(64):016x}" for nome in NOMES}
-    # calibra linhas->tokens num bloco pequeno; o erro relativo de uma amostra de 200 linhas
-    # é bem menor que a folga que o teste precisa
     amostra = encher(200, 1)
     por_linha = (tokens_de(url, chave, amostra) or len(amostra) // 4) / 200
-    linhas_totais = max(len(NOMES) * 4, int(alvo / por_linha))
+    linhas_totais = max(len(NOMES) * 4, int(alvo * (1 - margem) / por_linha))
 
+    for _ in range(4):
+        prompt, posicoes = _com_marcadores(linhas_totais, esperado, fracoes)
+        real = tokens_de(url, chave, prompt)
+        if real is None or real <= alvo:
+            return prompt, esperado, posicoes, real
+        # encolhe pela razão medida, com um empurrão extra para não repetir a tentativa
+        linhas_totais = int(linhas_totais * alvo * (1 - margem) / real)
+    return prompt, esperado, posicoes, real
+
+
+def _com_marcadores(linhas_totais, esperado, fracoes):
     corpo, posicoes = [], {}
-    linhas = encher(linhas_totais, 99)
-    todas = linhas.split("\n")
+    todas = encher(linhas_totais, 99).split("\n")
     cortes = {int(len(todas) * f): nome for f, nome in zip(fracoes, NOMES)}
     for i, linha in enumerate(todas):
         if i in cortes:
@@ -86,7 +101,7 @@ def montar(url, chave, alvo, fracoes):
     # o nonce vai na PRIMEIRA linha: cache de prefixo casa do token 0 para frente, então
     # qualquer coisa depois dele não invalidaria nada
     prompt = f"Consulta independente {uuid.uuid4().hex}. O arquivo abaixo é contexto.\n" + "\n".join(corpo) + pergunta
-    return prompt, esperado, posicoes
+    return prompt, posicoes
 
 
 def avaliar(texto, esperado):
@@ -149,7 +164,9 @@ def main():
 
     resultados, todas_passaram = [], True
     for alvo in [int(t) for t in a.tokens.split(",")]:
-        prompt, esperado, posicoes = montar(a.url, a.chave, alvo, FRACOES_PADRAO)
+        prompt, esperado, posicoes, medido = montar(a.url, a.chave, alvo, FRACOES_PADRAO)
+        if medido is not None:
+            print(f"prompt montado: {medido:,} tokens (teto {alvo:,})")
         texto, uso, motivo, ttft, total = perguntar(a.url, a.chave, prompt, a.max_tokens)
 
         entrada = uso.get("prompt_tokens")
@@ -217,7 +234,8 @@ def autoteste():
     ok("mesmo tipo e valor casa", avaliar(json.dumps(numerico), numerico)[0])
 
     ### `montar` sem servidor: `tokens_de` falha na conexão e cai na estimativa por caracteres.
-    prompt, esp, pos = montar("http://127.0.0.1:1", "x", 4000, FRACOES_PADRAO)
+    prompt, esp, pos, medido = montar("http://127.0.0.1:1", "x", 4000, FRACOES_PADRAO)
+    ok("sem servidor, a medição volta None e não trava", medido is None)
     ok("montar produz os quatro marcadores", len(esp) == 4 and len(pos) == 4, str(pos))
     ok("cada valor aparece uma vez no prompt", all(prompt.count(v) == 1 for v in esp.values()))
     ok("o nonce está na primeira linha", prompt.split("\n")[0].startswith("Consulta independente"))
@@ -226,6 +244,25 @@ def autoteste():
     ok("a pergunta fica no fim", prompt.rstrip().endswith("acima."))
     ok("dois prompts não repetem valores",
        montar("http://127.0.0.1:1", "x", 4000, FRACOES_PADRAO)[1] != esp)
+
+    ### O teto: um prompt maior que o contexto derruba o pedido com HTTP 400 depois de o
+    ### servidor já ter recebido tudo. `montar` mede e encolhe; aqui o tokenizador é falso,
+    ### para exercitar o laço sem servidor.
+    import types
+    real = globals()["tokens_de"]
+    chamadas = []
+    def falso(url, chave, texto):
+        n = len(texto) // 4          # ~4 caracteres por token
+        chamadas.append(n)
+        return n
+    globals()["tokens_de"] = falso
+    try:
+        _, _, _, medido2 = montar("x", "x", 20_000, FRACOES_PADRAO)
+        ok("o prompt medido respeita o teto", medido2 is not None and medido2 <= 20_000,
+           f"{medido2} tokens")
+        ok("a medição do prompt pronto acontece", len(chamadas) >= 2, f"{len(chamadas)} chamadas")
+    finally:
+        globals()["tokens_de"] = real
 
     print("\nautoteste passou." if not falhas else f"\n{len(falhas)} FALHARAM: {falhas}")
     return 1 if falhas else 0
