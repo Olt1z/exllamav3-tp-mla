@@ -270,6 +270,8 @@ if has_triton:
         BLOCK_H: tl.constexpr,
         BLOCK_ROWS: tl.constexpr,
         BLOCK_N: tl.constexpr,
+        CP_WORLD: tl.constexpr = 1,
+        CP_RANK: tl.constexpr = 0,
     ):
         """Flash-decoding phase 1: one program per (batch, head block, kv split). Query positions
         and sibling heads share the row axis so the latent tile is read once per program."""
@@ -307,6 +309,15 @@ if has_triton:
 
         total_k_len = tl.load(cache_seqlens + batch) + pre_appended_len
         q_abs = total_k_len - q_len + row_q
+        if CP_WORLD > 1:
+            # Context parallel: a fatia deste rank sao os tokens globais p com p % CP_WORLD ==
+            # CP_RANK, na posicao local p // CP_WORLD. O comprimento local e quantos desses
+            # existem abaixo de um limite global L: L // CP_WORLD + (L % CP_WORLD > CP_RANK).
+            # A consulta em posicao global P ve os locais com p <= P, ou seja, os primeiros
+            # local(P + 1). A chave rope ja carrega a posicao global, entao o produto q.k sai
+            # certo sem o kernel saber que faltam tokens no meio.
+            total_k_len = total_k_len // CP_WORLD + (total_k_len % CP_WORLD > CP_RANK).to(tl.int32)
+            q_abs = (q_abs + 1) // CP_WORLD + ((q_abs + 1) % CP_WORLD > CP_RANK).to(tl.int32) - 1
 
         n_start = split * split_len
         n_end = tl.minimum(n_start + split_len, total_k_len)
@@ -441,6 +452,7 @@ if has_triton:
         block_table,
         cache_seqlens,
         out,
+        lse,                 # (n_q_heads * n_rows) fp32, so com EMIT_LSE (context parallel)
         num_pages_per_seq,
         q_len,
         n_rows,
@@ -455,6 +467,9 @@ if has_triton:
         CAUSAL: tl.constexpr,
         BLOCK_M: tl.constexpr,
         BLOCK_N: tl.constexpr,
+        CP_WORLD: tl.constexpr = 1,
+        CP_RANK: tl.constexpr = 0,
+        EMIT_LSE: tl.constexpr = 0,
     ):
         """Long-query MLA attention, still absorbed. One program per (q block, batch, head); the
         accumulator is D_c wide rather than a normal head dim, so BLOCK_M has to stay small."""
@@ -481,11 +496,23 @@ if has_triton:
         past = tl.load(cache_seqlens + batch) + pre_appended_len - q_len
         total_k_len = past + q_len
         q_abs = past + offs_m
+        # limite exclusivo da ultima linha do bloco, em posicao global
+        fim_bloco = past + (pid_m + 1) * BLOCK_M
+        if CP_WORLD > 1:
+            # Context parallel: a fatia deste rank sao os tokens globais p com p % CP_WORLD ==
+            # CP_RANK, na posicao local p // CP_WORLD. O comprimento local e quantos desses
+            # existem abaixo de um limite global L: L // CP_WORLD + (L % CP_WORLD > CP_RANK).
+            # A consulta em posicao global P ve os locais com p <= P, ou seja, os primeiros
+            # local(P + 1). A chave rope ja carrega a posicao global, entao o produto q.k sai
+            # certo sem o kernel saber que faltam tokens no meio.
+            total_k_len = total_k_len // CP_WORLD + (total_k_len % CP_WORLD > CP_RANK).to(tl.int32)
+            q_abs = (q_abs + 1) // CP_WORLD + ((q_abs + 1) % CP_WORLD > CP_RANK).to(tl.int32) - 1
+            fim_bloco = fim_bloco // CP_WORLD + (fim_bloco % CP_WORLD > CP_RANK).to(tl.int32)
 
         n_end = total_k_len
         if CAUSAL:
             # No kv tile past the last query row of this block can contribute
-            n_end = tl.minimum(n_end, past + (pid_m + 1) * BLOCK_M)
+            n_end = tl.minimum(n_end, fim_bloco)
 
         m = tl.full((BLOCK_M,), -float("inf"), tl.float32)
         l = tl.full((BLOCK_M,), 0.0, tl.float32)
@@ -535,6 +562,11 @@ if has_triton:
         if QC > 0:
             out_tile = _rot_h32(out_tile, h32, BLOCK_M, D_c)
         tl.store(out + q_row[:, None] * D_c + offs_c[None, :], out_tile, mask = valid_row[:, None])
+        if EMIT_LSE:
+            # fatia vazia sai -inf explicito, como no _cp_lse_kernel: peso zero no combine
+            vazio = (l == 0.0) | (m == -float("inf"))
+            tl.store(lse + q_row, tl.where(vazio, -float("inf"), m + tl.log(tl.where(vazio, 1.0, l))),
+                     mask = valid_row)
 
 
     @triton.jit(do_not_specialize = ["tile_start", "tile_len", "num_pages_per_seq", "batch"])
@@ -936,6 +968,8 @@ def mla_attn_triton_decode(
     scratch: dict | None = None,
     qc: tuple | None = None,    # (scales, bits): ckv_cache is the packed int32 tensor
     qc_trans: bool = True,
+    cp_world: int = 1,            # context parallel: grau e posicao deste rank; o kernel deriva o
+    cp_rank: int = 0,             # comprimento local e o limite causal da posicao GLOBAL
     devolver_lse: bool = False,   # context parallel: alem da saida, o log-sum-exp local por
                                   # (linha, cabeca), em ordem (R, H). Ver modules/attention_fn/cp.py
     num_warps: int | None = None,
@@ -1033,6 +1067,7 @@ def mla_attn_triton_decode(
             qc_bits, bool(qc_trans), False, bsz, q_len, pre_appended_len, n_q_heads, page_size, D_c, D_r, float(softmax_scale),
             bool(causal), num_splits == 1,
             block_m, block_h, block_rows, block_n,
+            CP_WORLD = cp_world, CP_RANK = cp_rank,
             num_warps = num_warps, num_stages = num_stages,
         )
         try:
@@ -1237,11 +1272,17 @@ def mla_attn_triton_prefill(
     qc_trans: bool = True,
     num_warps: int = 8,
     num_stages: int | None = None,
+    cp_world: int = 1,            # context parallel, como em mla_attn_triton_decode
+    cp_rank: int = 0,
+    devolver_lse: bool = False,   # devolve (out, lse (R, H) fp32); o kernel nao tem splits, entao
+                                  # o lse sai dele mesmo, em vez das parciais
 ) -> torch.Tensor:
     n_q_heads, n_rows, D_c = q_lat.shape
     D_r = q_pe.shape[-1]
     page_size = ckv_cache.shape[1]
     assert n_rows == bsz * q_len
+    lse = torch.empty((n_q_heads * n_rows,), dtype = torch.float32, device = q_lat.device) \
+        if devolver_lse else None
 
     if qc is not None:
         from .triton_paged import _get_h32
@@ -1266,10 +1307,15 @@ def mla_attn_triton_prefill(
     with torch.cuda.device(q_lat.device):
         _mla_prefill_kernel[(triton.cdiv(q_len, block_m), bsz * n_q_heads)](
             q_lat, q_pe, ckv_cache, kpe_cache, ckv_scales, h32, block_table, cache_seqlens, out,
+            lse if devolver_lse else out,
             block_table.shape[1], q_len, n_rows,
             qc_bits, bool(qc_trans), pre_appended_len, n_q_heads, page_size, D_c, D_r, float(softmax_scale),
             bool(causal), block_m, block_n,
+            CP_WORLD = cp_world, CP_RANK = cp_rank, EMIT_LSE = 1 if devolver_lse else 0,
             num_warps = num_warps, num_stages = num_stages,
         )
     _dbg_sync("mla_prefill", q_lat.device)
+    if devolver_lse:
+        # o kernel indexa q_row = head * n_rows + linha: layout (H, R); o combine quer (R, H)
+        return out, lse.view(n_q_heads, n_rows).t().contiguous()
     return out

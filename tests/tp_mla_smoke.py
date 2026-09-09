@@ -77,8 +77,8 @@ def main():
     p.add_argument("--dcp", type = int, default = 1,
                    help = "grau de context parallel: quantas placas repartem a SEQUÊNCIA em vez das cabeças; divide o número de placas")
     p.add_argument("--prefill-1", action = "store_true",
-                   help = "prefill token a token pelo caminho de decode; ligado por padrão sob --dcp > 1, porque o prefill "
-                          "sob CP é a etapa 9 e ainda não existe. Use também na régua, para comparar o MESMO caminho")
+                   help = "prefill token a token pelo caminho de decode, para isolar o decode do prefill; usar dos DOIS "
+                          "lados da comparação")
     p.add_argument("--cache-bits", type = int, default = 0, help = "cache quantizado (2 a 8 bits); na MLA é a largura do latente")
     p.add_argument("--tp-dev-limits", default = None,
                    help = "paralelismo máximo por classe, ex.: 'attn=1' (só experts/MLP divididos) ou 'moe=1,mlp=1,linear=1' (só a atenção dividida)")
@@ -148,7 +148,7 @@ def main():
     assert ids.shape[-1] + n_tokens <= args.cache, "prompt + tokens não cabem no --cache"
     print(f"prompt: {ids.shape[-1]} tokens")
     recurrent_states = None
-    if args.prefill_1 or args.dcp > 1:
+    if args.prefill_1:
         for j in range(ids.shape[-1] - 1):
             params = {"attn_mode": "flash_attn", "cache": cache, "past_len": j,
                       "batch_shape": (1, args.cache), "recurrent_states": recurrent_states}

@@ -802,17 +802,6 @@ class MLAttention(Module):
         R = bsz * seqlen
 
         from .attention_fn.mla_triton import _dbg_sync
-        from ..cache.cp_layout import comprimentos_locais
-
-        if self.cp_world > 1 and seqlen != 1:
-            # Dois motivos, e os dois sao trabalho mapeado, nao esquecimento. Prefill sob CP e
-            # um mecanismo proprio (all-gather do latente, etapa 9). E no decode com q_len > 1 a
-            # mascara causal do kernel denso e `total - q_len + row`, que sob a fatia intercalada
-            # subtrai tokens que NAO sao deste rank: o limite precisa da posicao global (5d).
-            # Passar q_len > 1 aqui daria saida errada em silencio.
-            raise NotImplementedError(
-                f"context parallel so atende q_len = 1 por enquanto (pedido: {seqlen}); prefill "
-                f"e a etapa 9 e o rascunho a 5d do plano de CP")
 
         # Sparse DSA applies once the visible context exceeds the selection budget; below that,
         # top-k selection is all-inclusive and the dense path is bit-equivalent
@@ -852,7 +841,11 @@ class MLAttention(Module):
             )
             _dbg_sync("rope", x.device)
 
-        use_mha = seqlen > MAX_DECODE_QLEN and _prefill_mode == "mha" and causal and not sparse
+        # Sob context parallel o prefill vai pelo kernel absorvido: e o que emite o lse local e
+        # calcula o limite causal pela posicao global. A forma MHA le o cache de volta por tiles
+        # e nao tem nenhum dos dois; medir a diferenca de velocidade antes de porta-la.
+        use_mha = seqlen > MAX_DECODE_QLEN and _prefill_mode == "mha" and causal and not sparse \
+            and self.cp_world == 1
         if not use_mha:
             # Absorb W_UK into the queries, per head, straight from the flat layout. This runs as
             # a Triton kernel rather than a cuBLAS batched GEMM: the strided-batched fp16 form
@@ -922,20 +915,17 @@ class MLAttention(Module):
 
         kernel = mla_attn_triton_decode if seqlen <= MAX_DECODE_QLEN else mla_attn_triton_prefill
         extra = {}
-        pre_appended = seqlen
         if self.cp_world > 1:
-            # O rank atende so a sua fatia intercalada: comprimento LOCAL, ja contando o chunk que
-            # o append acabou de gravar (o append recebe o global e mascara por posicao). Com
-            # q_len = 1, `q_abs = total - 1` cobre todo token local, e a chave rope ja carrega a
-            # posicao global -- por isso o kernel nao precisa saber que faltam tokens no meio.
-            cache_seqlens = comprimentos_locais(cache_seqlens + seqlen, self.cp_world, self.cp_rank)
-            pre_appended = 0
-            extra["devolver_lse"] = True
+            # O rank atende so a sua fatia intercalada. O kernel recebe o comprimento GLOBAL e o
+            # chunk recem-gravado como sempre, e deriva sozinho o comprimento local e o limite
+            # causal de cada consulta pela posicao global -- vale para decode e para o prefill
+            # em chunk. Sai tambem o lse local, que o combine entre ranks precisa.
+            extra = dict(devolver_lse = True, cp_world = self.cp_world, cp_rank = self.cp_rank)
         o_lat = kernel(
             q_lat, q_pe_hm, ckv_cache, kpe_cache, block_table, cache_seqlens,
             bsz = bsz, q_len = seqlen,
             causal = causal, softmax_scale = self.sm_scale,
-            pre_appended_len = pre_appended,
+            pre_appended_len = seqlen,
             qc = qc,
             **extra,
         )

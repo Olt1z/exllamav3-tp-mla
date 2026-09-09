@@ -211,14 +211,15 @@ if [ -n "${SO_24:-}" ]; then
   N=$(nvidia-smi --list-gpus | wc -l)
   FALHOU_24=0
   export EXL3_BC_ATTN=0
-  SMOKE="timeout 1800 python3 tests/tp_mla_smoke.py -m /workspace/corte --tp --prefill-1 --tokens ${TOKENS_24:-32} --cache 8192"
+  # prefill em CHUNK (o caminho normal do gerador): desde a 5d o CP atende prefill e rascunho
+  SMOKE="timeout 1800 python3 tests/tp_mla_smoke.py -m /workspace/corte --tp --tokens ${TOKENS_24:-32} --cache 8192"
   for pf in 0 "${PREFILL_ESPARSO:-3000}"; do
     { echo; echo "=== prefill $pf · regua: TP$N dcp 1 (nccl)"; } | tee -a /workspace/24.txt
     $SMOKE --backend nccl --prefill-tokens "$pf" --save "/workspace/24-regua-$pf.pt" 2>&1 \
       | grep -E "prompt:|carga:|decode:|texto:|KL|FALHOU|OK$|Error|Traceback|NotImplemented|assert" | tee -a /workspace/24.txt \
       || FALHOU_24=1
     { echo; echo "=== prefill $pf · piso: UMA placa sem TP vs a regua"; } | tee -a /workspace/24.txt
-    CUDA_VISIBLE_DEVICES=0 timeout 1800 python3 tests/tp_mla_smoke.py -m /workspace/corte --prefill-1 --tokens "${TOKENS_24:-32}" --cache 8192 \
+    CUDA_VISIBLE_DEVICES=0 timeout 1800 python3 tests/tp_mla_smoke.py -m /workspace/corte --tokens "${TOKENS_24:-32}" --cache 8192 \
       --prefill-tokens "$pf" --compare "/workspace/24-regua-$pf.pt" 2>&1 \
       | grep -E "carga:|decode:|KL|Error|Traceback" | tee -a /workspace/24.txt
     for cfg in "2 nccl" "$N nccl"; do

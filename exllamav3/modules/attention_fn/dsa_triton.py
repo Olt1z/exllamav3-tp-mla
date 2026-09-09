@@ -65,6 +65,7 @@ if has_triton:
         sinks,               # (H,) fp32 (HAS_SINKS)
         derot_inv_freq,      # (D_r // 2,) fp32 epilogue frequency table (DEROTATE)
         out,                 # (R, H, D_c + D_r) fp16, or (H / HPG, R, HPG * D) when HPG > 0
+        lse,                 # (R * H) fp32, so com EMIT_LSE (context parallel)
         k_len,               # runtime: valid gathered entries per row
         win_len,             # runtime: sliding window width
         pool_len,            # runtime: pool entry count (DENSE_POOL bound base)
@@ -106,6 +107,7 @@ if has_triton:
                                        # weighted sum is never accumulated
         QC: tl.constexpr = 0,          # pool_c is the packed quantized pool (QC bits per
                                        # value, 32-value groups, H32-rotated domain)
+        EMIT_LSE: tl.constexpr = 0,    # context parallel: grava o lse local (R, H) em `lse`
     ):
         """One program per (query row, head block); heads are the MMA M dim. Consecutive
         programs cover one query's head blocks so gathers stay L2-resident. Two KV phases:
@@ -247,6 +249,13 @@ if has_triton:
             m_state = m_new
 
         denom = tl.where(l == 0.0, 1.0, l)
+        if EMIT_LSE:
+            # o lse local por (linha, cabeca), ja na ordem (R, H) que o combine entre ranks usa;
+            # fatia vazia sai -inf explicito (peso zero)
+            vazio = (l == 0.0) | (m_state == -float("inf"))
+            tl.store(lse + row * H + offs_h,
+                     tl.where(vazio, -float("inf"), m_state + tl.log(tl.where(vazio, 1.0, l))),
+                     mask = valid_h)
         oc = acc_c / denom[:, None]
         if QC > 0:
             # Accumulated in the rotated domain: one inverse rotation (H32 is involutory)
@@ -1035,17 +1044,15 @@ def dsa_attn(
             return out, reordenar_lse_dsa(bruto, R, H, block_h)
         return out
 
-    if devolver_lse:
-        raise NotImplementedError(
-            "dsa_attn: devolver_lse exige o caminho de split (n_splits > 1); o kernel "
-            "monolitico nao materializa as parciais. Chegou aqui por nc_block (rascunho) ou "
-            "por R > 8, que forcam n_splits = 1"
-        )
+    # Caminho monolitico (nc_block ou R > 8, o prefill esparso em chunk): nao ha parciais, entao
+    # o lse sai do proprio kernel
+    lse = torch.empty((R * H,), dtype = torch.float32, device = q.device) if devolver_lse else None
     grid = (R * triton.cdiv(H, block_h),)
     with torch.cuda.device(q.device):   # layer split: launch on the tensor's device
         _dsa_attn_kernel[grid](
             q, ring, kv_chunk, pc_arg, (pool_r.reshape(-1, D_r) if D_r > 0 else pool_r.reshape(-1)),
             block_table, indices, sinks_t, derot_t, out,
+            lse if devolver_lse else out,
             k_len, win_len, pool_len, npr, q_pos0, R, win_floor, ring_beg, pool_s, h32_t,
             H = H, page_size = page_size, D_c = D_c, D_c_pad = triton.next_power_of_2(D_c),
             D_r = D_r, K_pad = K_pad, compress_rate = compress_rate,
@@ -1060,8 +1067,11 @@ def dsa_attn(
             NC_BLOCK = 1 if nc_block else 0,
             Q_SPLIT = 1 if q_split else 0, OUT_LATENT = 1 if out_latent else 0,
             QC = qc_bits,
+            EMIT_LSE = 1 if devolver_lse else 0,
             num_warps = num_warps, num_stages = num_stages,
         )
+    if devolver_lse:
+        return out, lse.view(R, H)
     return out
 
 

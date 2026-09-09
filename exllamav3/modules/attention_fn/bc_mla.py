@@ -288,12 +288,13 @@ class BCMLA:
             | {n: "constexpr" for n in (
                 "QC", "QC_TRANS", "Q_PE_TM", "bsz", "q_len", "pre_appended_len", "n_q_heads",
                 "page_size", "D_c", "D_r", "scale", "CAUSAL", "FINAL",
-                "BLOCK_M", "BLOCK_H", "BLOCK_ROWS", "BLOCK_N")},
+                "BLOCK_M", "BLOCK_H", "BLOCK_ROWS", "BLOCK_N", "CP_WORLD", "CP_RANK")},
             dict(QC = self.k_bits, QC_TRANS = True, Q_PE_TM = True, bsz = bsz, q_len = q_len,
                  pre_appended_len = q_len, n_q_heads = H, page_size = PAGE_SIZE, D_c = D_c,
                  D_r = D_r, scale = float(self.sm_scale), CAUSAL = True, FINAL = False,
                  BLOCK_M = block_m, BLOCK_H = block_h, BLOCK_ROWS = block_rows,
-                 BLOCK_N = block_n),
+                 BLOCK_N = block_n,
+                 CP_WORLD = 1, CP_RANK = 0),   # o grafo recusa CP (build_bc_mla)
             n_warps, n_stages)
 
         k_combine = _compile_kernel(dev, _mla_decode_combine_kernel,
