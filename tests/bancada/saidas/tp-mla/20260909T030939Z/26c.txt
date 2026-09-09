@@ -1,0 +1,42 @@
+=== 26c · 2514c01 cp: reordenar o lse por gather com indice pre-computado, sem sincronizar · grafo, lse por gather · 03:31:49
+=== prefill 0 · TP4 dcp 1 (grafo)
+carga: 31 s, dispositivos [1, 2, 3, 0]
+decode: 16 tokens (após 16 de aquecimento) em 0.10 s = 164.24 tok/s
+KL média 0.00000  KL máx 0.00000  |dif| máx 0.000  top-1 igual 100.0%
+OK
+=== prefill 0 · TP4 dcp 2 (grafo)
+carga: 39 s, dispositivos [1, 2, 3, 0]
+decode: 16 tokens (após 16 de aquecimento) em 0.13 s = 126.51 tok/s
+KL média 0.02277  KL máx 0.09535  |dif| máx 2.052  top-1 igual 87.5%
+OK
+=== prefill 0 · TP4 dcp 4 (grafo)
+carga: 34 s, dispositivos [1, 2, 3, 0]
+decode: 16 tokens (após 16 de aquecimento) em 0.13 s = 119.84 tok/s
+KL média 0.01070  KL máx 0.03975  |dif| máx 2.008  top-1 igual 84.4%
+OK
+=== prefill 0 · TP4 dcp 2 SEM grafo (despacho), para a razao
+carga: 36 s, dispositivos [1, 2, 3, 0]
+decode: 16 tokens (após 16 de aquecimento) em 0.20 s = 81.94 tok/s
+KL média 0.02250  KL máx 0.09540  |dif| máx 2.057  top-1 igual 87.5%
+OK
+=== prefill 3000 · TP4 dcp 1 (grafo)
+carga: 33 s, dispositivos [1, 2, 3, 0]
+decode: 16 tokens (após 16 de aquecimento) em 0.13 s = 124.52 tok/s
+KL média 0.00000  KL máx 0.00000  |dif| máx 0.000  top-1 igual 100.0%
+OK
+=== prefill 3000 · TP4 dcp 2 (grafo)
+carga: 31 s, dispositivos [1, 2, 3, 0]
+decode: 16 tokens (após 16 de aquecimento) em 0.11 s = 149.82 tok/s
+KL média 0.09582  KL máx 0.36219  |dif| máx 4.267  top-1 igual 68.8%
+OK
+=== prefill 3000 · TP4 dcp 4 (grafo)
+carga: 34 s, dispositivos [1, 2, 3, 0]
+decode: 16 tokens (após 16 de aquecimento) em 0.12 s = 133.83 tok/s
+KL média 0.09761  KL máx 0.35542  |dif| máx 4.185  top-1 igual 62.5%
+OK
+=== prefill 3000 · TP4 dcp 2 SEM grafo (despacho), para a razao
+carga: 38 s, dispositivos [1, 2, 3, 0]
+decode: 16 tokens (após 16 de aquecimento) em 0.24 s = 66.45 tok/s
+KL média 0.09582  KL máx 0.36266  |dif| máx 4.271  top-1 igual 68.8%
+OK
+=== FIM 26c · 03:40:13

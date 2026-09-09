@@ -1,0 +1,57 @@
+
+=== prefill 0 · regua: TP4 dcp 1 (nccl)
+carga: 41 s, dispositivos [1, 2, 3, 0]
+prompt: 34 tokens
+texto: mitterprecedeo Nutrient忧 enchantedissimohilstein Burnett translikon忧 enchanted possession御质 Growthanzsynthetic Categorieseitepayload_RB ende-abbedmark 施ere
+decode: 16 tokens (após 16 de aquecimento) em 0.11 s = 152.34 tok/s
+OK
+
+=== prefill 0 · piso: UMA placa sem TP vs a regua
+carga: 39 s, dispositivos [0]
+decode: 16 tokens (após 16 de aquecimento) em 0.09 s = 173.57 tok/s
+KL média 0.00819  KL máx 0.03334  |dif| máx 1.292  top-1 igual 81.2%
+
+=== prefill 0 · TP4 dcp 2 (nccl)
+carga: 40 s, dispositivos [1, 2, 3, 0]
+prompt: 34 tokens
+texto: mitterprecedeo Nutrient忧 enchantedissimohilstein Burnett translikon忧 enchanted possession御质 Growthanzsynthetic Categorieseitepayload_RB ende-abbedmark 施ere
+decode: 16 tokens (após 16 de aquecimento) em 0.19 s = 86.33 tok/s
+KL média 0.02277  KL máx 0.09535  |dif| máx 2.052  top-1 igual 87.5%
+OK
+
+=== prefill 0 · TP4 dcp 4 (nccl)
+carga: 35 s, dispositivos [1, 2, 3, 0]
+prompt: 34 tokens
+texto: mitterprecedeo Nutrient忧 enchantedissimohilstein Burnett translikon忧 enchanted possession御质 Growthanzsynthetic Categorieseitepayload_RB ende-abbedmark 施ere
+decode: 16 tokens (após 16 de aquecimento) em 0.16 s = 97.84 tok/s
+KL média 0.01070  KL máx 0.03975  |dif| máx 2.008  top-1 igual 84.4%
+OK
+
+=== prefill 3000 · regua: TP4 dcp 1 (nccl)
+carga: 43 s, dispositivos [1, 2, 3, 0]
+prompt: 2974 tokens
+texto: vt_crcyneaptic Lud Sharkenheimershyna nonexistent brushianokor endeabezentierdeiros stingy Schleoux Compressiononzsor CARD ende Controls Bentley Camposotos Compression
+decode: 16 tokens (após 16 de aquecimento) em 0.14 s = 115.28 tok/s
+OK
+
+=== prefill 3000 · piso: UMA placa sem TP vs a regua
+carga: 6 s, dispositivos [0]
+decode: 16 tokens (após 16 de aquecimento) em 0.10 s = 159.86 tok/s
+KL média 0.16146  KL máx 0.36837  |dif| máx 4.845  top-1 igual 37.5%
+
+=== prefill 3000 · TP4 dcp 2 (nccl)
+carga: 31 s, dispositivos [1, 2, 3, 0]
+prompt: 2974 tokens
+texto: vt_crcyneaptic Lud Sharkenheimershyna nonexistent brushianokor endeabezentierdeiros stingy Schleoux Compressiononzsor CARD ende Controls Bentley Camposotos Compression
+decode: 16 tokens (após 16 de aquecimento) em 0.17 s = 95.95 tok/s
+KL média 0.09582  KL máx 0.36219  |dif| máx 4.267  top-1 igual 68.8%
+OK
+
+=== prefill 3000 · TP4 dcp 4 (nccl)
+carga: 33 s, dispositivos [1, 2, 3, 0]
+prompt: 2974 tokens
+texto: vt_crcyneaptic Lud Sharkenheimershyna nonexistent brushianokor endeabezentierdeiros stingy Schleoux Compressiononzsor CARD ende Controls Bentley Camposotos Compression
+decode: 16 tokens (após 16 de aquecimento) em 0.16 s = 99.13 tok/s
+KL média 0.09761  KL máx 0.35542  |dif| máx 4.185  top-1 igual 62.5%
+OK
+=== veredito: CP_OK

@@ -1,0 +1,101 @@
+=== BANCADA tp-mla · 2026-09-09T03:10:58Z
+name, memory.total [MiB], compute_cap
+NVIDIA GeForce RTX 3090, 24576 MiB, 8.6
+NVIDIA GeForce RTX 3090, 24576 MiB, 8.6
+NVIDIA GeForce RTX 3090, 24576 MiB, 8.6
+NVIDIA GeForce RTX 3090, 24576 MiB, 8.6
+torch 2.8.0+cu128 cuda 12.8 gpus 4
+=== 1. dependências · 2026-09-09T03:11:01Z
+WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+=== 2. fork https://github.com/Olt1z/exllamav3-tp-mla @ tp-mla · 2026-09-09T03:11:23Z
+f940311 cp: build_bc_mla deixava de aceitar o o_proj sob context parallel
+WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+=== 2b. banda do host (dram, pcie, contencao) · 2026-09-09T03:12:03Z
+
+80 vCPU · 40 threads · working set 2.0 GiB por buffer
+
+dram (leitura, 40 threads)     30.7 GB/s
+pcie h2d                          10.9 GB/s
+pcie d2h                          11.0 GB/s
+
+contenção: dram     36.8 GB/s   pcie      9.6 GB/s
+           perda     -20 %          perda      12 %
+
+cpu: Intel(R) Xeon(R) CPU E5-2673 v4 @ 2.30GHz  ·  80 vCPU
+Comparar com `bandaDaRamDoHost` do hub (cpu-do-host.ts) usando ESTE nome e estes
+núcleos. Não reproduzir a fórmula aqui: ela tem um ramo por família, e a versão
+simplificada que ficava nesta linha errou por 5× num EPYC 7C13 ao aplicar a curva
+do Zen 4 a um Milan.
+
+WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+=== compilando a extensão para sm 8.6 com MAX_JOBS=8 · 2026-09-09T03:12:45Z
+WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+exllamav3 1.4.8 ext ok
+=== 3. corte Olt1z/GLM-5.3-podado-4L-EXL3-balanced-bl4ck0ut · 2026-09-09T03:19:48Z
+Fetching 13 files:   0%|          | 0/13 [00:00<?, ?it/s]Fetching 13 files:   8%|▊         | 1/13 [00:00<00:10,  1.19it/s]Fetching 13 files:  15%|█▌        | 2/13 [00:01<00:07,  1.45it/s]Fetching 13 files:  46%|████▌     | 6/13 [00:02<00:02,  3.25it/s]Fetching 13 files:  69%|██████▉   | 9/13 [00:06<00:03,  1.32it/s]Fetching 13 files:  77%|███████▋  | 10/13 [00:25<00:12,  4.04s/it]Fetching 13 files:  85%|████████▍ | 11/13 [01:25<00:30, 15.43s/it]Fetching 13 files:  92%|█████████▏| 12/13 [02:38<00:28, 28.23s/it]Fetching 13 files: 100%|██████████| 13/13 [02:41<00:00, 22.22s/it]Fetching 13 files: 100%|██████████| 13/13 [02:41<00:00, 12.45s/it]
+8.8G	/workspace/corte
+model.layers.0.self_attn.kv_b_proj (28672, 512) |w| médio 0.0046
+model.layers.1.self_attn.kv_b_proj (28672, 512) |w| médio 0.0071
+model.layers.2.self_attn.kv_b_proj (28672, 512) |w| médio 0.0042
+model.layers.3.self_attn.kv_b_proj (28672, 512) |w| médio 0.0044
+4 tensores gravados em model-kv_b_proj-fp16.safetensors; índice atualizado
+=== 24. forward sob context parallel · 2026-09-09T03:22:49Z
+
+=== prefill 0 · regua: TP4 dcp 1 (nccl)
+carga: 41 s, dispositivos [1, 2, 3, 0]
+prompt: 34 tokens
+texto: mitterprecedeo Nutrient忧 enchantedissimohilstein Burnett translikon忧 enchanted possession御质 Growthanzsynthetic Categorieseitepayload_RB ende-abbedmark 施ere
+decode: 16 tokens (após 16 de aquecimento) em 0.11 s = 152.34 tok/s
+OK
+
+=== prefill 0 · piso: UMA placa sem TP vs a regua
+carga: 39 s, dispositivos [0]
+decode: 16 tokens (após 16 de aquecimento) em 0.09 s = 173.57 tok/s
+KL média 0.00819  KL máx 0.03334  |dif| máx 1.292  top-1 igual 81.2%
+
+=== prefill 0 · TP4 dcp 2 (nccl)
+carga: 40 s, dispositivos [1, 2, 3, 0]
+prompt: 34 tokens
+texto: mitterprecedeo Nutrient忧 enchantedissimohilstein Burnett translikon忧 enchanted possession御质 Growthanzsynthetic Categorieseitepayload_RB ende-abbedmark 施ere
+decode: 16 tokens (após 16 de aquecimento) em 0.19 s = 86.33 tok/s
+KL média 0.02277  KL máx 0.09535  |dif| máx 2.052  top-1 igual 87.5%
+OK
+
+=== prefill 0 · TP4 dcp 4 (nccl)
+carga: 35 s, dispositivos [1, 2, 3, 0]
+prompt: 34 tokens
+texto: mitterprecedeo Nutrient忧 enchantedissimohilstein Burnett translikon忧 enchanted possession御质 Growthanzsynthetic Categorieseitepayload_RB ende-abbedmark 施ere
+decode: 16 tokens (após 16 de aquecimento) em 0.16 s = 97.84 tok/s
+KL média 0.01070  KL máx 0.03975  |dif| máx 2.008  top-1 igual 84.4%
+OK
+
+=== prefill 3000 · regua: TP4 dcp 1 (nccl)
+carga: 43 s, dispositivos [1, 2, 3, 0]
+prompt: 2974 tokens
+texto: vt_crcyneaptic Lud Sharkenheimershyna nonexistent brushianokor endeabezentierdeiros stingy Schleoux Compressiononzsor CARD ende Controls Bentley Camposotos Compression
+decode: 16 tokens (após 16 de aquecimento) em 0.14 s = 115.28 tok/s
+OK
+
+=== prefill 3000 · piso: UMA placa sem TP vs a regua
+carga: 6 s, dispositivos [0]
+decode: 16 tokens (após 16 de aquecimento) em 0.10 s = 159.86 tok/s
+KL média 0.16146  KL máx 0.36837  |dif| máx 4.845  top-1 igual 37.5%
+
+=== prefill 3000 · TP4 dcp 2 (nccl)
+carga: 31 s, dispositivos [1, 2, 3, 0]
+prompt: 2974 tokens
+texto: vt_crcyneaptic Lud Sharkenheimershyna nonexistent brushianokor endeabezentierdeiros stingy Schleoux Compressiononzsor CARD ende Controls Bentley Camposotos Compression
+decode: 16 tokens (após 16 de aquecimento) em 0.17 s = 95.95 tok/s
+KL média 0.09582  KL máx 0.36219  |dif| máx 4.267  top-1 igual 68.8%
+OK
+
+=== prefill 3000 · TP4 dcp 4 (nccl)
+carga: 33 s, dispositivos [1, 2, 3, 0]
+prompt: 2974 tokens
+texto: vt_crcyneaptic Lud Sharkenheimershyna nonexistent brushianokor endeabezentierdeiros stingy Schleoux Compressiononzsor CARD ende Controls Bentley Camposotos Compression
+decode: 16 tokens (após 16 de aquecimento) em 0.16 s = 99.13 tok/s
+KL média 0.09761  KL máx 0.35542  |dif| máx 4.185  top-1 igual 62.5%
+OK
+=== veredito: CP_OK
+=== publicando em Olt1z/quantizacao-bl4ck0ut/saidas/tp-mla/20260909T030939Z · 2026-09-09T03:31:30Z
+=== FIM · 2026-09-09T03:31:37Z
