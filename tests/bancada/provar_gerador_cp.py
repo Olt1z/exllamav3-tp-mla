@@ -62,7 +62,11 @@ def main():
     p.add_argument("--dcp", type = int, default = 1)
     p.add_argument("--backend", default = "nccl")
     p.add_argument("--cache", type = int, default = 16384)
-    p.add_argument("--prefixo", type = int, default = 1500, help = "tokens do prompt A (cruza páginas)")
+    # O prefixo COMUM de A e B tem de cair entre 1024 e 1280 tokens: assim B reaproveita os mesmos
+    # 1024 tokens (4 x 256, 2 x 512, 1 x 1024) em todo grau e prefila o MESMO resto. Com 1500 o
+    # reaproveitado mudava (1280 contra 1024), a fronteira do chunk mudava, e o corte, que e
+    # hipersensivel, punha decimos de KL nisso -- nao era o CP.
+    p.add_argument("--prefixo", type = int, default = 1090, help = "tokens da base de A e B (prefixo comum entre 1024 e 1280)")
     p.add_argument("--tokens", type = int, default = 24)
     p.add_argument("--save")
     p.add_argument("--compare")
