@@ -863,6 +863,8 @@ def dsa_attn(
                              # paged pools; 256 with an identity table for contiguous pools)
     nc_block = False,        # DSpark draft mode: non-causal chunk + paged window history
                              # (single job per call; forces the one-shot kernel)
+    devolver_lse = False,    # context parallel: alem da saida, o log-sum-exp local por
+                             # (linha, cabeca) em ordem (R, H). Ver modules/attention_fn/cp.py
     multirow = None,         # batched jobs: dict(q_pos, win_floor, ring_beg, pool_len,
                              # k_len (B,) i32; slot_ids (B,) i32; ring_stride int; seq int)
                              # -- scalar args of the same names are ignored, ring is the
@@ -964,6 +966,9 @@ def dsa_attn(
         dbg_pages = -(-pool_rows // max(page_size, 1))
     else:
         dbg_pages = 0
+    if devolver_lse:
+        # O lse sai das parciais; sem split elas nao existem. Mesma escolha do caminho denso.
+        n_splits = max(2, n_splits)
     if nc_block:
         n_splits = 1
     if multirow is not None:
@@ -1024,8 +1029,18 @@ def dsa_attn(
                 QC = qc_bits,
                 num_warps = 4, num_stages = 2,
             )
+        if devolver_lse:
+            from .cp import cp_lse_local, reordenar_lse_dsa
+            bruto = cp_lse_local(ws_ml, R * hb, n_splits, block_h)
+            return out, reordenar_lse_dsa(bruto, R, H, block_h)
         return out
 
+    if devolver_lse:
+        raise NotImplementedError(
+            "dsa_attn: devolver_lse exige o caminho de split (n_splits > 1); o kernel "
+            "monolitico nao materializa as parciais. Chegou aqui por nc_block (rascunho) ou "
+            "por R > 8, que forcam n_splits = 1"
+        )
     grid = (R * triton.cdiv(H, block_h),)
     with torch.cuda.device(q.device):   # layer split: launch on the tensor's device
         _dsa_attn_kernel[grid](

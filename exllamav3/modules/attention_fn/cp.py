@@ -184,6 +184,32 @@ def reordenar_lse_mla_denso(bruto: torch.Tensor, bsz: int, q_len: int, n_q_heads
     return lse.view(R, n_q_heads)
 
 
+def reordenar_lse_dsa(bruto: torch.Tensor, R: int, H: int, block_h: int) -> torch.Tensor:
+    """A irmã da anterior, para o caminho ESPARSO (`_dsa_attn_combine_kernel`).
+
+    A decomposição é mais simples que a do denso, porque aqui não há bloco de consultas:
+
+        h_blocks = cdiv(H, BLOCK_H);  row = pid // h_blocks
+        head = (pid % h_blocks) * BLOCK_H + hloc
+
+    Duas funções curtas em vez de um kernel parametrizado: a decomposição é a única coisa que
+    varia entre as famílias, e escrevê-la explícita por caminho é mais legível do que passar
+    strides que ninguém consegue conferir de cabeça.
+    """
+    dev = bruto.device
+    h_blocks = -(-H // block_h)
+    idx = torch.arange(R * h_blocks * block_h, device = dev)
+    pid, hloc = idx // block_h, idx % block_h
+    row = pid // h_blocks
+    head = (pid % h_blocks) * block_h + hloc
+    valido = head < H
+
+    destino = row * H + head
+    lse = torch.full((R * H,), -float("inf"), dtype = torch.float32, device = dev)
+    lse[destino[valido]] = bruto[valido]
+    return lse.view(R, H)
+
+
 def cp_combinar(
     backend,
     o_local: torch.Tensor,

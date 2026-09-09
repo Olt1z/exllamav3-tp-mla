@@ -171,6 +171,13 @@ if [ -n "${SO_20:-}" ]; then
     python3 tests/bancada/provar_cp_denso.py --world "$w" --tokens 1500 2>&1 \
       | tee -a /workspace/20.txt || FALHOU_20=1
   done
+  # E o caminho ESPARSO (etapa 7), que e o que producao usa acima de index_topk: repartir os
+  # selecionados entre os ranks e combinar tem de dar o mesmo que atender a todos de uma vez.
+  { echo; echo "=== cp no caminho esparso"; } | tee -a /workspace/20.txt
+  for w in 2 4; do
+    python3 tests/bancada/provar_cp_esparso.py --world "$w" 2>&1 \
+      | tee -a /workspace/20.txt || FALHOU_20=1
+  done
   echo "=== veredito: $([ "$FALHOU_20" = 0 ] && echo PARIDADE_OK || echo DIVERGIU)" | tee -a /workspace/20.txt
   publicar
   marco "FIM"
