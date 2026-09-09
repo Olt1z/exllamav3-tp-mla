@@ -54,13 +54,21 @@ class CacheLayer_MLA_fp16(CacheLayer):
             # DSA-on-MLA layers with their own lightning indexer (GLM-5.2 "full" layers) keep a
             # per-token indexer-key plane alongside the latent
             idx_dim = getattr(attention, "idx_plane_dim", None)
-            self.shape_i = (pages, PAGE_SIZE, idx_dim) if idx_dim else None
-            # K-pool indexer compression (GLM5.3): a pooled-key plane maintained
-            # incrementally, one entry per kpool consecutive tokens (pools never straddle
-            # pages since PAGE_SIZE % kpool == 0)
+            # O plano do indexador é REPLICADO sob CP, não repartido: ele é uma compressão da
+            # chave, então replicá-lo custa pouco perto do que se economiza repartindo o latente
+            # -- e é o que mantém o k_pool calculável (uma entrada agrupa tokens globais
+            # CONSECUTIVOS, que o intercalamento por token espalharia entre os ranks) e o top-k
+            # global e idêntico em todo rank, sem merge distribuído.
+            #
+            # "Replicado" aqui é só uma página mais LARGA: `epp` e `page_size` saem de
+            # `plane.shape[1]` tanto no append quanto nos leitores, então nenhuma aritmética de
+            # kernel muda. A página do indexador cobre os mesmos tokens globais que a página
+            # virtual do latente.
+            self.tokens_por_pagina = PAGE_SIZE * cp_world
+            self.shape_i = (pages, self.tokens_por_pagina, idx_dim) if idx_dim else None
             kpool = getattr(attention, "index_kpool", 0)
             self.kpool = kpool if (idx_dim and kpool) else 0
-            self.shape_p = (pages, PAGE_SIZE // kpool, attention.index_head_dim) \
+            self.shape_p = (pages, self.tokens_por_pagina // kpool, attention.index_head_dim) \
                 if self.kpool else None
         else:
             self.kv_lora_rank = None
@@ -70,6 +78,7 @@ class CacheLayer_MLA_fp16(CacheLayer):
             self.shape_i = None
             self.kpool = 0
             self.shape_p = None
+            self.tokens_por_pagina = PAGE_SIZE * cp_world
 
         self.k = None      # latent, (pages, PAGE_SIZE, 1, kv_lora_rank)
         self.v = None      # rope key, (pages, PAGE_SIZE, 1, qk_rope_head_dim)
@@ -141,7 +150,10 @@ class CacheLayer_MLA_fp16(CacheLayer):
         mla_plane_append(
             k_idx.reshape(k_idx.shape[0], length, self.shape_i[-1]),
             self.k_idx, block_table, cache_seqlens,
-            self.cp_world, self.cp_rank,
+            # Plano REPLICADO: todo rank grava toda linha, na posicao global. A pagina mais larga
+            # (page_size = PAGE_SIZE x cp_world, lido de plane_cache.shape[1]) ja poe a linha no
+            # lugar certo -- por isso cp_world = 1 aqui, e nao self.cp_world.
+            1, 0,
         )
 
 
@@ -158,25 +170,21 @@ class CacheLayer_MLA_fp16(CacheLayer):
         """Append newly completed pooled keys, shaped (bsz, n_new, index_head_dim);
         pool_seqlens counts existing complete pools per row (cache_seqlens // kpool)."""
         from ..modules.attention_fn.mla_triton import mla_plane_append
-        # Sob CP este plano NAO e calculavel localmente: uma entrada agrupa `kpool` tokens
-        # globais CONSECUTIVOS, e o intercalamento por token espalha esses tokens entre os ranks.
-        # Nenhum rank tem o grupo inteiro. Nao ha conserto neste arquivo -- e obstaculo da etapa
-        # de top-k distribuido. Falhar alto, porque a alternativa e um indice silenciosamente
-        # errado que so aparece como qualidade pior.
-        assert self.cp_world == 1, (
-            "plano agrupado do indexador (k_pool) nao tem versao sob context parallel: o "
-            "agrupamento e sobre tokens globais consecutivos, que o CP reparte entre os ranks"
-        )
+        # Funciona sob CP porque o plano agrupado e REPLICADO: cada rank tem os `kpool` tokens
+        # globais consecutivos que a entrada agrupa. Era o obstaculo que travava a etapa, e o
+        # conserto foi nao repartir o indexador, nao consertar o agrupamento.
         mla_plane_append(pool_keys, self.k_pool, block_table, pool_seqlens)
 
 
     @override
     def copy_page(self, source: CacheLayer_MLA_fp16, from_page: int, to_page: int, num_tokens: int):
         assert self.shape_c == source.shape_c and self.shape_r == source.shape_r
-        # num_tokens vem do gerador em tokens GLOBAIS; este rank copia so as linhas dele
-        num_tokens = comprimento_local(num_tokens, self.cp_world, self.cp_rank)
-        self.k[to_page, :num_tokens, :, :].copy_(source.k[from_page, :num_tokens, :, :], non_blocking = True)
-        self.v[to_page, :num_tokens, :, :].copy_(source.v[from_page, :num_tokens, :, :], non_blocking = True)
+        # num_tokens vem do gerador em tokens GLOBAIS, e os dois planos vivem em regimes
+        # diferentes: o latente é REPARTIDO (este rank tem só as linhas dele) e o do indexador é
+        # REPLICADO (tem todas). Usar um número só aqui truncaria o indexador em silêncio.
+        n_local = comprimento_local(num_tokens, self.cp_world, self.cp_rank)
+        self.k[to_page, :n_local, :, :].copy_(source.k[from_page, :n_local, :, :], non_blocking = True)
+        self.v[to_page, :n_local, :, :].copy_(source.v[from_page, :n_local, :, :], non_blocking = True)
         if self.k_idx is not None:
             self.k_idx[to_page, :num_tokens, :].copy_(source.k_idx[from_page, :num_tokens, :], non_blocking = True)
         if self.k_pool is not None:
@@ -267,10 +275,12 @@ class CacheLayer_MLA_quant(CacheLayer):
             self.sshape = (pages, PAGE_SIZE, groups)
             self.shape_r = (pages, PAGE_SIZE, 1, self.qk_rope_head_dim)
             idx_dim = getattr(attention, "idx_plane_dim", None)
-            self.shape_i = (pages, PAGE_SIZE, idx_dim) if idx_dim else None
+            # Indexador replicado; ver a nota na classe fp16
+            self.tokens_por_pagina = PAGE_SIZE * cp_world
+            self.shape_i = (pages, self.tokens_por_pagina, idx_dim) if idx_dim else None
             kpool = getattr(attention, "index_kpool", 0)
             self.kpool = kpool if (idx_dim and kpool) else 0
-            self.shape_p = (pages, PAGE_SIZE // kpool, attention.index_head_dim) \
+            self.shape_p = (pages, self.tokens_por_pagina // kpool, attention.index_head_dim) \
                 if self.kpool else None
         else:
             self.qshape = None
@@ -279,6 +289,7 @@ class CacheLayer_MLA_quant(CacheLayer):
             self.shape_i = None
             self.kpool = 0
             self.shape_p = None
+            self.tokens_por_pagina = PAGE_SIZE * cp_world
 
         self.qk = None     # packed latent, int32
         self.sk = None     # fp16 group scales
@@ -367,7 +378,10 @@ class CacheLayer_MLA_quant(CacheLayer):
         mla_plane_append(
             k_idx.reshape(k_idx.shape[0], length, self.shape_i[-1]),
             self.k_idx, block_table, cache_seqlens,
-            self.cp_world, self.cp_rank,
+            # Plano REPLICADO: todo rank grava toda linha, na posicao global. A pagina mais larga
+            # (page_size = PAGE_SIZE x cp_world, lido de plane_cache.shape[1]) ja poe a linha no
+            # lugar certo -- por isso cp_world = 1 aqui, e nao self.cp_world.
+            1, 0,
         )
 
 
@@ -382,25 +396,20 @@ class CacheLayer_MLA_quant(CacheLayer):
     def update_pool_direct(self, pool_seqlens: torch.Tensor, block_table: torch.Tensor,
                            pool_keys: torch.Tensor):
         from ..modules.attention_fn.mla_triton import mla_plane_append
-        # Sob CP este plano NAO e calculavel localmente: uma entrada agrupa `kpool` tokens
-        # globais CONSECUTIVOS, e o intercalamento por token espalha esses tokens entre os ranks.
-        # Nenhum rank tem o grupo inteiro. Nao ha conserto neste arquivo -- e obstaculo da etapa
-        # de top-k distribuido. Falhar alto, porque a alternativa e um indice silenciosamente
-        # errado que so aparece como qualidade pior.
-        assert self.cp_world == 1, (
-            "plano agrupado do indexador (k_pool) nao tem versao sob context parallel: o "
-            "agrupamento e sobre tokens globais consecutivos, que o CP reparte entre os ranks"
-        )
+        # Funciona sob CP porque o plano agrupado e REPLICADO: cada rank tem os `kpool` tokens
+        # globais consecutivos que a entrada agrupa. Era o obstaculo que travava a etapa, e o
+        # conserto foi nao repartir o indexador, nao consertar o agrupamento.
         mla_plane_append(pool_keys, self.k_pool, block_table, pool_seqlens)
 
 
     @override
     def copy_page(self, source: CacheLayer_MLA_quant, from_page: int, to_page: int, num_tokens: int):
         assert self.qshape == source.qshape and self.shape_r == source.shape_r
-        num_tokens = comprimento_local(num_tokens, self.cp_world, self.cp_rank)
-        self.qk[to_page, :num_tokens, :].copy_(source.qk[from_page, :num_tokens, :], non_blocking = True)
-        self.sk[to_page, :num_tokens, :].copy_(source.sk[from_page, :num_tokens, :], non_blocking = True)
-        self.v[to_page, :num_tokens, :, :].copy_(source.v[from_page, :num_tokens, :, :], non_blocking = True)
+        # Latente repartido, indexador replicado; ver a nota na classe fp16
+        n_local = comprimento_local(num_tokens, self.cp_world, self.cp_rank)
+        self.qk[to_page, :n_local, :].copy_(source.qk[from_page, :n_local, :], non_blocking = True)
+        self.sk[to_page, :n_local, :].copy_(source.sk[from_page, :n_local, :], non_blocking = True)
+        self.v[to_page, :n_local, :, :].copy_(source.v[from_page, :n_local, :, :], non_blocking = True)
         if self.k_idx is not None:
             self.k_idx[to_page, :num_tokens, :].copy_(source.k_idx[from_page, :num_tokens, :], non_blocking = True)
         if self.k_pool is not None:

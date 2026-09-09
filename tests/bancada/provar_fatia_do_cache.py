@@ -5,17 +5,23 @@ A fatia por rank do context parallel, provada numa placa só.
     python3 tests/bancada/provar_fatia_do_cache.py --tokens 3000 --world 4
 
 Não precisa de TP nem de várias placas: constrói `world` caches com `cp_rank` diferente no mesmo
-device, escreve a MESMA sequência em todos, e exige que a **união** dos caches seja exatamente o
-que um cache sem CP guardaria.
+device, escreve a MESMA sequência em todos, e confere os DOIS regimes que o CP usa:
 
-É o que testa o código que a etapa 4 realmente acrescentou — a escrita mascarada nos kernels de
-append. O portão de `world = 1` do plano é identidade por construção e não prova nada; este prova.
+  latente e rope       **REPARTIDOS** — o token `p` mora no rank `p % world`, na linha `p // world`;
+                       a união dos ranks tem de reproduzir a referência sem CP.
+  plano do indexador   **REPLICADO** — o token `p` está em TODOS os ranks, na linha `p`; cada rank
+                       tem de bater com a referência inteira, não com uma fatia dela.
+
+Testar os dois com a mesma regra esconderia exatamente o que separa as duas etapas. E o
+encolhimento esperado NÃO é `world`: sai das formas declaradas (`shape_c`, `shape_r`, `shape_i`,
+`shape_p`), porque a fração do ideal que se captura depende da razão entre indexador e principal —
+que muda por modelo e é justamente o que não pode virar constante.
 
 Cobre os dois caminhos de escrita:
   fp16   `_mla_kv_update_kernel`
   quant  `_mla_kv_quant_scatter_kernel` (o pacote int32 + escalas, que tem máscara própria)
 
-E o plano de chaves do indexador, que também é escrita por token.
+E o plano AGRUPADO (`k_pool`), que era o obstáculo da etapa 4 e agora tem de funcionar.
 """
 import argparse
 
@@ -28,12 +34,21 @@ from exllamav3.constants import PAGE_SIZE
 
 class AtencaoFalsa:
     """O mínimo que CacheLayer_MLA_* lê do módulo de atenção."""
-    def __init__(self, d_c, d_r, idx):
+    def __init__(self, d_c, d_r, idx, kpool = 0):
         self.kv_lora_rank = d_c
         self.qk_rope_head_dim = d_r
         self.idx_plane_dim = idx
         self.index_head_dim = idx
-        self.index_kpool = 0          # o plano agrupado nao tem versao sob CP, e falha alto
+        self.index_kpool = kpool
+
+
+def _bytes_indexador(c):
+    """Quantos bytes do cache sao plano de indexador, lido das formas declaradas."""
+    import numpy as np
+    t = 0
+    if c.shape_i: t += int(np.prod(c.shape_i)) * torch.half.itemsize
+    if c.shape_p: t += int(np.prod(c.shape_p)) * torch.half.itemsize
+    return t
 
 
 def montar(cls, atencao, capacidade, world, rank, dev, **extra):
@@ -91,24 +106,39 @@ def main():
         for r, c in enumerate(ranks):
             escrever(c, ckv, kpe, kidx, bt, dev, a.passo)
 
-        # a alocacao por placa caiu `world` vezes?
+        # A alocacao por placa cai, mas NAO por `world`: o latente e repartido e o indexador e
+        # replicado. O esperado sai das formas declaradas, nunca de constante -- e a fracao do
+        # ideal capturada e exatamente o que muda entre modelos.
+        principal = ref.storage_size() - _bytes_indexador(ref)
+        idx = _bytes_indexador(ref)
+        esperado = (principal + idx) / (principal / a.world + idx)
         enc = ref.storage_size() / ranks[0].storage_size()
-        ok_enc = abs(enc - a.world) < 1e-6
-        print(f"{nome:9} · alocacao por placa caiu {enc:.2f}x (esperado {a.world}x) "
-              f"{'OK' if ok_enc else 'FALHOU'}")
+        ok_enc = abs(enc - esperado) < 1e-3
+        print(f"{nome:9} · alocacao por placa caiu {enc:.2f}x "
+              f"(esperado {esperado:.2f}x pelas formas; ideal seria {a.world}x, e a diferenca "
+              f"e o indexador replicado) {'OK' if ok_enc else 'FALHOU'}")
         if not ok_enc:
-            falhas.append(f"{nome}: encolhimento {enc}")
+            falhas.append(f"{nome}: encolhimento {enc} != {esperado}")
 
-        # a uniao dos ranks tem de reproduzir a referencia, token a token
+        # a uniao dos ranks tem de reproduzir a referencia, token a token. Os dois planos vivem
+        # em regimes diferentes: o latente/rope e REPARTIDO (o token p esta no rank p % world, na
+        # linha p // world) e o do indexador e REPLICADO (o token p esta em TODOS os ranks, na
+        # linha p). Testar os dois com a mesma regra esconderia justamente o que a etapa mudou.
         piores = {}
         for p_glob in range(a.tokens):
             r = p_glob % a.world
             p_loc = p_glob // a.world
-            for campo, largura in (("v", D_r), ("k_idx", D_i)):
-                t_ref = getattr(ref, campo).reshape(-1, largura)[p_glob]
-                t_cp = getattr(ranks[r], campo).reshape(-1, largura)[p_loc]
-                d = (t_ref.float() - t_cp.float()).abs().max().item()
-                piores[campo] = max(piores.get(campo, 0.0), d)
+            t_ref = ref.v.reshape(-1, D_r)[p_glob]
+            t_cp = ranks[r].v.reshape(-1, D_r)[p_loc]
+            piores["v"] = max(piores.get("v", 0.0),
+                              (t_ref.float() - t_cp.float()).abs().max().item())
+            # replicado: confere em TODO rank, na posicao global
+            t_ref_i = ref.k_idx.reshape(-1, D_i)[p_glob]
+            for c in ranks:
+                t_cp_i = c.k_idx.reshape(-1, D_i)[p_glob]
+                piores["k_idx (replicado)"] = max(
+                    piores.get("k_idx (replicado)", 0.0),
+                    (t_ref_i.float() - t_cp_i.float()).abs().max().item())
             # o latente: fp16 cru numa classe, pacote int32 + escalas na outra
             if cls is CacheLayer_MLA_fp16:
                 t_ref = ref.k.reshape(-1, D_c)[p_glob]
@@ -140,19 +170,29 @@ def main():
         for c in ranks + [ref]:
             c.free()
 
-    # o plano agrupado tem de recusar CP em vez de calcular errado
-    atencao_pool = AtencaoFalsa(D_c, D_r, D_i)
-    atencao_pool.index_kpool = 8
-    c = montar(CacheLayer_MLA_fp16, atencao_pool, capacidade, a.world, 0, dev)
-    try:
-        c.update_pool_direct(torch.zeros((1,), dtype = torch.int32, device = dev),
-                             torch.zeros((1, 1), dtype = torch.int32, device = dev),
-                             torch.zeros((1, 1, D_i), device = dev, dtype = torch.half))
-        print("plano agrupado ACEITOU CP — devia ter recusado")
-        falhas.append("k_pool aceitou CP")
-    except AssertionError:
-        print("plano agrupado recusa CP, como tem de ser")
-    c.free()
+    # O plano AGRUPADO era o obstaculo da etapa 4 e agora tem de FUNCIONAR: com o indexador
+    # replicado, cada rank tem os `kpool` tokens globais consecutivos que a entrada agrupa.
+    atencao_pool = AtencaoFalsa(D_c, D_r, D_i, kpool = 8)
+    ref_p = montar(CacheLayer_MLA_fp16, atencao_pool, capacidade, 1, 0, dev)
+    ranks_p = [montar(CacheLayer_MLA_fp16, atencao_pool, capacidade, a.world, r, dev)
+               for r in range(a.world)]
+    n_pools = 24
+    chaves = torch.randn(1, n_pools, D_i, device = dev, dtype = torch.half)
+    bt_r = torch.arange(capacidade // PAGE_SIZE, dtype = torch.int32, device = dev).view(1, -1)
+    bt_c = torch.arange(capacidade // (PAGE_SIZE * a.world), dtype = torch.int32,
+                        device = dev).view(1, -1)
+    zero = torch.zeros((1,), dtype = torch.int32, device = dev)
+    ref_p.update_pool_direct(zero, bt_r, chaves)
+    for c in ranks_p:
+        c.update_pool_direct(zero, bt_c, chaves)
+    ok_pool = all(torch.equal(ref_p.k_pool.reshape(-1, D_i)[:n_pools],
+                              c.k_pool.reshape(-1, D_i)[:n_pools]) for c in ranks_p)
+    print(f"plano agrupado sob CP: {'bit a bit em todo rank' if ok_pool else 'DIVERGIU'} "
+          f"(era o obstaculo da etapa 4)")
+    if not ok_pool:
+        falhas.append("k_pool sob CP")
+    for c in ranks_p + [ref_p]:
+        c.free()
 
     print()
     if falhas:
