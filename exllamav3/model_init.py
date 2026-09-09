@@ -66,6 +66,7 @@ def add_args(
     parser.add_argument("-tp_linear", "--tp_max_parallelism_linear", type = int, help = "(TP) Maximum parallelism for linear (output) layers", default = None)
     parser.add_argument("-tp_linear_attn", "--tp_max_parallelism_linear_attn", type = int, help = "(TP) Maximum parallelism for linear-attention layers", default = None)
     parser.add_argument("-tp_moe_ts", "--tp_moe_tensor_split", action = "store_true", help = "(TP) Use tensor split for MoE layers rather than expert parallelism")
+    parser.add_argument("--dcp", type = int, default = None, help = "(TP) Context parallel: quantas placas repartem a sequencia entre si. Divide o numero de placas; 1 = desligado")
 
     parser.add_argument("-swa_full", "--swa_full", action = "store_true", help = f"Use full cache for SWA layers. Default is recurrent mode with snapshots")
     parser.add_argument("-ambs", "--autosplit_max_batch_size", type = int, help = f"Max batch size to account for when loading in autosplit mode (default: {default_autosplit_max_batch_size})", default = default_autosplit_max_batch_size)
@@ -318,7 +319,13 @@ def init(
 
     # Parallelism options
     tp_options = {
-        "moe_tensor_split": args.tp_moe_tensor_split
+        "moe_tensor_split": args.tp_moe_tensor_split,
+        # Grau de context parallel: quantas placas repartem a SEQUENCIA entre si em vez de
+        # repartir as cabecas. Tem de dividir o numero de placas. Ver o plano do CP: dcp = 1 e o
+        # comportamento de sempre e dcp = tp replica os pesos de atencao, entao o ponto bom fica
+        # no meio -- e depende da razao entre peso de atencao e cache, que muda por modelo E por
+        # contexto. Por isso e um botao, nunca constante.
+        "dcp": getattr(args, "dcp", None),
     }
 
     # Parallelism limits
