@@ -25,9 +25,16 @@ class TPAllocation:
         recons_temp: int = 0,
         channels_to_split: int = 1,
         limit_key: str = None,
-        max_devices: int = None
+        max_devices: int = None,
+        cp: bool = False,
     ):
         self.key = key
+        # Context parallel: so um componente que COMBINA entre os ranks do grupo pode receber a
+        # mesma faixa de canais em varias placas. Para todos os outros (experts, MLP, atencao sem
+        # combine) o grupo nao existe: eles continuam repartidos por placa, senao duas placas com
+        # a mesma faixa somam em dobro no all-reduce e metade dos canais fica de fora -- medido
+        # na prova 24 (KL 2,4 com o alocador agrupando tudo).
+        self.cp = cp
         self.channel_width = channel_width
         self.channel_unit = channel_unit
         self.limit_key = limit_key
@@ -126,7 +133,7 @@ class TPAllocator:
             # Perform split. Sob CP o canal vai para o GRUPO e depois se espalha; sem CP
             # (dcp = 1) `por_grupo`/`por_placa` sao identidade e isto e o codigo de sempre.
             channels = c.channels_to_split
-            if self.dcp > 1:
+            if self.dcp > 1 and c.cp:
                 split = por_placa(ratio_split(channels, por_grupo(rem_mem_s), chunk_size = 1))
             else:
                 split = ratio_split(channels, rem_mem_s, chunk_size = 1)
@@ -197,11 +204,13 @@ class TPAllocator:
             cw = c.channel_width or 1
             # Sob CP as placas de um grupo recebem A MESMA faixa de canais e repartem a sequencia
             # entre si; acumular por placa daria a cada uma um pedaco diferente do modelo, que e o
-            # oposto do que o CP faz. Com dcp = 1 o passo e 1 e isto e o laco de sempre.
-            for dev in range(0, self.num_devices, self.dcp):
+            # oposto do que o CP faz. So para componente com combine (c.cp); com dcp = 1 ou sem
+            # combine o passo e 1 e isto e o laco de sempre.
+            passo = self.dcp if c.cp else 1
+            for dev in range(0, self.num_devices, passo):
                 idx_beg = idx_end
                 idx_end += c.current_split[dev]
-                for d in range(dev, dev + self.dcp):
+                for d in range(dev, dev + passo):
                     plan[d][key] = (idx_beg * cw, idx_end * cw, c.channel_unit)
         self.plan = plan
         return self.plan

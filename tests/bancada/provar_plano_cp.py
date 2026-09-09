@@ -39,10 +39,10 @@ def main():
     TPAllocator, TPAllocation = carregar_alocador()
     falhas = []
 
-    def componente(canais):
-        return TPAllocation(key = "attn", channel_width = 1, channel_unit = "heads",
+    def componente(canais, cp = True, key = "attn"):
+        return TPAllocation(key = key, channel_width = 1, channel_unit = "heads",
                             storage_per_device = 10, storage_to_split = 100,
-                            channels_to_split = canais)
+                            channels_to_split = canais, cp = cp)
 
     CABECAS = 64
     for placas, memoria in ((4, [1000] * 4), (4, [1000, 1000, 600, 600]), (8, [1000] * 8)):
@@ -69,6 +69,22 @@ def main():
                 falhas.append(f"{placas}/{dcp}: faixas diferentes no grupo")
             if not ok_cob:
                 falhas.append(f"{placas}/{dcp}: cobertura {distintas}")
+
+    # 3. Um componente SEM combine (experts, MLP) nao pode ser agrupado: com a mesma faixa em duas
+    # placas ele soma em dobro no all-reduce e deixa metade dos canais de fora. Foi assim que a
+    # prova 24 saiu com KL 2,4: o alocador agrupava tudo. Ele tem de sair por PLACA, como sempre.
+    for placas, dcp in ((4, 2), (4, 4), (8, 2)):
+        a = TPAllocator([componente(CABECAS), componente(64, cp = False, key = "moe")],
+                        num_tokens = 1, output_num_tokens = 1, dcp = dcp)
+        a.initial_split([1000] * placas)
+        plano = a.compile_tp_plan()
+        faixas = [plano[d]["moe"][:2] for d in range(placas)]
+        ok = (len(set(faixas)) == placas and faixas[0][0] == 0 and faixas[-1][1] == 64
+              and all(e1 == b2 for (_, e1), (b2, _) in zip(faixas, faixas[1:])))
+        print(f"{placas} placas dcp {dcp}: componente sem combine repartido por placa {faixas} "
+              f"{'OK' if ok else 'FALHOU (agrupado!)'}")
+        if not ok:
+            falhas.append(f"{placas}/{dcp}: componente sem combine agrupado")
 
     # dcp = 1 tem de ser identico ao comportamento de hoje
     base = TPAllocator([componente(CABECAS)], num_tokens = 1, output_num_tokens = 1, dcp = 1)

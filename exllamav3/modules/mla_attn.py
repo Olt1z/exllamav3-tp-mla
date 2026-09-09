@@ -1269,7 +1269,8 @@ class MLAttention(Module):
             overhead_to_split = overhead_s,
             recons_temp = recons,
             channels_to_split = H // cw,
-            limit_key = "attn"
+            limit_key = "attn",
+            cp = True,      # a MLA combina entre os ranks do grupo (etapa 5c); e a unica que pode
         )
         return [tpa]
 
