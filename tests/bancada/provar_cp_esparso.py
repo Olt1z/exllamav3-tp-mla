@@ -36,22 +36,32 @@ def main():
     D_c, D_r, H, R = 512, 64, a.cabecas, 1
 
     torch.manual_seed(0)
-    # pool contiguo com tabela identidade, que e o modo que a propria dsa_attn documenta
-    pool_c = torch.randn(a.tokens, D_c, device = dev, dtype = torch.half) * 0.1
-    pool_r = torch.randn(a.tokens, D_r, device = dev, dtype = torch.half) * 0.1
-    q = torch.randn(R, H, D_c + D_r, device = dev, dtype = torch.half) * 0.1
-    q_pe = q[:, :, D_c:].contiguous()
-    bt = torch.arange(-(-a.tokens // 256), dtype = torch.int32, device = dev).view(1, -1)
+    # A convencao do modo q_split, lida do assert da propria dsa_attn: a consulta latente vem
+    # HEAD-MAJOR (H, R, D_c) e a parte rope vem (R, H, D_r), ambas contiguas. Fatiar um tensor
+    # unico produz um q_pe nao-contiguo, que e como este teste falhou na primeira rodada.
+    tokens = -(-a.tokens // 256) * 256          # pagina inteira, para o pool nao ter cauda parcial
+    pool_c = torch.randn(tokens, D_c, device = dev, dtype = torch.half) * 0.1
+    pool_r = torch.randn(tokens, D_r, device = dev, dtype = torch.half) * 0.1
+    q = torch.randn(H, R, D_c, device = dev, dtype = torch.half).contiguous() * 0.1
+    q_pe = torch.randn(R, H, D_r, device = dev, dtype = torch.half).contiguous() * 0.1
+    bt = torch.arange(tokens // 256, dtype = torch.int32, device = dev).view(1, -1)
 
     # a selecao GLOBAL do indexador: com o plano replicado ela e identica em todo rank
-    sel = torch.randperm(a.tokens, device = dev)[:a.topk].sort().values.to(torch.int32)
+    sel = torch.randperm(tokens, device = dev)[:a.topk].sort().values.to(torch.int32)
 
     def atender(indices):
         if indices.numel() == 0:
             return None, None
+        # A funcao documenta indices "(R, K_pad) int32, -1 padded": preencher ate multiplo de 32
+        # e a forma documentada, e evita depender de o kernel tratar bem um K_pad quebrado. Cada
+        # rank tem uma contagem diferente, entao sem isto cada um forcaria um recompile proprio.
+        k = indices.numel()
+        k_pad = -(-k // 32) * 32
+        buf = torch.full((1, k_pad), -1, dtype = torch.int32, device = dev)
+        buf[0, :k] = indices
         return dsa_attn(
             q, pool_c, pool_r, bt,
-            indices = indices.view(1, -1), k_len = indices.numel(),
+            indices = buf, k_len = k,
             scale = (D_c + D_r) ** -0.5, page_size = 256,
             q_pe = q_pe, out_latent = True, devolver_lse = True,
         )
@@ -80,7 +90,7 @@ def main():
     lse_g = torch.logsumexp(torch.stack([x.float() for x in lses]), dim = 0)
     d_lse = (lse_g - lse_ref.float()).abs().max().item()
 
-    print(f"pool {a.tokens} · top-k {a.topk} · world {a.world} · H {H}")
+    print(f"pool {tokens} · top-k {a.topk} · world {a.world} · H {H}")
     print(f"  selecionados por rank: {contagem}  (soma {sum(contagem)}, esperado {a.topk})")
     print(f"  erro relativo da saida : {rel:.3e} {'OK' if rel <= a.tolerancia else 'FALHOU'}")
     print(f"  lse global vs referencia: {d_lse:.3e} {'OK' if d_lse <= 5e-3 else 'FALHOU'}")
