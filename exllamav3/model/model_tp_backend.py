@@ -572,11 +572,17 @@ class TPBackendNative:
         Até lá, `dcp < tp` roda no NCCL, que tem subgrupo nativo. A conta que justifica a
         preguiça: o nativo ganha 2,5 % de decode do NCCL, e o CP decide entre caber e não caber.
         """
-        if dcp not in (1, len(self.active_devices)):
+        # E mesmo dcp = tp, que o anel aceita, esta DESLIGADO: a prova 24 (08/09, 4x RTX 3090)
+        # mediu KL 0,93-0,99 com o nativo contra 0,06-0,08 com o NCCL no MESMO modelo, mesmo
+        # codigo Python, mesmo grau. As primitivas sao bit a bit em isolamento (provas 20/21),
+        # entao o defeito esta em como elas convivem com o all-reduce por CPU dentro do modelo
+        # -- os contadores de estagio do anel e o shbuf sao compartilhados, e ninguem os provou
+        # intercalados. Ate uma bancada fechar isso, o CP roda no NCCL.
+        if dcp != 1:
             raise NotImplementedError(
-                f"backend nativo so faz context parallel sobre o grupo inteiro "
-                f"(dcp = 1 ou {len(self.active_devices)}), pedido dcp = {dcp}. "
-                f"Rode com EXLLAMA_TP_BACKEND=nccl, que tem subgrupo."
+                f"backend nativo nao faz context parallel ainda (pedido dcp = {dcp}): as "
+                f"primitivas existem e sao exatas isoladas, mas dentro do modelo a prova 24 mediu "
+                f"KL 0,93 contra 0,06 do NCCL. Rode com tp_backend = 'nccl'."
             )
         self.cp_world = dcp
         self.cp_rank = self.active_devices.index(self.device) if dcp > 1 else 0
