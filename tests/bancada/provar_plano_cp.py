@@ -70,6 +70,21 @@ def main():
             if not ok_cob:
                 falhas.append(f"{placas}/{dcp}: cobertura {distintas}")
 
+    # 2b. Os grupos seguem a ORDEM DOS RANKS, nao o id da placa: rank r = active_devices[r], e o
+    # NCCL poe o rank r no grupo r // dcp. Com active_devices = [1, 2, 3, 0] (medido) e dcp 2 os
+    # grupos sao {1, 2} e {3, 0}; agrupar por id ({0, 1}, {2, 3}) foi o que deu KL 1,1 na prova 24.
+    ordem = [1, 2, 3, 0]
+    a = TPAllocator([componente(CABECAS)], num_tokens = 1, output_num_tokens = 1, dcp = 2,
+                    ordem_dos_ranks = ordem)
+    a.initial_split([1000] * 4)
+    plano = a.compile_tp_plan()
+    f = [plano[d]["attn"][:2] for d in range(4)]
+    ok_ordem = f[1] == f[2] and f[3] == f[0] and f[1] != f[3] and sorted({f[1], f[3]}) == [(0, 32), (32, 64)]
+    print(f"ordem dos ranks {ordem} dcp 2: faixas por placa {f} "
+          f"{'OK (grupos {1,2} e {3,0})' if ok_ordem else 'FALHOU (agrupou por id)'}")
+    if not ok_ordem:
+        falhas.append("grupos por id em vez de por rank")
+
     # 3. Um componente SEM combine (experts, MLP) nao pode ser agrupado: com a mesma faixa em duas
     # placas ele soma em dobro no all-reduce e deixa metade dos canais de fora. Foi assim que a
     # prova 24 saiu com KL 2,4: o alocador agrupava tudo. Ele tem de sair por PLACA, como sempre.

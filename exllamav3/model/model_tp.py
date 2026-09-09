@@ -549,6 +549,7 @@ class Model_TPMixin:
             output_num_tokens = max_output_size,
             dev_limits = dev_limits,
             dcp = dcp,
+            ordem_dos_ranks = self.active_devices,   # rank r = active_devices[r]; os grupos de CP seguem essa ordem
         )
         allocator.initial_split(max_mem)
         if verbose:

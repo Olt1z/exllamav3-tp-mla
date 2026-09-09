@@ -59,6 +59,7 @@ class TPAllocator:
         output_num_tokens: int,
         dev_limits: dict = None,
         dcp: int = 1,
+        ordem_dos_ranks: list[int] | None = None,
     ):
         """
         Estimate and plan a tensor-parallel split across devices with uneven capacity.
@@ -85,6 +86,14 @@ class TPAllocator:
         # por GRUPO, não por placa, e a capacidade do grupo é a da placa mais apertada dele --
         # dar a um grupo mais canais do que o seu menor membro aguenta estoura essa placa.
         self.dcp = dcp
+        # Os grupos sao fatias CONSECUTIVAS desta lista (ids de placa na ordem dos ranks), e e a
+        # MESMA regra do backend (configurar_cp: rank r no grupo r // dcp). O plano e indexado
+        # por id fisico e o rank e a posicao em active_devices, que nao vem em ordem ([1, 2, 3, 0]
+        # medido): agrupar por id daria grupos diferentes dos do NCCL, e foi isso que a prova 24
+        # mediu -- KL 1,1 em dcp 2 com dcp 4 (um grupo so) quase certo.
+        self.ordem_dos_ranks = ordem_dos_ranks
+        self.grupos = []
+        self.grupo_de = {}
 
 
     def initial_split(
@@ -95,22 +104,25 @@ class TPAllocator:
         active_devices = [i for i in range(self.num_devices) if max_mem[i] > 0]
         if not active_devices:
             raise RuntimeError("Insufficient VRAM in split for model and cache")
-        if self.num_devices % self.dcp:
+        ranks = self.ordem_dos_ranks or active_devices
+        if len(ranks) % self.dcp:
             raise RuntimeError(
-                f"dcp {self.dcp} tem de dividir o numero de placas {self.num_devices}"
+                f"dcp {self.dcp} tem de dividir o numero de placas ativas {len(ranks)}"
             )
         storage_sum = [0] * self.num_devices
         overhead_max = [0] * self.num_devices
 
-        n_grupos = self.num_devices // self.dcp
+        self.grupos = [ranks[g * self.dcp:(g + 1) * self.dcp] for g in range(len(ranks) // self.dcp)]
+        self.grupo_de = {d: g for g, gr in enumerate(self.grupos) for d in gr}
 
         def por_grupo(v):
             """Reduz uma lista por placa a uma por grupo, pelo MENOR membro."""
-            return [min(v[g * self.dcp:(g + 1) * self.dcp]) for g in range(n_grupos)]
+            return [min(v[d] for d in gr) for gr in self.grupos]
 
         def por_placa(v):
-            """Espalha uma lista por grupo de volta para as placas do grupo."""
-            return [v[d // self.dcp] for d in range(self.num_devices)]
+            """Espalha uma lista por grupo de volta para as placas do grupo; placa fora de
+            qualquer grupo (inativa) fica com zero."""
+            return [v[self.grupo_de[d]] if d in self.grupo_de else 0 for d in range(self.num_devices)]
 
         for c in self.components:
 
@@ -206,11 +218,19 @@ class TPAllocator:
             # entre si; acumular por placa daria a cada uma um pedaco diferente do modelo, que e o
             # oposto do que o CP faz. So para componente com combine (c.cp); com dcp = 1 ou sem
             # combine o passo e 1 e isto e o laco de sempre.
-            passo = self.dcp if c.cp else 1
-            for dev in range(0, self.num_devices, passo):
-                idx_beg = idx_end
-                idx_end += c.current_split[dev]
-                for d in range(dev, dev + passo):
-                    plan[d][key] = (idx_beg * cw, idx_end * cw, c.channel_unit)
+            if self.dcp > 1 and c.cp:
+                for gr in self.grupos:
+                    idx_beg = idx_end
+                    idx_end += c.current_split[gr[0]]
+                    for d in gr:
+                        plan[d][key] = (idx_beg * cw, idx_end * cw, c.channel_unit)
+                for d in range(self.num_devices):
+                    if d not in self.grupo_de:
+                        plan[d][key] = (idx_end * cw, idx_end * cw, c.channel_unit)
+            else:
+                for dev in range(self.num_devices):
+                    idx_beg = idx_end
+                    idx_end += c.current_split[dev]
+                    plan[dev][key] = (idx_beg * cw, idx_end * cw, c.channel_unit)
         self.plan = plan
         return self.plan
