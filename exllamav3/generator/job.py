@@ -324,6 +324,12 @@ class Job:
         self.mtp_last_hidden = None
 
 
+
+    @property
+    def page_tokens(self) -> int:
+        """A pagina LOGICA do gerador dono deste job (PAGE_SIZE * cp_world); ver PageTable."""
+        return self.generator.page_tokens
+
     def get_pinned_logit_mask(self):
         if self.pinned_logit_mask is None:
             self.pinned_logit_mask = torch.empty(
@@ -394,9 +400,9 @@ class Job:
                 tokens_to_add = ids.shape[-1]
                 skvp = seq.kv_position
                 while tokens_to_add:
-                    page = seq.allocated_pages[skvp // PAGE_SIZE]
+                    page = seq.allocated_pages[skvp // self.page_tokens]
                     assert page.ref_count == 1
-                    tokens_page = min(tokens_to_add, PAGE_SIZE - page.kv_position)
+                    tokens_page = min(tokens_to_add, self.page_tokens - page.kv_position)
                     page.sequence[:, page.kv_position:page.kv_position + tokens_page] = ids[:, :tokens_page]
                     page.kv_position += tokens_page
                     skvp += tokens_page
@@ -636,12 +642,12 @@ class Job:
 
             # Accept new token
             seq.sequence_ids.append(next_token)
-            page_before = seq.kv_position // PAGE_SIZE
+            page_before = seq.kv_position // self.page_tokens
             seq.kv_position += 1
             pos = seq.kv_position
             if self.checkpoint:
                 pos -= self.checkpoint["offset"]
-            page_after = pos // PAGE_SIZE
+            page_after = pos // self.page_tokens
 
             # Hash completed page
             if page_after > page_before:
@@ -655,7 +661,7 @@ class Job:
                 else:
                     last_hash = None
 
-                page_ids = seq.sequence_ids.torch_slice(page_before * PAGE_SIZE, page_after * PAGE_SIZE)
+                page_ids = seq.sequence_ids.torch_slice(page_before * self.page_tokens, page_after * self.page_tokens)
                 new_hash = tensor_hash_checksum(page_ids, last_hash)
 
                 # If another referenced page has the same hash, switch to referencing that instead
@@ -663,7 +669,7 @@ class Job:
                     new_serial = page.access_serial
                     page.sub_ref()
                     page = self.pagetable.referenced_pages[new_hash]
-                    assert page.kv_position == PAGE_SIZE
+                    assert page.kv_position == self.page_tokens
                     seq.allocated_pages[page_before] = page
                     seq.build_block_index_tensor()
                     page.add_ref(new_serial)
@@ -764,7 +770,7 @@ class Job:
                 self.is_finished = True
                 cached = self.rq_cached if self.rq_cached is not None else (
                     self.cached_pages // len(self.sequences),
-                    (self.cached_pages * PAGE_SIZE + self.cached_tokens) // len(self.sequences),
+                    (self.cached_pages * self.page_tokens + self.cached_tokens) // len(self.sequences),
                 )
                 r.update({
                     "full_completion": self.full_completion,
@@ -911,11 +917,11 @@ class Job:
                     self.last_recurrent_checkpoint_pos = replay_from or None
 
             for seq in self.sequences:
-                p_page = seq.kv_position // PAGE_SIZE
+                p_page = seq.kv_position // self.page_tokens
                 seq.kv_position -= offset
                 seq.sequence_ids.truncate(len(seq.sequence_ids) - offset)
                 self.pinned_ids_valid = min(self.pinned_ids_valid, len(seq.sequence_ids))
-                n_page = seq.kv_position // PAGE_SIZE
+                n_page = seq.kv_position // self.page_tokens
                 for pi in range(n_page, len(seq.allocated_pages)):
                     page = seq.allocated_pages[pi]
                     # Pages beyond the last accepted position can hold pre-written draft tokens from an abandoned
@@ -923,10 +929,10 @@ class Job:
                     if pi > p_page and page.kv_position == 0:
                         break
                     page.can_revert = False
-                    if page.kv_position == PAGE_SIZE:
+                    if page.kv_position == self.page_tokens:
                         page.update_hash(random_hash())
                     if pi == n_page:
-                        page.kv_position = seq.kv_position - pi * PAGE_SIZE
+                        page.kv_position = seq.kv_position - pi * self.page_tokens
                     else:
                         page.kv_position = 0
                 # Pages between the replay position and the rewind target keep their metadata: their contents are
@@ -1052,7 +1058,7 @@ class Job:
             "rejected_draft_tokens": self.rejected_draft_tokens,
             "prompt_tokens": self.rq_prompt_tokens or len(seq.input_ids),
             "cached": self.rq_cached if self.rq_cached is not None else (
-                self.cached_pages, self.cached_pages * PAGE_SIZE + self.cached_tokens),
+                self.cached_pages, self.cached_pages * self.page_tokens + self.cached_tokens),
             "sam": self.sam,
             "forced_ids": None if self.forced_ids is None else self.forced_ids[:, self.forced_index:],
             "filters_suspended": self.filters_suspended,
@@ -1111,7 +1117,7 @@ class Job:
         if self.max_rq_tokens is not None:
             if len(self.sequences) == 1:
                 boundary = self.generator.recurrent_checkpoint_interval \
-                    if self.generator.recurrent_cache is not None else PAGE_SIZE
+                    if self.generator.recurrent_cache is not None else self.page_tokens
                 x = len(self.sequences[0].input_ids)
                 y = (x - 1 + self.max_rq_tokens + boundary - 1) // boundary * boundary
                 self.max_rq_tokens = y - x
@@ -1138,9 +1144,9 @@ class Job:
         all_unique_hashes = set()
         all_unique_pages = 0
         for seq in self.sequences:
-            unique_hashes, unique_pages = seq.prepare(self.prefix_token is not None, self.max_rq_tokens)
+            unique_hashes, unique_pages = seq.prepare(self.prefix_token is not None, self.max_rq_tokens, self.page_tokens)
             if self.generator.mtp_draft:
-                seq.max_cached_pages = max(0, (len(seq.sequence_ids) - 2) // PAGE_SIZE)
+                seq.max_cached_pages = max(0, (len(seq.sequence_ids) - 2) // self.page_tokens)
                 cached_hashes = seq.page_hashes[:seq.max_cached_pages]
                 omitted_pages = len(seq.page_hashes) - len(cached_hashes)
                 all_unique_hashes.update(cached_hashes)
@@ -1155,7 +1161,7 @@ class Job:
         max_pages = self.pagetable.max_pages
         assert total_pages <= max_pages, \
             f"Job requires {total_pages} pages (only {max_pages} available) and cannot " + \
-            f"be enqueued. Total cache allocated is {max_pages} * {PAGE_SIZE} = " + \
+            f"be enqueued. Total cache allocated is {max_pages} * {self.page_tokens} = " + \
             f"{self.generator.max_total_tokens} tokens"
         assert len(self.sequences) <= self.generator.max_batch_size, \
             f"Job requires a minimum batch size of {len(self.sequences)}. Max supported batch size in" + \
@@ -1223,48 +1229,48 @@ class Job:
 
             prefill_start = seq.kv_position
             prefill_end = seq.kv_position + self.generator.max_chunk_size
-            prefill_end = (prefill_end // PAGE_SIZE) * PAGE_SIZE
+            prefill_end = (prefill_end // self.page_tokens) * self.page_tokens
             prefill_end = min(prefill_end, len(seq.sequence_ids) - 1)
 
             atomic_mm_prefill = bool(self.embeddings) and self.generator.model.caps.get("atomic_mm_prefill")
             # assert not atomic_mm_prefill or not self.recurrent_state, \
             #     "Atomic prefill is not supported for recurrent models"
 
-            p0 = prefill_start // PAGE_SIZE
-            p1 = (prefill_end + PAGE_SIZE - 1) // PAGE_SIZE
+            p0 = prefill_start // self.page_tokens
+            p1 = (prefill_end + self.page_tokens - 1) // self.page_tokens
             for local_idx in range(p0, p1):
                 if 0 <= cp_pos <= seq.kv_position:
                     break
                 page = seq.allocated_pages[local_idx]
-                if page.kv_position == PAGE_SIZE:
-                    prefill_start = (local_idx + 1) * PAGE_SIZE
+                if page.kv_position == self.page_tokens:
+                    prefill_start = (local_idx + 1) * self.page_tokens
                     seq.kv_position = prefill_start
                     self.cached_pages += 1
                     page.can_revert = False
                 else:
                     break
 
-            p0 = prefill_start // PAGE_SIZE
+            p0 = prefill_start // self.page_tokens
             for local_idx in range(p0, p1):
                 if 0 <= cp_pos <= seq.kv_position:
                     break
                 page = seq.allocated_pages[local_idx]
-                if page.kv_position == PAGE_SIZE:
-                    prefill_end = local_idx * PAGE_SIZE
+                if page.kv_position == self.page_tokens:
+                    prefill_end = local_idx * self.page_tokens
                     break
 
             if prefill_end <= prefill_start:
                 continue
 
-            assert prefill_start % PAGE_SIZE == 0
+            assert prefill_start % self.page_tokens == 0
             prefill_ids = seq.sequence_ids.torch_slice(prefill_start, prefill_end)
 
             # Special case for partial last page, check if there's a page anywhere in the cache that
             # partially matches, then copy keys/values from there. Skip this step for recurrent models
             # since the recurrent checkpoint will always be on a page boundary
-            p0 = prefill_start // PAGE_SIZE
-            p1 = prefill_end // PAGE_SIZE
-            if prefill_start == p0 * PAGE_SIZE and self.generator.recurrent_cache is None:
+            p0 = prefill_start // self.page_tokens
+            p1 = prefill_end // self.page_tokens
+            if prefill_start == p0 * self.page_tokens and self.generator.recurrent_cache is None:
                 prev_hash = None if p0 == 0 else seq.allocated_pages[p0 - 1].phash
                 best_match = 0
                 best_match_page = None
@@ -1305,7 +1311,7 @@ class Job:
             recurrent_last_page = False
             if self.generator.recurrent_cache is not None:
                 seqlen = len(seq.sequence_ids) - 1
-                last_page_b = seqlen // PAGE_SIZE * PAGE_SIZE
+                last_page_b = seqlen // self.page_tokens * self.page_tokens
                 if prefill_start < last_page_b <= prefill_end:
                     prefill_end = last_page_b
                     recurrent_last_page = True
@@ -1417,15 +1423,15 @@ class Job:
                 p2 = min(p1 + 1, len(seq.allocated_pages))
                 for local_idx in range(p0, p2):
                     page = seq.allocated_pages[local_idx]
-                    page.kv_position = min(max(prefill_end - local_idx * PAGE_SIZE, 0), PAGE_SIZE)
+                    page.kv_position = min(max(prefill_end - local_idx * self.page_tokens, 0), self.page_tokens)
                     if local_idx == 0:
                         page.prev_hash = None
                     else:
                         page.prev_hash = seq.allocated_pages[local_idx - 1].phash
-                    pf_a = max(local_idx * PAGE_SIZE, prefill_start)
-                    pf_b = min(local_idx * PAGE_SIZE + PAGE_SIZE, prefill_end)
-                    pfp_a = pf_a - local_idx * PAGE_SIZE
-                    pfp_b = pf_b - local_idx * PAGE_SIZE
+                    pf_a = max(local_idx * self.page_tokens, prefill_start)
+                    pf_b = min(local_idx * self.page_tokens + self.page_tokens, prefill_end)
+                    pfp_a = pf_a - local_idx * self.page_tokens
+                    pfp_b = pf_b - local_idx * self.page_tokens
                     page.sequence[:, pfp_a:pfp_b].copy_(seq.sequence_ids.torch_slice(pf_a, pf_b))
                     page.can_revert = False
 
@@ -1434,7 +1440,7 @@ class Job:
                     seq.prefill_complete = True
 
                 if recurrent_last_page:
-                    self.maybe_stash_recurrent(self.generator.recurrent_cache, PAGE_SIZE)
+                    self.maybe_stash_recurrent(self.generator.recurrent_cache, self.page_tokens)
 
 
         if progress:
@@ -1482,7 +1488,7 @@ class Job:
                 else:
                     self.recurrent_state = self.generator.cache.new_from_stashed(
                         stashed_recurrent_state,
-                        position = cached_pages * PAGE_SIZE,
+                        position = cached_pages * self.page_tokens,
                     )
                     self.last_recurrent_checkpoint_pos = self.recurrent_state.position
 
@@ -1546,9 +1552,9 @@ class Job:
         if override_interval:
             return seq_pos % override_interval == 0
         elif seq_pos >= prompt_len - self.generator.max_chunk_size * 2:
-            return (seq_pos - self.cached_pages * PAGE_SIZE) % self.generator.recurrent_checkpoint_interval == 0
+            return (seq_pos - self.cached_pages * self.page_tokens) % self.generator.recurrent_checkpoint_interval == 0
         else:
-            return (seq_pos - self.cached_pages * PAGE_SIZE) % self.generator.recurrent_checkpoint_interval_pp == 0
+            return (seq_pos - self.cached_pages * self.page_tokens) % self.generator.recurrent_checkpoint_interval_pp == 0
 
 
     def maybe_stash_recurrent(self, cache, interval = None):
@@ -1562,13 +1568,13 @@ class Job:
 
         if self.is_checkpoint_boundary(interval) and \
             self.last_recurrent_checkpoint_pos != seq.kv_position:
-            assert seq.kv_position % PAGE_SIZE == 0
+            assert seq.kv_position % self.page_tokens == 0
 
             self.last_recurrent_checkpoint_pos = seq.kv_position
-            last_page = (seq.kv_position - 1) // PAGE_SIZE
+            last_page = (seq.kv_position - 1) // self.page_tokens
 
             page = seq.allocated_pages[last_page]
-            assert page.kv_position == PAGE_SIZE
+            assert page.kv_position == self.page_tokens
             cache.put(page.phash, self.recurrent_state)
 
             # Prevent setting the same checkpoint twice in a row if prefill ends on the first page of a chunk
@@ -1582,9 +1588,9 @@ class Job:
         """
         seq = self.sequences[0]
         rc = self.generator.recurrent_cache
-        for pi in range(target_pos // PAGE_SIZE - 1, -1, -1):
+        for pi in range(target_pos // self.page_tokens - 1, -1, -1):
             stashed = rc.get_stashed(seq.allocated_pages[pi].phash)
-            if stashed is not None and stashed["position"] == (pi + 1) * PAGE_SIZE:
+            if stashed is not None and stashed["position"] == (pi + 1) * self.page_tokens:
                 return stashed
         return None
 

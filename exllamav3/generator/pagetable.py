@@ -188,7 +188,7 @@ class CachePage:
         if newhash is None:
             newhash = tensor_hash_checksum(self.sequence, self.prev_hash)
         assert self.ref_count > 0
-        assert self.kv_position == PAGE_SIZE
+        assert self.kv_position == self.pagetable.page_tokens
         del self.pagetable.referenced_pages[self.phash]
         self.phash = newhash
         self.can_revert = False
@@ -228,20 +228,20 @@ class Sequence:
         self.mtp_carry_hidden = None
 
 
-    def prepare(self, has_prefix_token: bool, max_new_tokens: int):
+    def prepare(self, has_prefix_token: bool, max_new_tokens: int, page_tokens: int = PAGE_SIZE):
         self.page_hashes = []
         unique_hashes = set()
 
         max_len = len(self.sequence_ids) + max_new_tokens
         if has_prefix_token: max_len += 1
-        context_pages = (len(self.sequence_ids) - 1) // PAGE_SIZE
-        total_pages = (max_len + PAGE_SIZE - 1) // PAGE_SIZE
+        context_pages = (len(self.sequence_ids) - 1) // page_tokens
+        total_pages = (max_len + page_tokens - 1) // page_tokens
 
         r_hash = None
         for i in range(context_pages):
             # TODO: profile/optimize hash function
-            page_ids = self.sequence_ids.torch_slice(i * PAGE_SIZE, (i + 1) * PAGE_SIZE)
-            assert page_ids.shape[-1] == PAGE_SIZE
+            page_ids = self.sequence_ids.torch_slice(i * page_tokens, (i + 1) * page_tokens)
+            assert page_ids.shape[-1] == page_tokens
             r_hash = tensor_hash_checksum(page_ids, r_hash)
             self.page_hashes.append(r_hash)
             unique_hashes.add(r_hash)
@@ -318,7 +318,13 @@ class PageTable:
         """
         self.generator = generator
         self.cache = cache
-        self.max_pages = cache.max_num_tokens // PAGE_SIZE
+        # A pagina LOGICA: PAGE_SIZE tokens sem context parallel, PAGE_SIZE * cp_world com ele,
+        # porque sob CP cada rank guarda PAGE_SIZE tokens intercalados de cada pagina e so tem
+        # max_num_tokens // (PAGE_SIZE * cp_world) paginas fisicas. Um id de pagina acima disso
+        # leria fora do tensor do rank em silencio (achado da prova 24). O hash de prefixo cobre
+        # a pagina logica, entao o cache de prefixo continua valendo.
+        self.page_tokens = generator.page_tokens
+        self.max_pages = cache.max_num_tokens // self.page_tokens
 
         self.access_serial = self.max_pages
         self.referenced_pages = {}
@@ -363,7 +369,7 @@ class PageTable:
                 phash_revert = h,
                 prev_hash = None,
                 prev_hash_revert = None,
-                sequence = torch.empty((1, PAGE_SIZE), dtype = torch.long),
+                sequence = torch.empty((1, self.page_tokens), dtype = torch.long),
                 ref_count = 0,
                 access_serial = idx,
                 access_serial_revert = idx,
@@ -506,7 +512,7 @@ class PageTable:
         makes that harmless.
         """
         self.metrics["evictions"] += 1
-        if page.kv_position == PAGE_SIZE and is_content_hash(page.phash):
+        if page.kv_position == self.page_tokens and is_content_hash(page.phash):
             self.metrics["evictions_live"] += 1
             if self.cpu_tier is not None:
                 self.cpu_tier.store(page, self.access_serial, protect)
@@ -521,7 +527,7 @@ class PageTable:
         Return the complete page currently holding phash, if any.
         """
         page = self.referenced_pages.get(phash) or self.unreferenced_pages.get(phash)
-        if page is not None and page.kv_position == PAGE_SIZE:
+        if page is not None and page.kv_position == self.page_tokens:
             return page
         return None
 
@@ -595,7 +601,7 @@ class PageTable:
                         entry = self.cpu_tier.fetch(h, op.page_index, self.access_serial)
                         op.sequence.copy_(entry["tokens"])
                         op.prev_hash = page_hashes[lp - 1] if lp > 0 else None
-                        op.kv_position = PAGE_SIZE
+                        op.kv_position = self.page_tokens
                         self.metrics["alloc_tier_pages"] += 1
                     allocated_pages.append(op)
 
@@ -609,7 +615,7 @@ class PageTable:
             # preceding page completes during generation, but when a requeued job resumes on a fully cached
             # prompt that moment lies in the previous round, and without the link every requeue round would
             # start a new root, fragmenting the sequence's chain for eviction and defragmentation purposes.
-            if prev is not None and prev.kv_position == PAGE_SIZE:
+            if prev is not None and prev.kv_position == self.page_tokens:
                 op.prev_hash = prev.phash
             allocated_pages.append(op)
             prev = op
@@ -617,7 +623,7 @@ class PageTable:
         # List prefilled pages
         cached_pages = 0
         for page in allocated_pages:
-            if page.kv_position == PAGE_SIZE:
+            if page.kv_position == self.page_tokens:
                 cached_pages += 1
             else:
                 break
@@ -637,7 +643,7 @@ class PageTable:
         self.metrics["alloc_cached_pages"] += cached_pages
 
         # Advance cache over prefilled pages
-        kv_position = cached_pages * PAGE_SIZE
+        kv_position = cached_pages * self.page_tokens
 
         non_sequential_pages = 0
         for page_a, page_b in pairwise(allocated_pages):
@@ -695,7 +701,7 @@ class PageTable:
         """
         complete = {}
         for p in self.all_pages:
-            if p.kv_position == PAGE_SIZE:
+            if p.kv_position == self.page_tokens:
                 complete[p.phash] = p
 
         def prev_of(h):
@@ -806,7 +812,7 @@ class PageTable:
 
         # Check individual hashes
         for page in self.all_pages:
-            if page.kv_position == PAGE_SIZE and page.phash[:8] != b'\x00\x00\x00\x00\x00\x00\x00\x00':
+            if page.kv_position == self.page_tokens and page.phash[:8] != b'\x00\x00\x00\x00\x00\x00\x00\x00':
                 h = tensor_hash_checksum(page.sequence, page.prev_hash)
                 p_assert(page.phash == h)
 
@@ -815,7 +821,7 @@ class PageTable:
             for seq in job.sequences:
                 k, j = 0, 0
                 while j < seq.kv_position:
-                    i, j = j, min(j + PAGE_SIZE, seq.kv_position)
+                    i, j = j, min(j + self.page_tokens, seq.kv_position)
                     jobt = seq.sequence_ids.torch()[:, i : j]
                     paget = seq.allocated_pages[k].sequence[:, 0 : j - i]
                     p_assert(torch.equal(jobt, paget))

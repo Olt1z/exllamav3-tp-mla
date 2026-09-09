@@ -37,7 +37,7 @@ publicar() {
 import os
 from huggingface_hub import HfApi
 api = HfApi(token=os.environ["HF_TOKEN"])
-for f in ("bancada.log", "resumo.txt", "build.log", "10.txt", "10-cobertura.txt", "10-convert.txt", "11.txt", "11-solo.txt", "11-p0.txt", "11-p1.txt", "11-duas.txt", "12.txt", "13.txt", "14.txt", "15.txt", "16.txt", "18.txt", "19.txt", "20.txt", "24.txt", "27.txt", "banda.txt"):
+for f in ("bancada.log", "resumo.txt", "build.log", "10.txt", "10-cobertura.txt", "10-convert.txt", "11.txt", "11-solo.txt", "11-p0.txt", "11-p1.txt", "11-duas.txt", "12.txt", "13.txt", "14.txt", "15.txt", "16.txt", "18.txt", "19.txt", "20.txt", "24.txt", "27.txt", "28.txt", "banda.txt"):
     p = f"/workspace/{f}"
     if os.path.exists(p):
         api.upload_file(path_or_fileobj=p, path_in_repo=f"saidas/tp-mla/$PROVA_ID/{f}", repo_id="$REPO_SAIDAS")
@@ -227,6 +227,30 @@ if [ -n "${SO_27:-}" ]; then
   { echo; echo "--- autosplit · $(date -u +%H:%M:%S)"; } | tee -a /workspace/27.txt
   $S --cache $CACHE --prefill-tokens $CTX --compare /workspace/27-regua.pt 2>&1 | grep -E "$F" | tee -a /workspace/27.txt
   echo "=== FIM 27 · $(date -u +%H:%M:%S)" | tee -a /workspace/27.txt
+  publicar
+  marco "FIM"
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------------------------
+# 28. O GERADOR paginado sob context parallel (etapa 10, lado do motor): pool de paginas, hash de
+# prefixo e lote, com a pagina logica de PAGE_SIZE * dcp tokens. Regua: o mesmo gerador com dcp 1.
+# SO_28=1 roda so isto; 2+ placas; grafo ligado dos dois lados.
+if [ -n "${SO_28:-}" ]; then
+  marco "28. gerador paginado sob context parallel"
+  N=$(nvidia-smi --list-gpus | wc -l)
+  FALHOU_28=0
+  export EXL3_BC_ATTN=${GRAFO_28:-1}
+  G="timeout 1200 python3 tests/bancada/provar_gerador_cp.py -m /workspace/corte --tp --backend nccl --cache 16384"
+  F="carga:|pagina logica|prompts:|^[ABC]:|KL|FALHOU|OK$|Error|Traceback|assert|out of memory"
+  { echo "=== regua: TP$N dcp 1"; } | tee /workspace/28.txt
+  $G --save /workspace/28-regua.pt 2>&1 | grep -E "$F" | tee -a /workspace/28.txt || FALHOU_28=1
+  for dcp in 2 $N; do
+    [ "$dcp" -eq "$N" ] && [ "$N" -eq 2 ] && continue
+    { echo; echo "=== TP$N dcp $dcp"; } | tee -a /workspace/28.txt
+    $G --dcp $dcp --compare /workspace/28-regua.pt --max-kl "${MAX_KL_28:-0.15}" 2>&1 | grep -E "$F" | tee -a /workspace/28.txt || FALHOU_28=1
+  done
+  echo "=== veredito: $([ "$FALHOU_28" = 0 ] && echo GERADOR_CP_OK || echo DIVERGIU)" | tee -a /workspace/28.txt
   publicar
   marco "FIM"
   exit 0

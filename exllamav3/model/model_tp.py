@@ -28,6 +28,10 @@ class Model_TPMixin:
         self.tp_output_device = None
         self.tp_producer = None
         self.tp_backend = None
+        # Context parallel: quantas placas repartem a SEQUENCIA entre si (1 = sem CP). O gerador
+        # le daqui para dimensionar a pagina LOGICA (PAGE_SIZE * cp_world tokens), porque cada
+        # rank so tem max_num_tokens // (PAGE_SIZE * cp_world) paginas fisicas.
+        self.cp_world = 1
         # Devices whose per-forward None acks are still in flight (see forward_tp), and a strong
         # reference to the dispatched args for that pass: pickling CPU tensors (e.g. exported
         # recurrent-state handles) moves their storages into torch shared-memory segments that
@@ -543,6 +547,7 @@ class Model_TPMixin:
         # sempre; dcp = tp replica os pesos de atencao, entao o ponto bom fica no meio -- e por
         # isso ele e um botao do plano, nunca constante.
         dcp = int(tp_options.get("dcp", 1) or 1)
+        self.cp_world = dcp
         allocator = TPAllocator(
             components,
             num_tokens = max_chunk_size,

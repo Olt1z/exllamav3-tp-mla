@@ -5,7 +5,7 @@ from ..model.model import Model
 from ..cache.cache import Cache
 from ..cache.recurrent import RecurrentCache
 from ..tokenizer.tokenizer import Tokenizer
-from ..constants import PAGE_SIZE
+from ..constants import PAGE_SIZE  # so para a pagina logica; contabilidade usa self.page_tokens
 from ..util import cuda_sync_active
 
 logger = logging.getLogger(__name__)
@@ -141,12 +141,13 @@ class Generator:
         cfg = self.model.config
         self.padded_vocab_size = ((cfg.vocab_size + 31) // 32) * 32
 
-        # Paging
+        # Paging. A pagina LOGICA cresce com o grau de context parallel do modelo (ver PageTable)
+        self.page_tokens = PAGE_SIZE * int(getattr(model, "cp_world", 1) or 1)
         self.pagetable = PageTable(self, cache)
         # A cache has exactly one owning generator. Record the takeover and refuse to iterate a superseded generator
         cache.owner_serial = getattr(cache, "owner_serial", 0) + 1
         self.cache_owner_serial = cache.owner_serial
-        self.max_total_tokens = PAGE_SIZE * self.pagetable.max_pages
+        self.max_total_tokens = self.page_tokens * self.pagetable.max_pages
         self._cache_stats_memo = (None, None)
 
         # Draft model
@@ -236,8 +237,8 @@ class Generator:
         if recurrent_checkpoint_interval is None:
             recurrent_checkpoint_interval = model.caps.get("default_recurrent_checkpoint_interval", 2048)
 
-        assert recurrent_checkpoint_interval % PAGE_SIZE == 0 and recurrent_checkpoint_interval % PAGE_SIZE == 0, \
-            "checkpoint interval must be a multiple of the page size (256)"
+        assert recurrent_checkpoint_interval % self.page_tokens == 0 and recurrent_checkpoint_interval % self.page_tokens == 0, \
+            f"checkpoint interval must be a multiple of the page size ({self.page_tokens})"
         def ceil_span(a, b):
             return (a + b - 1) // b * b
         recurrent_checkpoint_interval = recurrent_checkpoint_interval
@@ -350,13 +351,13 @@ class Generator:
         alloc_cached = pt.metrics["alloc_cached_pages"]
         alloc_tier = pt.metrics["alloc_tier_pages"]
         stats = {
-            "page_size": PAGE_SIZE,
-            "max_tokens": pt.max_pages * PAGE_SIZE,
-            "used_tokens": used * PAGE_SIZE,
-            "cached_tokens": cached * PAGE_SIZE,
-            "free_tokens": free * PAGE_SIZE,
-            "tier_cached_tokens": tier_cached * PAGE_SIZE,
-            "tier_max_tokens": tier.max_slots * PAGE_SIZE if tier is not None else 0,
+            "page_size": self.page_tokens,
+            "max_tokens": pt.max_pages * self.page_tokens,
+            "used_tokens": used * self.page_tokens,
+            "cached_tokens": cached * self.page_tokens,
+            "free_tokens": free * self.page_tokens,
+            "tier_cached_tokens": tier_cached * self.page_tokens,
+            "tier_max_tokens": tier.max_slots * self.page_tokens if tier is not None else 0,
             "alloc_pages": alloc,
             "alloc_cached_pages": alloc_cached,
             "alloc_tier_pages": alloc_tier,
@@ -594,7 +595,7 @@ class Generator:
                 chains.append((idx, chain))
         usage = [0] * self.pagetable.max_pages
         for page in self.pagetable.all_pages:
-            usage[page.page_index] = page.kv_position / PAGE_SIZE
+            usage[page.page_index] = page.kv_position / self.page_tokens
         self.visualizer.update(chains, usage)
 
 
@@ -613,7 +614,7 @@ class Generator:
             return None
 
         # Create block index table for batch
-        max_pages_batch = (max_seq_len + PAGE_SIZE - 1) // PAGE_SIZE
+        max_pages_batch = (max_seq_len + self.page_tokens - 1) // self.page_tokens
         block_index = torch.zeros((batch_size, max_pages_batch), dtype = torch.int32)
         cache_seqlens = torch.zeros((batch_size,), dtype = torch.int32)
         batch = 0
@@ -709,7 +710,7 @@ class Generator:
             return None
 
         # Create block index table for batch
-        max_pages_batch = (max_seq_len + PAGE_SIZE - 1) // PAGE_SIZE
+        max_pages_batch = (max_seq_len + self.page_tokens - 1) // self.page_tokens
         block_index = torch.zeros((batch_size, max_pages_batch), dtype = torch.int32)
         cache_seqlens = torch.zeros((batch_size,), dtype = torch.int32)
         batch = 0
@@ -809,7 +810,7 @@ class Generator:
         window = self.num_draft_tokens
 
         # Create block index table for batch
-        max_pages_batch = (max_seq_len + PAGE_SIZE - 1) // PAGE_SIZE
+        max_pages_batch = (max_seq_len + self.page_tokens - 1) // self.page_tokens
         block_index = torch.zeros((batch_size, max_pages_batch), dtype = torch.int32)
         cache_seqlens = torch.zeros((batch_size,), dtype = torch.int32)
         batch = 0
@@ -948,7 +949,7 @@ class Generator:
         # Block-table width is padded to a multiple of 16 pages so the pinned staging buffers
         # cover a few distinct widths only; the extra (zeroed) columns are never dereferenced
         # since the kernels bound their reads by the cache lengths
-        max_pages_batch = (max_seq_len + PAGE_SIZE - 1) // PAGE_SIZE
+        max_pages_batch = (max_seq_len + self.page_tokens - 1) // self.page_tokens
         max_pages_batch = (max_pages_batch + 15) // 16 * 16
         block_index = self._staging("block_index", batch_size, max_pages_batch)
         block_index.zero_()
@@ -1079,7 +1080,7 @@ class Generator:
                 r = num_rejected
                 while r:
                     pos = seq_.kv_position + r
-                    page = seq_.allocated_pages[(pos - 1) // PAGE_SIZE]
+                    page = seq_.allocated_pages[(pos - 1) // self.page_tokens]
                     rp = min(page.kv_position, r)
                     page.kv_position -= rp
                     r -= rp
@@ -1324,7 +1325,7 @@ class Generator:
         num_jobs = self.num_remaining_jobs()
         for job in completed_jobs + requeuing_jobs:
             if job in requeuing_jobs and self.recurrent_cache is not None:
-                job.maybe_stash_recurrent(self.recurrent_cache, PAGE_SIZE)
+                job.maybe_stash_recurrent(self.recurrent_cache, self.page_tokens)
             job.deallocate_pages()
             self.active_jobs.remove(job)
 
