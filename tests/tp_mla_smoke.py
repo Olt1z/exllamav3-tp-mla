@@ -67,6 +67,7 @@ def main():
     p.add_argument("--tp", action = "store_true", help = "carregar com tensor_p = True")
     p.add_argument("--tokens", type = int, default = 64)
     p.add_argument("--cache", type = int, default = 4096)
+    p.add_argument("--chunk", type = int, default = 2048, help = "tamanho do chunk de prefill, como o gerador")
     p.add_argument("--prefill-tokens", type = int, default = 0,
                    help = "enche o prompt até este tamanho (ex.: 3000 passa do index_topk 2048 do GLM-5.3)")
     p.add_argument("--save", help = "grava tokens e logits do decode neste arquivo")
@@ -154,6 +155,7 @@ def main():
     ids = tokenizer.encode(model.default_chat_prompt(pergunta), encode_special_tokens = True)
     assert ids.shape[-1] + n_tokens <= args.cache, "prompt + tokens não cabem no --cache"
     print(f"prompt: {ids.shape[-1]} tokens")
+    t_pf = time.time()
     recurrent_states = None
     if args.prefill_1:
         for j in range(ids.shape[-1] - 1):
@@ -162,10 +164,19 @@ def main():
             model.forward(input_ids = ids[:, j:j + 1], params = params)
             recurrent_states = params.get("recurrent_states")
     else:
-        params = {"attn_mode": "flash_attn", "cache": cache, "past_len": 0, "batch_shape": (1, args.cache)}
-        model.prefill(input_ids = ids[:, :-1], params = params)
-        recurrent_states = params.get("recurrent_states")
+        # Em chunks, como o gerador faz: Model.prefill nao divide, e um prompt de 100k linhas de
+        # uma vez estoura a grade y (65535) do hc_mix (prova 27, "invalid configuration argument")
+        n = ids.shape[-1] - 1
+        for a in range(0, n, args.chunk):
+            b = min(a + args.chunk, n)
+            params = {"attn_mode": "flash_attn", "cache": cache, "past_len": a,
+                      "batch_shape": (1, args.cache), "recurrent_states": recurrent_states}
+            model.prefill(input_ids = ids[:, a:b], params = params)
+            recurrent_states = params.get("recurrent_states")
 
+    torch.cuda.synchronize()
+    t_pf = time.time() - t_pf
+    print(f"prefill: {ids.shape[-1] - 1} tokens em {t_pf:.1f} s = {(ids.shape[-1] - 1) / max(t_pf, 1e-9):.0f} tok/s")
     logits_all = []
     tokens = []
     sampler = GpuSampler()
