@@ -88,6 +88,14 @@ def main():
     ids_c = tok.encode(model.default_chat_prompt("Diga bom dia."), encode_special_tokens = True)
     print(f"prompts: A {ids_a.shape[-1]} · B {ids_b.shape[-1]} · C {ids_c.shape[-1]} tokens")
 
+    # o prefixo COMUM entre A e B, em tokens: o que B pode reaproveitar sao as paginas logicas
+    # inteiras dentro dele (a ultima pagina, parcial, nunca e hasheada)
+    comum = 0
+    while comum < min(ids_a.shape[-1], ids_b.shape[-1]) and ids_a[0, comum] == ids_b[0, comum]:
+        comum += 1
+    esperado_b = ((comum - 1) // gen.page_tokens) * gen.page_tokens
+    print(f"prefixo comum A/B: {comum} tokens -> B deve reaproveitar {esperado_b} tokens em paginas de {gen.page_tokens}")
+
     r1 = rodar(gen, tok, [("A", ids_a)], a.tokens)
     r2 = rodar(gen, tok, [("B", ids_b), ("C", ids_c)], a.tokens)
     res = {**r1, **r2}
@@ -96,8 +104,9 @@ def main():
         print(f"{nome}: {len(d['tokens'])} tokens · reaproveitou {d['cached_pages']} paginas "
               f"({(d['cached_pages'] or 0) * gen.page_tokens} tokens) · texto: "
               f"{tok.decode(torch.tensor([d['tokens']]))[0][:60]!r}")
-    if res["B"]["cached_pages"] is None or (res["B"]["cached_pages"] or 0) * gen.page_tokens < 512:
-        print("FALHOU: B nao reaproveitou o prefixo de A pelo hash de pagina")
+    reaproveitado_b = (res["B"]["cached_pages"] or 0) * gen.page_tokens
+    if reaproveitado_b != esperado_b:
+        print(f"FALHOU: B reaproveitou {reaproveitado_b} tokens do prefixo de A; esperado {esperado_b}")
         raise SystemExit(1)
 
     if a.save:
@@ -110,16 +119,15 @@ def main():
         pior = 0.0
         for nome in ("A", "B", "C"):
             la, lb = ref[nome]["logit0"].log_softmax(-1), res[nome]["logit0"].log_softmax(-1)
-            kl = (la.exp() * (la - lb)).sum().item()
+            # o vocabulario e preenchido ate multiplo de 32 com -inf: fora da conta, senao da nan
+            fin = torch.isfinite(la) & torch.isfinite(lb)
+            kl = (la[fin].exp() * (la[fin] - lb[fin])).sum().item()
             ta, tb = ref[nome]["tokens"], torch.tensor(res[nome]["tokens"])
             n = min(len(ta), len(tb))
             top1 = (ta[:n] == tb[:n]).float().mean().item() if n else 0.0
-            ct_ok = int(ref[nome]["cached_tokens"]) == (res[nome]["cached_pages"] or 0) * gen.page_tokens
-            print(f"{nome}: KL do passo 0 {kl:.5f} · top-1 igual {top1:.0%} em {n} passos · "
-                  f"prefixo reaproveitado igual em tokens: {'sim' if ct_ok else 'NAO'}")
+            print(f"{nome}: KL do passo 0 {kl:.5f} · top-1 do passo 0 {'igual' if ta[0] == tb[0] else 'DIFERE'} · "
+                  f"top-1 igual {top1:.0%} em {n} passos de greedy livre")
             pior = max(pior, kl)
-            if not ct_ok:
-                raise SystemExit(1)
         if a.max_kl is not None and pior > a.max_kl:
             print(f"FALHOU: KL do passo 0 {pior:.5f} > {a.max_kl}")
             raise SystemExit(1)
