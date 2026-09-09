@@ -95,7 +95,7 @@ if [ -n "${SO_19:-}" ]; then
       { echo; echo "=== $placas placas · H_g $cabecas"; } | tee -a /workspace/19.txt
       torchrun --nproc_per_node="$placas" tests/bancada/medir_cp.py \
         --cabecas "$cabecas" --latente "${LATENTE:-512}" \
-        --camadas-mla "${CAMADAS_MLA:-11}" 2>&1 | tee -a /workspace/19.txt
+        --camadas-com-cache "${CAMADAS_COM_CACHE:-11}" 2>&1 | tee -a /workspace/19.txt
     done
   done
   publicar

@@ -2,7 +2,7 @@
 Quanto custa o coletivo do context parallel, isolado do modelo.
 
     torchrun --nproc_per_node=2 tests/bancada/medir_cp.py
-    torchrun --nproc_per_node=4 tests/bancada/medir_cp.py --cabecas 64 --camadas-mla 11
+    torchrun --nproc_per_node=4 tests/bancada/medir_cp.py --cabecas 64 --camadas-com-cache 11
 
 O portão da etapa 1 do plano de context parallel. A pergunta NÃO é "quantos bytes", é "quantos
 lançamentos": a prova 18 mediu que o coletivo em decode é limitado pela CPU emitir, não pela banda.
@@ -18,7 +18,8 @@ elas é o que decide se vale escrever C++ novo:
   v3 AG(lse)+RS   o estado da arte: all-gathera só o lse (minúsculo), reduce-scatter da saída já
                   entrega o head-scatter que o o_proj queria. Dois coletivos, o menor volume.
 
-Cada linha reporta o custo por token extrapolado para `--camadas-mla`, que é o que se compara
+Cada linha reporta o custo por coletivo E o custo por token extrapolado para
+`--camadas-com-cache`, que é o que se compara
 com o passo de decode. `q_len = 8` é o rascunho do DFlash 2, que multiplica o payload por 8.
 """
 import argparse, os, time
@@ -32,7 +33,10 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--cabecas", type = int, default = 64, help = "H_g: cabeças que o rank calcula sob CP")
     p.add_argument("--latente", type = int, default = 512, help = "kv_lora_rank")
-    p.add_argument("--camadas-mla", type = int, default = 11, help = "camadas MLA do modelo (Flash: 11 de 45)")
+    p.add_argument("--camadas-com-cache", type = int, default = 1,
+                   help = "quantas camadas do modelo tem cache; NAO e constante -- sai da "
+                          "contagem de modulos. O default 1 reporta o custo POR CAMADA, que e "
+                          "a grandeza que nao depende de modelo nenhum")
     p.add_argument("--hidden", type = int, default = 4096, help = "para a linha de base do all-reduce de hoje")
     p.add_argument("--repeticoes", type = int, default = 300)
     p.add_argument("--qlens", type = str, default = "1,8", help = "q_len por passo; 8 é o rascunho do DFlash 2")
@@ -50,7 +54,7 @@ def main():
 
     if rank == 0:
         print(f"\n{N} placas · {torch.cuda.get_device_name(local)} · H_g {H} · latente {D} · "
-              f"{a.camadas_mla} camadas MLA\n")
+              f"{a.camadas_com_cache} camadas MLA\n")
         for i in range(1, N):
             ok = torch.cuda.can_device_access_peer(0, i)
             print(f"  P2P 0↔{i}: {'sim' if ok else 'NÃO — a coletiva desce à memória do host'}")
@@ -67,7 +71,7 @@ def main():
 
     if rank == 0:
         print(f"\n{'q_len':>6} {'variante':<14} {'no fio':>10} {'parede':>10} {'enfileirar':>11} "
-              f"{'por token':>10}   (× {a.camadas_mla} camadas MLA)")
+              f"{'por token':>10}   (× {a.camadas_com_cache} camadas MLA)")
 
     for q in [int(x) for x in a.qlens.split(",")]:
         # v1: buffer com um slot por rank, zerado fora do próprio slot, somado
@@ -107,7 +111,7 @@ def main():
         if rank == 0:
             for nome, fio, (parede, cpu) in medidas:
                 print(f"{q:>6} {nome:<14} {fio / 1024:>8.0f} KiB {parede * 1e6:>8.1f} µs "
-                      f"{cpu * 1e6:>8.1f} µs {parede * a.camadas_mla * 1e3:>8.2f} ms")
+                      f"{cpu * 1e6:>8.1f} µs {parede * a.camadas_com_cache * 1e3:>8.2f} ms")
         dist.barrier()
 
     if rank == 0:

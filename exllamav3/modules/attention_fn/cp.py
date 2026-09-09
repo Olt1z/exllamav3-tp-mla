@@ -27,10 +27,13 @@ Os quatro kernels de combine do fork (`_dsa_attn_combine_kernel`, `_mla_decode_c
 `_paged_attn_decode_combine_kernel`, `_paged_attn_prefill_combine_kernel`) ficam intocados: eles
 já produzem `o_local`, e o `lse_r` sai de `ws_ml`, que eles leem mas não consomem inteiro.
 
-Medido em 08/09/2026 (prova 19): o par all_gather(lse) + reduce_scatter custa 0,78 ms por token
-nas 11 camadas MLA do GLM-5.3-Flash em TP4 com `dcp = 2`, ABAIXO de um all-reduce dos que já
-existem. As outras duas formas (all_reduce de slot, all_gather da parcial inteira) reprovaram o
-portão com rascunho de decode.
+Medido em 08/09/2026 (prova 19): o par all_gather(lse) + reduce_scatter custa, POR CAMADA COM
+CACHE, menos que um all-reduce dos que ja existem -- 71 us contra 81 us de um all_reduce de 8 KB,
+porque all_reduce e internamente reduce-scatter + all-gather e paga duas fases onde este par paga
+uma. As outras duas formas (all_reduce de slot, all_gather da parcial inteira) reprovaram o portao
+com rascunho de decode. O custo por token e esse valor vezes o numero de camadas com cache DO
+MODELO, que se le da contagem de modulos -- nao e constante (no caso de prova sao 11 de 45, e da
+0,78 ms em TP4 com dcp = 2).
 """
 from __future__ import annotations
 
