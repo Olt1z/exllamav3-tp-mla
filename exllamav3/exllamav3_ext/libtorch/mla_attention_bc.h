@@ -118,7 +118,9 @@ py::class_<BC_MLAttention, std::shared_ptr<BC_MLAttention>>(m, "BC_MLAttention")
     py::arg("absorb_gy"),
     py::arg("unfold_gx"),
     py::arg("x_st") = py::none(),
-    py::arg("y_st") = py::none()
+    py::arg("y_st") = py::none(),
+    py::arg("o_lat_u") = py::none(),
+    py::arg("unfold_heads") = 0
 )
 .def("configure_slot_dsa", &BC_MLAttention::configure_slot_dsa,
     py::arg("bsz"),
@@ -148,4 +150,9 @@ py::class_<BC_MLAttention, std::shared_ptr<BC_MLAttention>>(m, "BC_MLAttention")
     py::arg("k_pool_update") = py::none(),
     py::arg("k_pool_expand") = py::none()
 )
-.def("run", &BC_MLAttention::run);
+.def("run", &BC_MLAttention::run,
+    py::arg("bsz"), py::arg("q_len"), py::arg("x"), py::arg("y"), py::arg("cache_seqlens"),
+    py::arg("block_table"), py::arg("position"), py::arg("positions"), py::arg("position_ids"),
+    py::arg("regime"), py::arg("t_total"), py::arg("ext_indices"),
+    py::arg("phase") = 0
+);

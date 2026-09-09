@@ -45,6 +45,10 @@ class BCMLA:
         m = module
 
         self.num_q_heads = m.num_q_heads
+        # Context parallel (etapa 8): o bloco roda em duas fases capturadas e o combine entre
+        # os ranks em eager no meio, sobre os estaticos guardados em cp_slots
+        self.cp_world, self.cp_rank = m.cp_world, m.cp_rank
+        self.cp_slots = {}
         self.hidden_size = m.hidden_size
         self.kv_lora_rank = m.kv_lora_rank
         self.qk_rope_head_dim = m.qk_rope_head_dim
@@ -250,7 +254,7 @@ class BCMLA:
                                             "CP_WORLD", "CP_RANK")},
                 dict(page_size = PAGE_SIZE, W_TOT = w_tot,
                      W_PAD = triton.next_power_of_2(w_tot), N_G = groups, D_r = D_r,
-                     CP_WORLD = 1, CP_RANK = 0),
+                     CP_WORLD = self.cp_world, CP_RANK = self.cp_rank),
                 2, 2)
         else:
             k_append = _compile_kernel(dev, _mla_kv_update_kernel,
@@ -258,7 +262,8 @@ class BCMLA:
                  "kpe_cache": "*fp16", "block_table": "*i32", "cache_seqlens": "*i32",
                  "num_pages_per_seq": "i32", "append_len": "i32"}
                 | {n: "constexpr" for n in ("page_size", "D_c", "D_r", "CP_WORLD", "CP_RANK")},
-                dict(page_size = PAGE_SIZE, D_c = D_c, D_r = D_r, CP_WORLD = 1, CP_RANK = 0),
+                dict(page_size = PAGE_SIZE, D_c = D_c, D_r = D_r,
+                     CP_WORLD = self.cp_world, CP_RANK = self.cp_rank),
                 4, 2)
 
         # Same tuning as the dispatch wrapper (mla_attn_triton_decode)
@@ -294,7 +299,7 @@ class BCMLA:
                  D_r = D_r, scale = float(self.sm_scale), CAUSAL = True, FINAL = False,
                  BLOCK_M = block_m, BLOCK_H = block_h, BLOCK_ROWS = block_rows,
                  BLOCK_N = block_n,
-                 CP_WORLD = 1, CP_RANK = 0),   # o grafo recusa CP (build_bc_mla)
+                 CP_WORLD = self.cp_world, CP_RANK = self.cp_rank),
             n_warps, n_stages)
 
         k_combine = _compile_kernel(dev, _mla_decode_combine_kernel,
@@ -306,11 +311,14 @@ class BCMLA:
                  BLOCK_M = block_m, BLOCK_H = block_h, BLOCK_ROWS = block_rows),
             4, 1)
 
+        # Sob CP o unfold e o o_proj correm sobre a sub-faixa do rank (H / dcp cabecas), que e
+        # a fatia que w_uv_flat e o_proj receberam no tp_import
+        H_o = H // self.cp_world
         unfold_bm = min(64, triton.next_power_of_2(max(R, 16)))
         k_unfold = _compile_kernel(dev, _mla_unfold_kernel,
             {"o_lat": "*fp16", "w_uv_flat": "*fp16", "out": "*fp16", "R": "i32"}
             | {n: "constexpr" for n in ("n_q_heads", "D_c", "D_v", "BLOCK_M", "BLOCK_K")},
-            dict(n_q_heads = H, D_c = D_c, D_v = D_v, BLOCK_M = unfold_bm, BLOCK_K = 128),
+            dict(n_q_heads = H_o, D_c = D_c, D_v = D_v, BLOCK_M = unfold_bm, BLOCK_K = 128),
             4, 2)
 
         # Static intermediates, shared between layers on the same device. Bucketed flat
@@ -335,7 +343,8 @@ class BCMLA:
         q_pe = sbuf("bcm_qpe", R, H, D_r)
         q_lat = sbuf("bcm_qlat", H, R, D_c)
         o_lat = sbuf("bcm_olat", H, R, D_c)
-        o = sbuf("bcm_o", rows("o"), H * D_v)
+        o = sbuf("bcm_o", rows("o"), H_o * D_v)
+        o_lat_cp = sbuf("bcm_olatcp", H_o, R, D_c) if self.cp_world > 1 else None
         # Staged input (same buffer the DSA indexer stages into) and fp16 o_proj output
         x_st = sbuf("bcm_xst", R_pad, self.hidden_size) if self.stage_x else None
         y_st = sbuf("bcm_yst", R_pad, self.hidden_size, dtype = self.o_dtype) if f["o"] else None
@@ -358,6 +367,12 @@ class BCMLA:
             block_n, splits_cap, programs,
             triton.cdiv(R, absorb_bm), D_c // 128, triton.cdiv(R, unfold_bm),
             x_st, y_st,
+            o_lat_u = o_lat_cp, unfold_heads = H_o if self.cp_world > 1 else 0,
+        )
+        self.cp_slots[(bsz, q_len, regime)] = dict(
+            o_lat = o_lat, o_lat_cp = o_lat_cp, partial_ml = partial_ml, programs = programs,
+            splits_cap = splits_cap, block_n = block_n, block_m = block_m, block_h = block_h,
+            block_rows = block_rows,
         )
 
         if self.indexer_mode is not None:
@@ -519,7 +534,8 @@ class BCMLA:
             } | {n: "constexpr" for n in (
                 "H", "page_size", "D_c", "D_c_pad", "D_r", "K_pad", "compress_rate", "scale",
                 "HAS_WINDOW", "DENSE_POOL", "BLOCK_H", "BLOCK_N", "BLOCK_W", "SEQ",
-                "MULTIROW", "DEBUG_BOUNDS", "DEBUG_PAGES", "Q_SPLIT", "OUT_LATENT", "QC")}
+                "MULTIROW", "DEBUG_BOUNDS", "DEBUG_PAGES", "Q_SPLIT", "OUT_LATENT", "QC",
+                "CP_WORLD", "CP_RANK")}
             consts_s = dict(
                 H = H, page_size = PAGE_SIZE, D_c = D_c,
                 D_c_pad = 1 << (D_c - 1).bit_length(), D_r = D_r, K_pad = kp,
@@ -532,8 +548,11 @@ class BCMLA:
                 DEBUG_BOUNDS = 0, DEBUG_PAGES = 0,
                 Q_SPLIT = 1, OUT_LATENT = 1,
                 QC = self.k_bits if self.quant else 0,
+                CP_WORLD = self.cp_world, CP_RANK = self.cp_rank,
             )
             k_dsa_split = _compile_kernel(dev, _dsa_attn_split_kernel, sig_s, consts_s, 4, 2)
+            self.cp_slots[(bsz, q_len, regime)].update(
+                dsa_ws_ml = ws_ml, dsa_hb = hb, dsa_splits = N_SPLITS, dsa_block_h = BLOCK_H)
 
             sig_c = {
                 "ws_ml": "*fp32:16", "ws_acc": "*fp32:16", "sinks": "*fp32:16",
@@ -599,11 +618,43 @@ class BCMLA:
             self._configure(bsz, q_len, regime)
             self.configured.add((bsz, q_len, regime))
         y = torch.empty((bsz, q_len, self.hidden_size), dtype = self.o_dtype, device = x.device)
-        self.bc.run(bsz, q_len, x, y, cache_seqlens, block_table, position, positions,
-                    position_ids, regime, t_total, ext_indices)
+        if self.cp_world == 1:
+            self.bc.run(bsz, q_len, x, y, cache_seqlens, block_table, position, positions,
+                        position_ids, regime, t_total, ext_indices)
+        else:
+            # Duas fases capturadas com o combine entre os ranks em eager no meio (os coletivos
+            # nao entram no bloco gravado, como o all-reduce do TP que roda depois dele)
+            self.bc.run(bsz, q_len, x, y, cache_seqlens, block_table, position, positions,
+                        position_ids, regime, t_total, ext_indices, phase = 1)
+            self._cp_combinar(bsz, q_len, regime, params, block_table)
+            self.bc.run(bsz, q_len, x, y, cache_seqlens, block_table, position, positions,
+                        position_ids, regime, t_total, ext_indices, phase = 2)
         if regime and self.indexer_mode == "full":
             params["dsa_topk_indices"] = self.slot_indices[(bsz, q_len)]
         return y
+
+
+    def _cp_combinar(self, bsz, q_len, regime, params, block_table):
+        """O combine entre os ranks do grupo de CP, entre as duas fases do grafo: o lse local
+        sai das parciais que o split ja deixou nos estaticos (denso: partial_ml; esparso:
+        dsa_ws_ml), e o resultado (H / dcp, R, D_c) vai para o estatico que o unfold le."""
+        from .cp import cp_lse_local, reordenar_lse_mla_denso, reordenar_lse_dsa, cp_combinar
+        cs = self.cp_slots[(bsz, q_len, regime)]
+        H, D_c, R = self.num_q_heads, self.kv_lora_rank, bsz * q_len
+        if regime:
+            bruto = cp_lse_local(cs["dsa_ws_ml"], R * cs["dsa_hb"], cs["dsa_splits"], cs["dsa_block_h"])
+            lse = reordenar_lse_dsa(bruto, R, H, cs["dsa_block_h"])
+        else:
+            # O numero de splits VIVO e a mesma conta do C++ (mla_split_config): sai da largura
+            # da block table por chamada; os splits acima dele nao gravaram nada
+            max_k = block_table.shape[1] * PAGE_SIZE
+            num_splits = max(1, min(cs["splits_cap"], -(-max_k // (4 * cs["block_n"]))))
+            bruto = cp_lse_local(cs["partial_ml"], cs["programs"], num_splits, cs["block_rows"])
+            lse = reordenar_lse_mla_denso(bruto, bsz, q_len, H, cs["block_m"], cs["block_h"],
+                                          cs["block_rows"])
+        o, _ = cp_combinar(params["backend"], cs["o_lat"], lse, R, H, D_c, self.cp_rank,
+                           self.cp_world, stride_row = D_c, stride_head = R * D_c)
+        cs["o_lat_cp"].copy_(o)
 
 
 def _proj_ok(p, in_features = None, out_features = None):
@@ -640,9 +691,6 @@ def build_bc_mla(module, layer):
     dev = torch.device(m.device)
     if not (
         bc_attn_enable and
-        # Sob context parallel o grafo recusa: e um orquestrador proprio, e o combine entre
-        # ranks so existe no caminho de despacho (etapa 8 do plano de CP)
-        m.cp_world == 1 and
         # NoPE models (D_r 0) compile the rope stages out; otherwise a rope instance with a
         # supported style is required
         (D_r == 0 or (

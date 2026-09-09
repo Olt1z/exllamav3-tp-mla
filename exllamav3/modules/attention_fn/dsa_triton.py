@@ -108,6 +108,8 @@ if has_triton:
         QC: tl.constexpr = 0,          # pool_c is the packed quantized pool (QC bits per
                                        # value, 32-value groups, H32-rotated domain)
         EMIT_LSE: tl.constexpr = 0,    # context parallel: grava o lse local (R, H) em `lse`
+        CP_WORLD: tl.constexpr = 1,    # context parallel: intersecao do top-k com a fatia
+        CP_RANK: tl.constexpr = 0,
     ):
         """One program per (query row, head block); heads are the MMA M dim. Consecutive
         programs cover one query's head blocks so gathers stay L2-resident. Two KV phases:
@@ -216,6 +218,10 @@ if has_triton:
                 idx = tl.where(offs_n < n_end, offs_n, -1)
             else:
                 idx = tl.load(indices + row * K_pad + offs_n, mask = offs_n < n_end, other = -1)
+                if CP_WORLD > 1:
+                    # context parallel: o top-k e global (indexador replicado); este rank atende
+                    # so aos que possui, na posicao local, e o resto vira -1 (mascarado abaixo)
+                    idx = tl.where((idx >= 0) & (idx % CP_WORLD == CP_RANK), idx // CP_WORLD, -1)
             in_range = idx >= 0
             idx_s = tl.where(in_range, idx, 0)
             page = idx_s // page_size
@@ -342,6 +348,8 @@ if has_triton:
                                        # are D_c wide and the combine emits (H, R, D_c)
         QC: tl.constexpr = 0,          # packed quantized pool (see _dsa_attn_kernel); the
                                        # partials stay in the rotated domain
+        CP_WORLD: tl.constexpr = 1,    # context parallel: intersecao do top-k com a fatia
+        CP_RANK: tl.constexpr = 0,
     ):
         """Flash-decoding split phase: each program covers one (query row, head block) and a
         contiguous slice of that row's VIRTUAL key sequence [window keys ++ pool entries],
@@ -465,6 +473,10 @@ if has_triton:
                 idx = tl.where(offs_n < p1, offs_n, -1)
             else:
                 idx = tl.load(indices + row * K_pad + offs_n, mask = offs_n < p1, other = -1)
+                if CP_WORLD > 1:
+                    # context parallel: o top-k e global (indexador replicado); este rank atende
+                    # so aos que possui, na posicao local, e o resto vira -1 (mascarado abaixo)
+                    idx = tl.where((idx >= 0) & (idx % CP_WORLD == CP_RANK), idx // CP_WORLD, -1)
             in_range = idx >= 0
             idx_s = tl.where(in_range, idx, 0)
             page = idx_s // page_size
@@ -872,6 +884,8 @@ def dsa_attn(
                              # paged pools; 256 with an identity table for contiguous pools)
     nc_block = False,        # DSpark draft mode: non-causal chunk + paged window history
                              # (single job per call; forces the one-shot kernel)
+    cp_world = 1,            # context parallel: os kernels fazem a intersecao do top-k global
+    cp_rank = 0,             # com a fatia deste rank (idx % world == rank -> idx // world)
     devolver_lse = False,    # context parallel: alem da saida, o log-sum-exp local por
                              # (linha, cabeca) em ordem (R, H). Ver modules/attention_fn/cp.py
     multirow = None,         # batched jobs: dict(q_pos, win_floor, ring_beg, pool_len,
@@ -1025,6 +1039,7 @@ def dsa_attn(
                 DEBUG_BOUNDS = dbg, DEBUG_PAGES = dbg_pages,
                 Q_SPLIT = 1 if q_split else 0, OUT_LATENT = 1 if out_latent else 0,
                 QC = qc_bits,
+                CP_WORLD = cp_world, CP_RANK = cp_rank,
                 num_warps = num_warps, num_stages = 2,
             )
             _dsa_attn_combine_kernel[(R * hb, triton.cdiv(D_out, 128))](
@@ -1068,6 +1083,7 @@ def dsa_attn(
             Q_SPLIT = 1 if q_split else 0, OUT_LATENT = 1 if out_latent else 0,
             QC = qc_bits,
             EMIT_LSE = 1 if devolver_lse else 0,
+            CP_WORLD = cp_world, CP_RANK = cp_rank,
             num_warps = num_warps, num_stages = num_stages,
         )
     if devolver_lse:

@@ -176,7 +176,9 @@ void BC_MLAttention::configure_slot
     int absorb_gy,
     int unfold_gx,
     c10::optional<at::Tensor> x_st,
-    c10::optional<at::Tensor> y_st
+    c10::optional<at::Tensor> y_st,
+    c10::optional<at::Tensor> o_lat_u,
+    int unfold_heads
 )
 {
     Slot& s = slot(bsz, q_len, regime);
@@ -232,8 +234,14 @@ void BC_MLAttention::configure_slot
     s.q_pe4 = s.q_pe.view({bsz, q_len, num_q_heads, qk_rope_head_dim});
     s.kpe4 = s.kpe.view({bsz, q_len, 1, qk_rope_head_dim});
 
+    s.o_lat_u = o_lat_u ? o_lat_u.value() : s.o_lat;
+    s.unfold_heads = unfold_heads > 0 ? unfold_heads : num_q_heads;
+    TORCH_CHECK(s.o_lat_u.is_contiguous() && s.o.size(1) == (int64_t) s.unfold_heads * v_head_dim,
+                "BC_MLAttention: o_lat_u/o must match unfold_heads");
     s.graph = std::make_unique<Graph>();
+    s.graph2 = std::make_unique<Graph>();
     s.runs = 0;
+    s.runs2 = 0;
     s.configured = true;
 }
 
@@ -353,7 +361,8 @@ void BC_MLAttention::run_gr
     int regime,
     int64_t t_total,
     const c10::optional<at::Tensor>& ext_indices,
-    Graph* graph
+    Graph* graph,
+    int phase
 )
 {
     cudaStream_t stream = graph ? graph->capture_stream : at::cuda::getCurrentCUDAStream().stream();
@@ -849,16 +858,45 @@ void BC_MLAttention::run_gr
 
     }   // regime == 0
 
-    // Unfold W_UV per head from the flat layout, emitting token-major o_proj input
+    // Sob context parallel a fase 1 termina aqui: o combine entre os ranks roda em eager sobre
+    // o_lat / partial_ml e escreve o_lat_u, e a fase 2 (run_gr_tail) e capturada a parte
+    if (phase == 1) return;
+    run_gr_tail(s, R, y, graph);
+}
+
+void BC_MLAttention::run_gr_tail(Slot& s, int R, at::Tensor& y, Graph* graph)
+{
+    cudaStream_t stream = graph ? graph->capture_stream : at::cuda::getCurrentCUDAStream().stream();
+    static const bool bcm_debug = [](){ const char* e = getenv("EXL3_BCM_DEBUG"); return e && *e == '1'; }();
+    auto dbg = [&](const char* tag)
+    {
+        if (!bcm_debug || graph) return;
+        cudaStreamSynchronize(stream);
+        cudaError_t err = cudaGetLastError();
+        if (err != cudaSuccess)
+        {
+            printf("BC_MLAttention debug: fault after stage %s: %s\n", tag, cudaGetErrorString(err));
+            fflush(stdout);
+            TORCH_CHECK(false, "BC_MLAttention stage fault, see stdout");
+        }
+    };
+    at::Tensor xh_flat = xh.view({-1});
+    auto rows = [&](const at::Tensor& t, bool fp16) -> at::Tensor { return fp16 ? t : t.narrow(0, 0, R); };
+    auto xh_for = [&](const std::shared_ptr<BC_LinearEXL3>& p, int w) -> at::Tensor
+        { return p ? xh_flat.narrow(0, 0, (int64_t) R * w).view({R, w}) : xh_flat; };
+
+    // Unfold W_UV per head from the flat layout, emitting token-major o_proj input. Under
+    // context parallel the input is the combined (H / dcp, R, D_c) static and the head count
+    // is the rank's sub-range (w_uv_flat and o_proj are already that slice)
     {
         std::vector<void*> args =
         {
-            (void*) s.o_lat.data_ptr(),
+            (void*) s.o_lat_u.data_ptr(),
             (void*) w_uv_flat.data_ptr(),
             (void*) s.o.data_ptr(),
             (void*) (intptr_t) R,
         };
-        s.k_unfold->launch(s.unfold_gx, num_q_heads, 1, args, stream);
+        s.k_unfold->launch(s.unfold_gx, s.unfold_heads, 1, args, stream);
     }
     dbg("unfold");
 
@@ -868,7 +906,7 @@ void BC_MLAttention::run_gr
     bool fo = o_proj_fp16 != nullptr;
     TORCH_CHECK(!fo || s.y_st.dtype() == y.dtype(), "BC_MLAttention: y_st dtype must match y for the fp16 o_proj");
     at::Tensor y_out = fo ? s.y_st : y2;
-    linear_gr(o_proj, o_proj_fp16, rows(s.o, fo), y_out, xh_for(o_proj, num_q_heads * v_head_dim), graph);
+    linear_gr(o_proj, o_proj_fp16, rows(s.o, fo), y_out, xh_for(o_proj, s.unfold_heads * v_head_dim), graph);
     if (fo)
     {
         at::Tensor y_rows = s.y_st.narrow(0, 0, R);
@@ -890,7 +928,8 @@ void BC_MLAttention::run
     const c10::optional<at::Tensor>& position_ids,
     int regime,
     int64_t t_total,
-    const c10::optional<at::Tensor>& ext_indices
+    const c10::optional<at::Tensor>& ext_indices,
+    int phase
 )
 {
     py::gil_scoped_release release;
@@ -906,24 +945,33 @@ void BC_MLAttention::run
     TORCH_CHECK(!index_kpool || bsz == 1, "BC_MLAttention: kpool indexer requires bsz 1");
 
     // First run per slot executes eagerly (GEMM autotune, kernel warmup); the second run is
-    // captured, then launched below like every later run, with only the I/O pointers patched
-    if (s.runs == 0)
+    // captured, then launched below like every later run, with only the I/O pointers patched.
+    // Under context parallel phases 1 and 2 have their own graph and their own run counter
+    TORCH_CHECK(phase >= 0 && phase <= 2, "BC_MLAttention: bad phase");
+    Graph* g = (phase == 2) ? s.graph2.get() : s.graph.get();
+    int& runs = (phase == 2) ? s.runs2 : s.runs;
+    int R = bsz * q_len;
+    if (runs == 0)
     {
-        run_gr(bsz, q_len, s, x, y, cache_seqlens, block_table, position, positions, position_ids, regime, t_total, ext_indices, nullptr);
-        s.runs = 1;
+        if (phase == 2) run_gr_tail(s, R, y, nullptr);
+        else run_gr(bsz, q_len, s, x, y, cache_seqlens, block_table, position, positions, position_ids, regime, t_total, ext_indices, nullptr, phase);
+        runs = 1;
         return;
     }
 
-    if (!s.graph->ready)
+    if (!g->ready)
     {
-        s.graph->capture_begin();
-        run_gr(bsz, q_len, s, x, y, cache_seqlens, block_table, position, positions, position_ids, regime, t_total, ext_indices, s.graph.get());
-        s.graph->capture_end();
-        s.runs = 2;
+        g->capture_begin();
+        if (phase == 2) run_gr_tail(s, R, y, g);
+        else run_gr(bsz, q_len, s, x, y, cache_seqlens, block_table, position, positions, position_ids, regime, t_total, ext_indices, g, phase);
+        g->capture_end();
+        runs = 2;
     }
 
     std::vector<PPTR> params;
     params.reserve(20);
+    if (phase != 2)
+    {
 
     // Input staging (some projection reads x through cuBLAS): one copy at the head of the graph
     bool stage_x = stages_x();
@@ -1052,11 +1100,15 @@ void BC_MLAttention::run
         params.emplace_back(GP_attn_num_splits, (void*) (uintptr_t) num_splits);   // combine kernel
     }
 
-    // Output projection: the C site (EXL3) or the copy-out destination (fp16)
-    if (o_proj_fp16)
-        params.emplace_back(GP_copy2d_dst, (void*) y.data_ptr());
-    else
-        params.emplace_back(GP_gemm_C, (void*) y.data_ptr());
+    }   // phase != 2
+    if (phase != 1)
+    {
+        // Output projection: the C site (EXL3) or the copy-out destination (fp16)
+        if (o_proj_fp16)
+            params.emplace_back(GP_copy2d_dst, (void*) y.data_ptr());
+        else
+            params.emplace_back(GP_gemm_C, (void*) y.data_ptr());
+    }
 
-    s.graph->launch(params, stream);
+    g->launch(params, stream);
 }

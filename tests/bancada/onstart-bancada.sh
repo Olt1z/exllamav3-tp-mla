@@ -210,7 +210,8 @@ if [ -n "${SO_24:-}" ]; then
   marco "24. forward sob context parallel"
   N=$(nvidia-smi --list-gpus | wc -l)
   FALHOU_24=0
-  export EXL3_BC_ATTN=0
+  # GRAFO_24=1 liga o grafo CUDA dos DOIS lados (etapa 8: o grafo em duas fases sob CP)
+  export EXL3_BC_ATTN=${GRAFO_24:-0}
   # prefill em CHUNK (o caminho normal do gerador): desde a 5d o CP atende prefill e rascunho
   SMOKE="timeout 1800 python3 tests/tp_mla_smoke.py -m /workspace/corte --tp --tokens ${TOKENS_24:-32} --cache 8192"
   for pf in 0 "${PREFILL_ESPARSO:-3000}"; do

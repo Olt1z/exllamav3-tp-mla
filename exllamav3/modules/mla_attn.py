@@ -985,19 +985,16 @@ class MLAttention(Module):
         # wise be the one sparse-path transient that grows with context (pages)
         bt = block_table if bsz == 1 or seqlen == 1 \
             else block_table.repeat_interleave(seqlen, dim = 0)
-        if self.cp_world > 1:
-            # O top-k e GLOBAL (o plano do indexador e replicado, etapa 6). Este rank atende so
-            # aos selecionados que POSSUI, na posicao local; os outros viram -1, que o kernel ja
-            # mascara por elemento (`in_range = idx >= 0`) -- k_len nao muda e nada e compactado.
-            w, r = self.cp_world, self.cp_rank
-            indices = torch.where((indices >= 0) & (indices % w == r), indices // w,
-                                  torch.full_like(indices, -1))
+        # Context parallel: o top-k e GLOBAL (o plano do indexador e replicado, etapa 6) e a
+        # intersecao com a fatia deste rank acontece DENTRO do kernel de gather (CP_WORLD /
+        # CP_RANK), porque no grafo CUDA o top-k alimenta o gather sem passar por Python
         o_lat = dsa_attn(
             q_lat, ckv_cache, kpe_cache, bt,
             indices = indices, k_len = indices.shape[1],
             scale = self.sm_scale, page_size = ckv_cache.shape[1],
             q_pe = q_pe.reshape(R, H, D_r), out_latent = True,
             qc = qc,   # packed latent pages read online (scales, bits)
+            cp_world = self.cp_world, cp_rank = self.cp_rank,
             devolver_lse = self.cp_world > 1,
         )
         if self.cp_world > 1:

@@ -179,6 +179,15 @@ struct BC_MLAttention
         int fewq_gy = 0;
 
         std::unique_ptr<Graph> graph;
+
+        // Context parallel: o bloco e capturado em DUAS fases -- a cabeca ate o combine
+        // (graph) e o unfold + o_proj (graph2) -- e o combine entre os ranks roda em eager no
+        // meio, em Python, sobre os estaticos o_lat / partial_ml / dsa_ws_ml. Sem CP so a fase
+        // 0 (bloco inteiro) existe e graph2 fica sem uso.
+        std::unique_ptr<Graph> graph2;
+        int runs2 = 0;
+        at::Tensor o_lat_u;   // entrada do unfold: o_lat, ou o combinado (H / dcp, R, D_c) sob CP
+        int unfold_heads = 0;
     };
     std::vector<Slot> slots;
 
@@ -272,7 +281,9 @@ struct BC_MLAttention
         int absorb_gy,
         int unfold_gx,
         c10::optional<at::Tensor> x_st = {},   // required when stages_x()
-        c10::optional<at::Tensor> y_st = {}    // required when o_proj is fp16
+        c10::optional<at::Tensor> y_st = {},   // required when o_proj is fp16
+        c10::optional<at::Tensor> o_lat_u = {},   // context parallel: entrada do unfold (H / dcp, R, D_c)
+        int unfold_heads = 0                      // context parallel: cabecas do unfold e do o_proj
     );
 
     // Attaches the DSA statics/kernels to an already-configured slot. Sparse-only pieces are
@@ -320,7 +331,8 @@ struct BC_MLAttention
         const c10::optional<at::Tensor>& position_ids,
         int regime,
         int64_t t_total,
-        const c10::optional<at::Tensor>& ext_indices
+        const c10::optional<at::Tensor>& ext_indices,
+        int phase = 0   // 0: bloco inteiro; 1: cabeca ate o combine; 2: unfold + o_proj (CP)
     );
 
     void run_gr
@@ -338,8 +350,13 @@ struct BC_MLAttention
         int regime,
         int64_t t_total,
         const c10::optional<at::Tensor>& ext_indices,
-        Graph* graph
+        Graph* graph,
+        int phase = 0
     );
+
+    // A cauda do bloco (unfold + o_proj), separada porque sob context parallel ela e a
+    // segunda fase capturada, depois do combine entre os ranks
+    void run_gr_tail(Slot& s, int R, at::Tensor& y, Graph* graph);
 
     // True when some projection reads x through cuBLAS, i.e. x is copied into x_st once at the
     // head of the graph (the DSA indexer then reuses that copy)
