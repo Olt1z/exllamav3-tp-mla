@@ -1,0 +1,27 @@
+=== 24c · e7a0b99 tp: os grupos de context parallel seguem a ordem dos ranks, nao o id da placa · 01:43:42
+=== c1 · ruido: regua repetida (dcp 1, grafo) vs regua
+carga: 34 s, dispositivos [1, 2, 3, 0]
+decode: 16 tokens (após 16 de aquecimento) em 0.08 s = 207.24 tok/s
+KL média 0.00000  KL máx 0.00000  |dif| máx 0.000  top-1 igual 100.0%
+OK
+=== c2 · grafo x despacho: dcp 1 SEM grafo vs regua (grafo)
+carga: 33 s, dispositivos [1, 2, 3, 0]
+decode: 16 tokens (após 16 de aquecimento) em 0.16 s = 99.82 tok/s
+KL média 0.02581  KL máx 0.14010  |dif| máx 2.791  top-1 igual 75.0%
+OK
+=== c3 · dcp 2 (grupos por rank) vs regua
+carga: 41 s, dispositivos [1, 2, 3, 0]
+decode: 16 tokens (após 16 de aquecimento) em 0.32 s = 49.57 tok/s
+KL média 0.03566  KL máx 0.15312  |dif| máx 2.939  top-1 igual 65.6%
+OK
+=== c4 · dcp 4 vs regua SEM grafo
+carga: 37 s, dispositivos [1, 2, 3, 0]
+decode: 16 tokens (após 16 de aquecimento) em 0.27 s = 58.96 tok/s
+KL média 0.04579  KL máx 0.16585  |dif| máx 3.099  top-1 igual 81.2%
+OK
+=== c5 · dcp 2 vs regua SEM grafo
+carga: 37 s, dispositivos [1, 2, 3, 0]
+decode: 16 tokens (após 16 de aquecimento) em 0.27 s = 58.99 tok/s
+KL média 0.03178  KL máx 0.14275  |dif| máx 2.816  top-1 igual 68.8%
+OK
+=== FIM 24c · 01:49:08

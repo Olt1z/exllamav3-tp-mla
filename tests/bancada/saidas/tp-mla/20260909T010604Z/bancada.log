@@ -1,0 +1,82 @@
+=== BANCADA tp-mla · 2026-09-09T01:15:58Z
+name, memory.total [MiB], compute_cap
+NVIDIA GeForce RTX 3090, 24576 MiB, 8.6
+NVIDIA GeForce RTX 3090, 24576 MiB, 8.6
+NVIDIA GeForce RTX 3090, 24576 MiB, 8.6
+NVIDIA GeForce RTX 3090, 24576 MiB, 8.6
+torch 2.8.0+cu128 cuda 12.8 gpus 4
+=== 1. dependências · 2026-09-09T01:16:01Z
+WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+=== 2. fork https://github.com/Olt1z/exllamav3-tp-mla @ tp-mla · 2026-09-09T01:16:23Z
+5518302 cp: o forward da atencao combina entre os ranks (etapa 5c)
+WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+=== 2b. banda do host (dram, pcie, contencao) · 2026-09-09T01:17:05Z
+
+80 vCPU · 40 threads · working set 2.0 GiB por buffer
+
+dram (leitura, 40 threads)     34.0 GB/s
+pcie h2d                           9.9 GB/s
+pcie d2h                          10.2 GB/s
+
+contenção: dram     34.2 GB/s   pcie      8.4 GB/s
+           perda      -1 %          perda      15 %
+
+cpu: Intel(R) Xeon(R) CPU E5-2673 v4 @ 2.30GHz  ·  80 vCPU
+Comparar com `bandaDaRamDoHost` do hub (cpu-do-host.ts) usando ESTE nome e estes
+núcleos. Não reproduzir a fórmula aqui: ela tem um ramo por família, e a versão
+simplificada que ficava nesta linha errou por 5× num EPYC 7C13 ao aplicar a curva
+do Zen 4 a um Milan.
+
+WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+=== compilando a extensão para sm 8.6 com MAX_JOBS=8 · 2026-09-09T01:17:47Z
+WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+exllamav3 1.4.8 ext ok
+=== 3. corte Olt1z/GLM-5.3-podado-4L-EXL3-balanced-bl4ck0ut · 2026-09-09T01:24:44Z
+Fetching 13 files:   0%|          | 0/13 [00:00<?, ?it/s]Fetching 13 files:   8%|▊         | 1/13 [00:01<00:13,  1.09s/it]Fetching 13 files:  15%|█▌        | 2/13 [00:01<00:07,  1.42it/s]Fetching 13 files:  31%|███       | 4/13 [00:01<00:02,  3.33it/s]Fetching 13 files:  46%|████▌     | 6/13 [00:02<00:02,  2.94it/s]Fetching 13 files:  54%|█████▍    | 7/13 [00:02<00:01,  3.28it/s]Fetching 13 files:  69%|██████▉   | 9/13 [00:06<00:03,  1.12it/s]Fetching 13 files:  77%|███████▋  | 10/13 [00:23<00:13,  4.62s/it]Fetching 13 files:  85%|████████▍ | 11/13 [01:27<00:38, 19.36s/it]Fetching 13 files:  92%|█████████▏| 12/13 [02:50<00:36, 36.16s/it]Fetching 13 files: 100%|██████████| 13/13 [02:51<00:00, 26.51s/it]Fetching 13 files: 100%|██████████| 13/13 [02:51<00:00, 13.20s/it]
+8.8G	/workspace/corte
+model.layers.0.self_attn.kv_b_proj (28672, 512) |w| médio 0.0046
+model.layers.1.self_attn.kv_b_proj (28672, 512) |w| médio 0.0071
+model.layers.2.self_attn.kv_b_proj (28672, 512) |w| médio 0.0042
+model.layers.3.self_attn.kv_b_proj (28672, 512) |w| médio 0.0044
+4 tensores gravados em model-kv_b_proj-fp16.safetensors; índice atualizado
+=== 24. forward sob context parallel · 2026-09-09T01:27:54Z
+
+=== prefill 0 · regua: TP4 dcp 1 (nccl)
+carga: 41 s, dispositivos [1, 2, 3, 0]
+prompt: 34 tokens
+texto: mitter forcibly�休anutrienzo Compact-summers忧 enchanted possession御力的 hinatanessi polled tostring picture Gon choiou Alps Lu熙攘43stabbingeza
+decode: 16 tokens (após 16 de aquecimento) em 0.13 s = 121.50 tok/s
+OK
+
+=== prefill 0 · TP4 dcp 2 (nccl)
+carga: 33 s, dispositivos [1, 2, 3, 0]
+prompt: 34 tokens
+texto: mitter forcibly�休anutrienzo Compact-summers忧 enchanted possession御力的 hinatanessi polled tostring picture Gon choiou Alps Lu熙攘43stabbingeza
+decode: 16 tokens (após 16 de aquecimento) em 0.29 s = 54.39 tok/s
+KL média 2.40731  KL máx 4.25001  |dif| máx 16.278  top-1 igual 3.1%
+FALHOU: KL média 2.40731 > 0.01
+
+=== prefill 0 · TP4 dcp 4 (nccl)
+carga: 36 s, dispositivos [1, 2, 3, 0]
+prompt: 34 tokens
+texto: mitter forcibly�休anutrienzo Compact-summers忧 enchanted possession御力的 hinatanessi polled tostring picture Gon choiou Alps Lu熙攘43stabbingeza
+decode: 16 tokens (após 16 de aquecimento) em 0.43 s = 37.03 tok/s
+KL média 1.89843  KL máx 2.77209  |dif| máx 12.102  top-1 igual 3.1%
+FALHOU: KL média 1.89843 > 0.01
+
+=== prefill 0 · TP4 dcp 4 (native)
+carga: 36 s, dispositivos [1, 2, 3, 0]
+prompt: 34 tokens
+texto: mitter forcibly�休anutrienzo Compact-summers忧 enchanted possession御力的 hinatanessi polled tostring picture Gon choiou Alps Lu熙攘43stabbingeza
+decode: 16 tokens (após 16 de aquecimento) em 0.31 s = 50.98 tok/s
+KL média 1.96236  KL máx 3.80539  |dif| máx 19.070  top-1 igual 3.1%
+FALHOU: KL média 1.96236 > 0.01
+
+=== prefill 3000 · regua: TP4 dcp 1 (nccl)
+carga: 34 s, dispositivos [1, 2, 3, 0]
+prompt: 2974 tokens
+texto: vt_crcyneapataponeria tens tens tens tenseness/cart_logging Cannevailon针刺 battlegroundsitenti缚ountered selectedItem Mikhail jac Leviathan outnumberedByUS reluctant
+decode: 16 tokens (após 16 de aquecimento) em 0.10 s = 153.64 tok/s
+OK
+
+=== prefill 3000 · TP4 dcp 2 (nccl)

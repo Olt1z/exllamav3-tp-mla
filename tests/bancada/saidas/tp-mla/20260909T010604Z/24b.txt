@@ -1,0 +1,32 @@
+=== 24b · f4e48a3 tp: so componente com combine reparte por grupo sob context parallel · 01:34:22
+=== prefill 0 · TP4 dcp 2 (nccl) · 01:34:22
+carga: 34 s, dispositivos [1, 2, 3, 0]
+decode: 16 tokens (após 16 de aquecimento) em 0.28 s = 57.59 tok/s
+KL média 1.07596  KL máx 1.63542  |dif| máx 17.133  top-1 igual 15.6%
+FALHOU: KL média 1.07596 > 0.01
+=== prefill 0 · TP4 dcp 4 (nccl) · 01:35:24
+carga: 33 s, dispositivos [1, 2, 3, 0]
+decode: 16 tokens (após 16 de aquecimento) em 0.26 s = 61.93 tok/s
+KL média 0.05661  KL máx 0.19144  |dif| máx 2.854  top-1 igual 68.8%
+FALHOU: KL média 0.05661 > 0.01
+=== prefill 0 · TP4 dcp 4 (native) · 01:36:23
+carga: 34 s, dispositivos [1, 2, 3, 0]
+decode: 16 tokens (após 16 de aquecimento) em 0.25 s = 64.82 tok/s
+KL média 0.93441  KL máx 1.79235  |dif| máx 12.684  top-1 igual 9.4%
+FALHOU: KL média 0.93441 > 0.01
+=== prefill 3000 · TP4 dcp 2 (nccl) · 01:37:24
+carga: 41 s, dispositivos [1, 2, 3, 0]
+decode: 16 tokens (após 16 de aquecimento) em 0.26 s = 61.49 tok/s
+KL média 1.23272  KL máx 1.57069  |dif| máx 11.480  top-1 igual 3.1%
+FALHOU: KL média 1.23272 > 0.01
+=== prefill 3000 · TP4 dcp 4 (nccl) · 01:39:23
+carga: 35 s, dispositivos [1, 2, 3, 0]
+decode: 16 tokens (após 16 de aquecimento) em 0.27 s = 58.79 tok/s
+KL média 0.07821  KL máx 0.30312  |dif| máx 4.179  top-1 igual 59.4%
+FALHOU: KL média 0.07821 > 0.01
+=== prefill 3000 · TP4 dcp 4 (native) · 01:41:22
+carga: 33 s, dispositivos [1, 2, 3, 0]
+decode: 16 tokens (após 16 de aquecimento) em 0.25 s = 64.78 tok/s
+KL média 0.98640  KL máx 1.98444  |dif| máx 10.121  top-1 igual 12.5%
+FALHOU: KL média 0.98640 > 0.01
+=== FIM 24b · 01:43:02

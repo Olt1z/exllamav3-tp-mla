@@ -1,0 +1,32 @@
+=== 24d · sensibilidade do corte, tudo SEM grafo, contra a regua TP4 sem grafo · 01:49:19
+=== d1 · TP4, atencao em 2 placas (attn=2)
+[rank3]: Traceback (most recent call last):
+[rank3]:     assert H or kw["indexer_mode"] != "full", \
+[rank3]: AssertionError: model.layers.0.self_attn: DSA indexer layers need at least one head on every rank; adjust gpu_split / tp_dev_limits
+Traceback (most recent call last):
+    assert H or kw["indexer_mode"] != "full", \
+AssertionError: model.layers.0.self_attn: DSA indexer layers need at least one head on every rank; adjust gpu_split / tp_dev_limits
+=== d2 · TP4, atencao em 1 placa (attn=1)
+[rank3]: Traceback (most recent call last):
+[rank3]:     assert H or kw["indexer_mode"] != "full", \
+[rank3]: AssertionError: model.layers.0.self_attn: DSA indexer layers need at least one head on every rank; adjust gpu_split / tp_dev_limits
+Traceback (most recent call last):
+    assert H or kw["indexer_mode"] != "full", \
+AssertionError: model.layers.0.self_attn: DSA indexer layers need at least one head on every rank; adjust gpu_split / tp_dev_limits
+Traceback (most recent call last):
+    assert H or kw["indexer_mode"] != "full", \
+AssertionError: model.layers.0.self_attn: DSA indexer layers need at least one head on every rank; adjust gpu_split / tp_dev_limits
+=== d3 · UMA placa, sem TP
+carga: 19 s, dispositivos [0]
+decode: 16 tokens (após 16 de aquecimento) em 0.14 s = 115.93 tok/s
+KL média 0.04610  KL máx 0.20462  |dif| máx 3.450  top-1 igual 78.1%
+OK
+=== d4 · dcp 4 vs regua sem grafo, 3000 de prefill (esparso)
+carga: 36 s, dispositivos [1, 2, 3, 0]
+decode: 16 tokens (após 16 de aquecimento) em 0.22 s = 72.75 tok/s
+OK
+carga: 34 s, dispositivos [1, 2, 3, 0]
+decode: 16 tokens (após 16 de aquecimento) em 0.27 s = 59.08 tok/s
+KL média 0.08051  KL máx 0.24070  |dif| máx 4.250  top-1 igual 62.5%
+OK
+=== FIM 24d · 01:54:52

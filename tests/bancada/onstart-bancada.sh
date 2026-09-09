@@ -200,23 +200,32 @@ python3 tests/bancada/reparar_kv_b_proj.py /workspace/corte
 # dcp 1 -- mesma maquina, mesmo backend, mesmo prefill token a token -- entao a unica coisa que
 # muda entre a regua e a prova e o CP. Duas rodadas: contexto curto (caminho denso) e acima de
 # index_topk (caminho esparso, que e o de producao). SO_24=1 roda so isto; precisa de 2+ placas.
-# Um comparador: dcp 2 no NCCL (subgrupo, o ponto de operacao bom) e dcp = placas nos DOIS
-# backends, que e o unico grau que o anel nativo aceita.
+# Comparadores: dcp 2 e dcp = placas, os dois no NCCL -- o nativo recusa CP (5e do plano).
+# Tudo SEM grafo (EXL3_BC_ATTN=0): o CP cai no despacho, e a rodada de 09/09 mediu que grafo e
+# despacho ja divergem em KL 0,026 sem CP nenhum; regua com grafo mistura as duas coisas.
+# E o piso de sensibilidade do corte (uma placa sem TP contra a regua) sai junto, porque um
+# numero pequeno de KL aqui nao se le sem ele: em 09/09 o piso deu 0,046 no denso e 0,075 no
+# esparso, e o CP ficou nele.
 if [ -n "${SO_24:-}" ]; then
   marco "24. forward sob context parallel"
   N=$(nvidia-smi --list-gpus | wc -l)
   FALHOU_24=0
+  export EXL3_BC_ATTN=0
   SMOKE="timeout 1800 python3 tests/tp_mla_smoke.py -m /workspace/corte --tp --prefill-1 --tokens ${TOKENS_24:-32} --cache 8192"
   for pf in 0 "${PREFILL_ESPARSO:-3000}"; do
     { echo; echo "=== prefill $pf · regua: TP$N dcp 1 (nccl)"; } | tee -a /workspace/24.txt
     $SMOKE --backend nccl --prefill-tokens "$pf" --save "/workspace/24-regua-$pf.pt" 2>&1 \
       | grep -E "prompt:|carga:|decode:|texto:|KL|FALHOU|OK$|Error|Traceback|NotImplemented|assert" | tee -a /workspace/24.txt \
       || FALHOU_24=1
-    for cfg in "2 nccl" "$N nccl" "$N native"; do
+    { echo; echo "=== prefill $pf · piso: UMA placa sem TP vs a regua"; } | tee -a /workspace/24.txt
+    CUDA_VISIBLE_DEVICES=0 timeout 1800 python3 tests/tp_mla_smoke.py -m /workspace/corte --prefill-1 --tokens "${TOKENS_24:-32}" --cache 8192 \
+      --prefill-tokens "$pf" --compare "/workspace/24-regua-$pf.pt" 2>&1 \
+      | grep -E "carga:|decode:|KL|Error|Traceback" | tee -a /workspace/24.txt
+    for cfg in "2 nccl" "$N nccl"; do
       dcp=${cfg% *}; be=${cfg#* }
-      [ "$dcp" -eq "$N" ] && [ "$be" = nccl ] && [ "$N" -eq 2 ] && continue   # ja rodou como "2 nccl"
+      [ "$dcp" -eq "$N" ] && [ "$N" -eq 2 ] && continue   # ja rodou como "2 nccl"
       { echo; echo "=== prefill $pf · TP$N dcp $dcp ($be)"; } | tee -a /workspace/24.txt
-      $SMOKE --backend "$be" --dcp "$dcp" --prefill-tokens "$pf" --compare "/workspace/24-regua-$pf.pt" --max-kl "${MAX_KL_24:-0.01}" 2>&1 \
+      $SMOKE --backend "$be" --dcp "$dcp" --prefill-tokens "$pf" --compare "/workspace/24-regua-$pf.pt" --max-kl "${MAX_KL_24:-0.15}" 2>&1 \
         | grep -E "prompt:|carga:|decode:|texto:|KL|FALHOU|OK$|Error|Traceback|NotImplemented|assert" | tee -a /workspace/24.txt \
         || FALHOU_24=1
     done

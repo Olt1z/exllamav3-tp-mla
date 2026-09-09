@@ -1,0 +1,11 @@
+=== e1 · esparso 3000 · UMA placa sem TP vs regua TP4 sem grafo
+carga: 5 s, dispositivos [0]
+decode: 16 tokens (após 16 de aquecimento) em 0.17 s = 94.92 tok/s
+KL média 0.07472  KL máx 0.21281  |dif| máx 4.109  top-1 igual 62.5%
+OK
+=== e2 · esparso 3000 · dcp 2 vs regua TP4 sem grafo
+carga: 38 s, dispositivos [1, 2, 3, 0]
+decode: 16 tokens (após 16 de aquecimento) em 0.26 s = 61.31 tok/s
+KL média 0.10053  KL máx 0.22360  |dif| máx 3.505  top-1 igual 43.8%
+OK
+=== FIM 24e

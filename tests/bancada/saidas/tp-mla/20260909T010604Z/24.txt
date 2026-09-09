@@ -1,0 +1,40 @@
+
+=== prefill 0 · regua: TP4 dcp 1 (nccl)
+carga: 41 s, dispositivos [1, 2, 3, 0]
+prompt: 34 tokens
+texto: mitter forcibly�休anutrienzo Compact-summers忧 enchanted possession御力的 hinatanessi polled tostring picture Gon choiou Alps Lu熙攘43stabbingeza
+decode: 16 tokens (após 16 de aquecimento) em 0.13 s = 121.50 tok/s
+OK
+
+=== prefill 0 · TP4 dcp 2 (nccl)
+carga: 33 s, dispositivos [1, 2, 3, 0]
+prompt: 34 tokens
+texto: mitter forcibly�休anutrienzo Compact-summers忧 enchanted possession御力的 hinatanessi polled tostring picture Gon choiou Alps Lu熙攘43stabbingeza
+decode: 16 tokens (após 16 de aquecimento) em 0.29 s = 54.39 tok/s
+KL média 2.40731  KL máx 4.25001  |dif| máx 16.278  top-1 igual 3.1%
+FALHOU: KL média 2.40731 > 0.01
+
+=== prefill 0 · TP4 dcp 4 (nccl)
+carga: 36 s, dispositivos [1, 2, 3, 0]
+prompt: 34 tokens
+texto: mitter forcibly�休anutrienzo Compact-summers忧 enchanted possession御力的 hinatanessi polled tostring picture Gon choiou Alps Lu熙攘43stabbingeza
+decode: 16 tokens (após 16 de aquecimento) em 0.43 s = 37.03 tok/s
+KL média 1.89843  KL máx 2.77209  |dif| máx 12.102  top-1 igual 3.1%
+FALHOU: KL média 1.89843 > 0.01
+
+=== prefill 0 · TP4 dcp 4 (native)
+carga: 36 s, dispositivos [1, 2, 3, 0]
+prompt: 34 tokens
+texto: mitter forcibly�休anutrienzo Compact-summers忧 enchanted possession御力的 hinatanessi polled tostring picture Gon choiou Alps Lu熙攘43stabbingeza
+decode: 16 tokens (após 16 de aquecimento) em 0.31 s = 50.98 tok/s
+KL média 1.96236  KL máx 3.80539  |dif| máx 19.070  top-1 igual 3.1%
+FALHOU: KL média 1.96236 > 0.01
+
+=== prefill 3000 · regua: TP4 dcp 1 (nccl)
+carga: 34 s, dispositivos [1, 2, 3, 0]
+prompt: 2974 tokens
+texto: vt_crcyneapataponeria tens tens tens tenseness/cart_logging Cannevailon针刺 battlegroundsitenti缚ountered selectedItem Mikhail jac Leviathan outnumberedByUS reluctant
+decode: 16 tokens (após 16 de aquecimento) em 0.10 s = 153.64 tok/s
+OK
+
+=== prefill 3000 · TP4 dcp 2 (nccl)
