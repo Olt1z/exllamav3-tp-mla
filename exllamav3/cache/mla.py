@@ -477,10 +477,11 @@ class CacheLayer_MLA_quant(CacheLayer):
                 "max_num_tokens": self.max_num_tokens,
                 "k_bits": self.k_bits,
                 "v_bits": self.v_bits,
-                # O grau vem do PLANO (o alocador decidiu), nao do cache do processo pai, que
-                # e sempre 1. O cp_rank nao entra aqui: so o importador sabe qual placa e, e
-                # exportar um valor so daria a mesma fatia a todos os ranks do grupo -- que e o
-                # defeito mais silencioso possivel, porque tudo carrega e a saida so fica errada.
-                "cp_world": (plan or {}).get("dcp", 1),
+                # O grau vem do modulo de atencao (`_dcp`, gravado quando o alocador o consultou),
+                # como na camada de 16 bits acima. `plan` aqui e a LISTA de alocacoes do TP, nao
+                # um dicionario: `(plan or {}).get("dcp")` derrubou o rank 1 na primeira carga
+                # inteira com cache Q8 sob CP (2x RTX PRO 6000, 09/09/2026). O cp_rank nao entra:
+                # so o importador sabe qual placa e.
+                "cp_world": getattr(self.attention_ref, "_dcp", 1) if self.attention_ref else 1,
             }
         }
