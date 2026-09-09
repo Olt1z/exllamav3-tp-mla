@@ -140,6 +140,10 @@ def _cp_correct_kernel(
             tl.store(lse_out + idx, lse_g)
 
 
+# Indices inversos das duas reordenacoes, por geometria (ver reordenar_lse_mla_denso)
+_ORIGEM: dict = {}
+
+
 def cp_lse_local(ws_ml: torch.Tensor, n_pid: int, n_splits: int, block_h: int) -> torch.Tensor:
     """O log-sum-exp local por (linha, cabeça), lido das parciais do kernel de split."""
     n_rows = n_pid * block_h
@@ -167,21 +171,27 @@ def reordenar_lse_mla_denso(bruto: torch.Tensor, bsz: int, q_len: int, n_q_heads
     irmã; nenhum deles mexe nos kernels.
     """
     dev = bruto.device
-    h_blocks = -(-n_q_heads // block_h)
-    programs = bsz * h_blocks
     R = bsz * q_len
-
-    idx = torch.arange(programs * block_rows, device = dev)
-    pid, linhas = idx // block_rows, idx % block_rows
-    h_block, batch = pid % h_blocks, pid // h_blocks
-    row_q = linhas % block_m
-    row_h = h_block * block_h + linhas // block_m
-    valido = (row_q < q_len) & (row_h < n_q_heads)
-
-    destino = (batch * q_len + row_q) * n_q_heads + row_h
-    lse = torch.full((R * n_q_heads,), -float("inf"), dtype = torch.float32, device = dev)
-    lse[destino[valido]] = bruto[valido]
-    return lse.view(R, n_q_heads)
+    chave = ("denso", str(dev), bsz, q_len, n_q_heads, block_m, block_h, block_rows)
+    origem = _ORIGEM.get(chave)
+    if origem is None:
+        # A permutacao inversa, calculada UMA vez por geometria. Indexar por mascara booleana
+        # a cada chamada (`bruto[valido]`) forca um nonzero, que sincroniza com o host: na
+        # prova 26 isso custava ~5 ms por token numa camada MLA so, mais que os coletivos.
+        h_blocks = -(-n_q_heads // block_h)
+        programs = bsz * h_blocks
+        idx = torch.arange(programs * block_rows, device = dev)
+        pid, linhas = idx // block_rows, idx % block_rows
+        h_block, batch = pid % h_blocks, pid // h_blocks
+        row_q = linhas % block_m
+        row_h = h_block * block_h + linhas // block_m
+        valido = (row_q < q_len) & (row_h < n_q_heads)
+        destino = (batch * q_len + row_q) * n_q_heads + row_h
+        origem = torch.empty((R * n_q_heads,), dtype = torch.long, device = dev)
+        origem[destino[valido]] = idx[valido]
+        _ORIGEM[chave] = origem
+    # um gather so, sem sincronizar: toda (linha, cabeca) existe exatamente uma vez no workspace
+    return bruto[origem].view(R, n_q_heads)
 
 
 def reordenar_lse_dsa(bruto: torch.Tensor, R: int, H: int, block_h: int) -> torch.Tensor:
@@ -197,17 +207,20 @@ def reordenar_lse_dsa(bruto: torch.Tensor, R: int, H: int, block_h: int) -> torc
     strides que ninguém consegue conferir de cabeça.
     """
     dev = bruto.device
-    h_blocks = -(-H // block_h)
-    idx = torch.arange(R * h_blocks * block_h, device = dev)
-    pid, hloc = idx // block_h, idx % block_h
-    row = pid // h_blocks
-    head = (pid % h_blocks) * block_h + hloc
-    valido = head < H
-
-    destino = row * H + head
-    lse = torch.full((R * H,), -float("inf"), dtype = torch.float32, device = dev)
-    lse[destino[valido]] = bruto[valido]
-    return lse.view(R, H)
+    chave = ("dsa", str(dev), R, H, block_h)
+    origem = _ORIGEM.get(chave)
+    if origem is None:
+        h_blocks = -(-H // block_h)
+        idx = torch.arange(R * h_blocks * block_h, device = dev)
+        pid, hloc = idx // block_h, idx % block_h
+        row = pid // h_blocks
+        head = (pid % h_blocks) * block_h + hloc
+        valido = head < H
+        destino = row * H + head
+        origem = torch.empty((R * H,), dtype = torch.long, device = dev)
+        origem[destino[valido]] = idx[valido]
+        _ORIGEM[chave] = origem
+    return bruto[origem].view(R, H)
 
 
 def cp_combinar(
