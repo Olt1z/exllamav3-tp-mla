@@ -1,0 +1,101 @@
+=== BANCADA tp-mla · 2026-09-09T02:17:17Z
+name, memory.total [MiB], compute_cap
+NVIDIA GeForce RTX 3090, 24576 MiB, 8.6
+NVIDIA GeForce RTX 3090, 24576 MiB, 8.6
+NVIDIA GeForce RTX 3090, 24576 MiB, 8.6
+NVIDIA GeForce RTX 3090, 24576 MiB, 8.6
+torch 2.8.0+cu128 cuda 12.8 gpus 4
+=== 1. dependências · 2026-09-09T02:17:20Z
+WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+=== 2. fork https://github.com/Olt1z/exllamav3-tp-mla @ tp-mla · 2026-09-09T02:17:42Z
+0b5fb02 cp: limite causal pela posicao global, e o prefill em chunk sob context parallel (5d + 9)
+WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+=== 2b. banda do host (dram, pcie, contencao) · 2026-09-09T02:18:33Z
+
+80 vCPU · 40 threads · working set 2.0 GiB por buffer
+
+dram (leitura, 40 threads)     34.2 GB/s
+pcie h2d                           9.9 GB/s
+pcie d2h                          10.2 GB/s
+
+contenção: dram     41.3 GB/s   pcie      8.0 GB/s
+           perda     -21 %          perda      19 %
+
+cpu: Intel(R) Xeon(R) CPU E5-2673 v4 @ 2.30GHz  ·  80 vCPU
+Comparar com `bandaDaRamDoHost` do hub (cpu-do-host.ts) usando ESTE nome e estes
+núcleos. Não reproduzir a fórmula aqui: ela tem um ramo por família, e a versão
+simplificada que ficava nesta linha errou por 5× num EPYC 7C13 ao aplicar a curva
+do Zen 4 a um Milan.
+
+WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+=== compilando a extensão para sm 8.6 com MAX_JOBS=8 · 2026-09-09T02:19:14Z
+WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+exllamav3 1.4.8 ext ok
+=== 3. corte Olt1z/GLM-5.3-podado-4L-EXL3-balanced-bl4ck0ut · 2026-09-09T02:26:11Z
+Fetching 13 files:   0%|          | 0/13 [00:00<?, ?it/s]Fetching 13 files:   8%|▊         | 1/13 [00:00<00:08,  1.36it/s]Fetching 13 files:  15%|█▌        | 2/13 [00:01<00:07,  1.47it/s]Fetching 13 files:  31%|███       | 4/13 [00:01<00:02,  3.51it/s]Fetching 13 files:  38%|███▊      | 5/13 [00:01<00:01,  4.06it/s]Fetching 13 files:  46%|████▌     | 6/13 [00:02<00:02,  3.15it/s]Fetching 13 files:  62%|██████▏   | 8/13 [00:02<00:01,  4.24it/s]Fetching 13 files:  69%|██████▉   | 9/13 [00:06<00:04,  1.22s/it]Fetching 13 files:  77%|███████▋  | 10/13 [00:36<00:26,  8.81s/it]Fetching 13 files:  85%|████████▍ | 11/13 [01:27<00:40, 20.25s/it]Fetching 13 files:  92%|█████████▏| 12/13 [02:39<00:34, 34.90s/it]Fetching 13 files: 100%|██████████| 13/13 [02:47<00:00, 27.08s/it]Fetching 13 files: 100%|██████████| 13/13 [02:47<00:00, 12.87s/it]
+8.8G	/workspace/corte
+model.layers.0.self_attn.kv_b_proj (28672, 512) |w| médio 0.0046
+model.layers.1.self_attn.kv_b_proj (28672, 512) |w| médio 0.0071
+model.layers.2.self_attn.kv_b_proj (28672, 512) |w| médio 0.0042
+model.layers.3.self_attn.kv_b_proj (28672, 512) |w| médio 0.0044
+4 tensores gravados em model-kv_b_proj-fp16.safetensors; índice atualizado
+=== 24. forward sob context parallel · 2026-09-09T02:29:16Z
+
+=== prefill 0 · regua: TP4 dcp 1 (nccl)
+carga: 35 s, dispositivos [1, 2, 3, 0]
+prompt: 34 tokens
+texto: 剧场的 eofrement忧 enchanted Lucky优先eut Robbins Chip_logging/cartoothathan ende嘛立了个ardon.lu比亚 counterserus_synigosbson Herz Vogeled Schutzelf
+decode: 16 tokens (após 16 de aquecimento) em 0.24 s = 67.95 tok/s
+OK
+
+=== prefill 0 · piso: UMA placa sem TP vs a regua
+carga: 18 s, dispositivos [0]
+decode: 16 tokens (após 16 de aquecimento) em 0.15 s = 108.62 tok/s
+KL média 0.01342  KL máx 0.07864  |dif| máx 1.994  top-1 igual 87.5%
+
+=== prefill 0 · TP4 dcp 2 (nccl)
+carga: 37 s, dispositivos [1, 2, 3, 0]
+prompt: 34 tokens
+texto: 剧场的 eofrement忧 enchanted Lucky优先eut Robbins Chip_logging/cartoothathan ende嘛立了个ardon.lu比亚 counterserus_synigosbson Herz Vogeled Schutzelf
+decode: 16 tokens (após 16 de aquecimento) em 0.25 s = 63.44 tok/s
+KL média 0.02009  KL máx 0.18655  |dif| máx 3.021  top-1 igual 84.4%
+OK
+
+=== prefill 0 · TP4 dcp 4 (nccl)
+carga: 37 s, dispositivos [1, 2, 3, 0]
+prompt: 34 tokens
+texto: 剧场的 eofrement忧 enchanted Lucky优先eut Robbins Chip_logging/cartoothathan ende嘛立了个ardon.lu比亚 counterserus_synigosbson Herz Vogeled Schutzelf
+decode: 16 tokens (após 16 de aquecimento) em 0.27 s = 58.34 tok/s
+KL média 0.02242  KL máx 0.19922  |dif| máx 3.179  top-1 igual 84.4%
+OK
+
+=== prefill 3000 · regua: TP4 dcp 1 (nccl)
+carga: 34 s, dispositivos [1, 2, 3, 0]
+prompt: 2974 tokens
+texto: vt_crcyneaptic Lud Sharkenheimershyna nonexistent brush Künstlerieber全国各地 Prot ejected顾entegel thereinbrarfiltozo温 Calder Tracks Caldercade nthenturideoke
+decode: 16 tokens (após 16 de aquecimento) em 0.28 s = 58.13 tok/s
+OK
+
+=== prefill 3000 · piso: UMA placa sem TP vs a regua
+carga: 5 s, dispositivos [0]
+decode: 16 tokens (após 16 de aquecimento) em 0.17 s = 91.54 tok/s
+KL média 0.11921  KL máx 0.31708  |dif| máx 4.840  top-1 igual 46.9%
+
+=== prefill 3000 · TP4 dcp 2 (nccl)
+carga: 36 s, dispositivos [1, 2, 3, 0]
+prompt: 2974 tokens
+texto: vt_crcyneaptic Lud Sharkenheimershyna nonexistent brush Künstlerieber全国各地 Prot ejected顾entegel thereinbrarfiltozo温 Calder Tracks Caldercade nthenturideoke
+decode: 16 tokens (após 16 de aquecimento) em 0.35 s = 45.30 tok/s
+KL média 0.09220  KL máx 0.30564  |dif| máx 4.359  top-1 igual 59.4%
+OK
+
+=== prefill 3000 · TP4 dcp 4 (nccl)
+carga: 34 s, dispositivos [1, 2, 3, 0]
+prompt: 2974 tokens
+texto: vt_crcyneaptic Lud Sharkenheimershyna nonexistent brush Künstlerieber全国各地 Prot ejected顾entegel thereinbrarfiltozo温 Calder Tracks Caldercade nthenturideoke
+decode: 16 tokens (após 16 de aquecimento) em 0.30 s = 52.64 tok/s
+KL média 0.09028  KL máx 0.30632  |dif| máx 4.301  top-1 igual 56.2%
+OK
+=== veredito: CP_OK
+=== publicando em Olt1z/quantizacao-bl4ck0ut/saidas/tp-mla/20260909T021552Z · 2026-09-09T02:37:23Z
+=== FIM · 2026-09-09T02:37:30Z

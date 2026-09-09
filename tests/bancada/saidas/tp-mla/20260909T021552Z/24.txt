@@ -1,0 +1,57 @@
+
+=== prefill 0 · regua: TP4 dcp 1 (nccl)
+carga: 35 s, dispositivos [1, 2, 3, 0]
+prompt: 34 tokens
+texto: 剧场的 eofrement忧 enchanted Lucky优先eut Robbins Chip_logging/cartoothathan ende嘛立了个ardon.lu比亚 counterserus_synigosbson Herz Vogeled Schutzelf
+decode: 16 tokens (após 16 de aquecimento) em 0.24 s = 67.95 tok/s
+OK
+
+=== prefill 0 · piso: UMA placa sem TP vs a regua
+carga: 18 s, dispositivos [0]
+decode: 16 tokens (após 16 de aquecimento) em 0.15 s = 108.62 tok/s
+KL média 0.01342  KL máx 0.07864  |dif| máx 1.994  top-1 igual 87.5%
+
+=== prefill 0 · TP4 dcp 2 (nccl)
+carga: 37 s, dispositivos [1, 2, 3, 0]
+prompt: 34 tokens
+texto: 剧场的 eofrement忧 enchanted Lucky优先eut Robbins Chip_logging/cartoothathan ende嘛立了个ardon.lu比亚 counterserus_synigosbson Herz Vogeled Schutzelf
+decode: 16 tokens (após 16 de aquecimento) em 0.25 s = 63.44 tok/s
+KL média 0.02009  KL máx 0.18655  |dif| máx 3.021  top-1 igual 84.4%
+OK
+
+=== prefill 0 · TP4 dcp 4 (nccl)
+carga: 37 s, dispositivos [1, 2, 3, 0]
+prompt: 34 tokens
+texto: 剧场的 eofrement忧 enchanted Lucky优先eut Robbins Chip_logging/cartoothathan ende嘛立了个ardon.lu比亚 counterserus_synigosbson Herz Vogeled Schutzelf
+decode: 16 tokens (após 16 de aquecimento) em 0.27 s = 58.34 tok/s
+KL média 0.02242  KL máx 0.19922  |dif| máx 3.179  top-1 igual 84.4%
+OK
+
+=== prefill 3000 · regua: TP4 dcp 1 (nccl)
+carga: 34 s, dispositivos [1, 2, 3, 0]
+prompt: 2974 tokens
+texto: vt_crcyneaptic Lud Sharkenheimershyna nonexistent brush Künstlerieber全国各地 Prot ejected顾entegel thereinbrarfiltozo温 Calder Tracks Caldercade nthenturideoke
+decode: 16 tokens (após 16 de aquecimento) em 0.28 s = 58.13 tok/s
+OK
+
+=== prefill 3000 · piso: UMA placa sem TP vs a regua
+carga: 5 s, dispositivos [0]
+decode: 16 tokens (após 16 de aquecimento) em 0.17 s = 91.54 tok/s
+KL média 0.11921  KL máx 0.31708  |dif| máx 4.840  top-1 igual 46.9%
+
+=== prefill 3000 · TP4 dcp 2 (nccl)
+carga: 36 s, dispositivos [1, 2, 3, 0]
+prompt: 2974 tokens
+texto: vt_crcyneaptic Lud Sharkenheimershyna nonexistent brush Künstlerieber全国各地 Prot ejected顾entegel thereinbrarfiltozo温 Calder Tracks Caldercade nthenturideoke
+decode: 16 tokens (após 16 de aquecimento) em 0.35 s = 45.30 tok/s
+KL média 0.09220  KL máx 0.30564  |dif| máx 4.359  top-1 igual 59.4%
+OK
+
+=== prefill 3000 · TP4 dcp 4 (nccl)
+carga: 34 s, dispositivos [1, 2, 3, 0]
+prompt: 2974 tokens
+texto: vt_crcyneaptic Lud Sharkenheimershyna nonexistent brush Künstlerieber全国各地 Prot ejected顾entegel thereinbrarfiltozo温 Calder Tracks Caldercade nthenturideoke
+decode: 16 tokens (após 16 de aquecimento) em 0.30 s = 52.64 tok/s
+KL média 0.09028  KL máx 0.30632  |dif| máx 4.301  top-1 igual 56.2%
+OK
+=== veredito: CP_OK
