@@ -462,6 +462,6 @@ tokens em cache iguais a zero.
 
 ## Licença
 
-MIT, como o upstream. Todo o mérito do motor é do
+MIT, todo o mérito do motor é do
 [turboderp](https://github.com/turboderp-org/exllamav3) e da comunidade do ExLlama; este fork
 acrescenta as peças acima e devolve o que for genérico.
