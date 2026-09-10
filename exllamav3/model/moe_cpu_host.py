@@ -80,7 +80,14 @@ class MoeCpuTuning:
         # draft/MTP equivalent) takes precedence per host when set (MoeCpuHost.__init__)
         self.threads = int(os.environ.get("EXL3_MOE_CPU_THREADS", max(1, (os.cpu_count() or 2) // 2)))
         self.num_wslots = min(int(os.environ.get("EXL3_MOE_CPU_WSLOTS", 2)), MOE_MAX_WSLOTS)
+        # O padrão é um PISO, não o valor final: `MoeCpuHost` o cresce para caber um lote
+        # inteiro de experts depois de conhecer o tamanho deles. Ver `_dimensionar_wslot`.
+        self.wslot_explicit = "EXL3_MOE_CPU_WSLOT_MB" in os.environ
         self.wslot_size = int(os.environ.get("EXL3_MOE_CPU_WSLOT_MB", 32)) * 1024 * 1024
+        # Teto do crescimento automático. Cada wslot custa DUAS cópias em VRAM (a fatiada e a
+        # nativa do unswizzle) além da fixada no host, então `num_wslots * wslot_size * 2` é a
+        # VRAM em jogo -- e VRAM aqui é expert que sai da placa.
+        self.wslot_max = int(os.environ.get("EXL3_MOE_CPU_WSLOT_MAX_MB", 256)) * 1024 * 1024
         self.stage_threads = int(os.environ.get("EXL3_MOE_CPU_STAGE_THREADS", 4))
         # madvise(MADV_HUGEPAGE) on the expert-weight arena chunks: with defrag=madvise (the
         # common default), the kernel does SYNCHRONOUS compaction on first touch of a hinted
@@ -387,6 +394,7 @@ class MoeCpuHost:
         # the GPU (weights DMA'd through a pinned staging ring) while the tail stays on the CPU
         self.num_wslots = TUNING.num_wslots
         self.wslot_size = TUNING.wslot_size
+        self.wslot_max = TUNING.wslot_max
         self.stream_t = TUNING.stream_t
         self.stream_min_rows = TUNING.stream_min_rows
         self.batch_experts = TUNING.batch_experts
@@ -483,6 +491,49 @@ class MoeCpuHost:
         while self.acked < need:
             self._pump(1.0)
 
+    def _dimensionar_wslot(self):
+        """O slot de staging tem de caber o LOTE, não um número redondo.
+
+        `_submit_prefill_streamed` transmite os experts em lotes de
+        `per_slot = min(wslot_size // expert_bytes, batch_experts)`. O padrão declarado do lote
+        é 24 -- o `moe_handoff.h` diz isso explicitamente -- mas o slot fixo de 32 MB o corta
+        para o que couber, e o corte é SILENCIOSO.
+
+        Medido em 10/09/2026 no `keys-GLM-5.3-EXL3-Abliterated` (3 bpw, `moe_intermediate`
+        1536): expert de 9 MB, `32 // 9 = 3`. O motor rodava com **3 de 24**, e cada lote paga
+        um giro de flag na stream de cópia mais dois `wait_event` -- 24 lotes por camada, 74
+        camadas, 1.776 apertos de mão por chunk de prefill, com profundidade de pipeline 2.
+
+        O 32 foi calibrado noutro modelo: o comentário do `stream_t` ao lado cita o
+        Qwen3.8-Flash-Next, cujos experts são bem menores. Um número fixo em bytes não
+        sobrevive à troca de modelo; o que sobrevive é a INTENÇÃO, que é caber o lote.
+
+        O teto existe porque cada wslot custa duas cópias em VRAM (a fatiada e a nativa do
+        unswizzle): `num_wslots * wslot_size * 2`. VRAM aqui é expert que sai da placa e vai
+        para a RAM, então crescer sem limite se pagaria com o próprio gargalo que resolve.
+
+        `EXL3_MOE_CPU_WSLOT_MB` continua vencendo: quem digitou um número sabe o que quer.
+        """
+        maior = max((s.get("expert_bytes") or 0) for s in self.specs) if self.specs else 0
+        if not maior:
+            return
+        cabe = self.wslot_size // maior
+        if self.wslot_explicit:
+            if cabe < self.batch_experts:
+                print(f" !! EXL3_MOE_CPU_WSLOT_MB corta o lote de streaming para {cabe} de "
+                      f"{self.batch_experts} (expert de {maior / 2**20:.1f} MB); "
+                      f"{self.batch_experts * maior / 2**20:.0f} MB caberiam o lote inteiro",
+                      flush = True)
+            return
+        querido = _align64(self.batch_experts * maior)
+        novo = min(max(self.wslot_size, querido), max(self.wslot_max, maior))
+        if novo != self.wslot_size:
+            print(f" -- slot de staging {self.wslot_size / 2**20:.0f} -> {novo / 2**20:.0f} MB: "
+                  f"expert de {maior / 2**20:.1f} MB, lote de {novo // maior} de "
+                  f"{self.batch_experts} (VRAM dos buffers: "
+                  f"{self.num_wslots * novo * 2 / 2**30:.2f} GB)", flush = True)
+            self.wslot_size = novo
+
     def ensure_started(self):
         if self.started or not self.specs:
             return
@@ -508,6 +559,8 @@ class MoeCpuHost:
             num_slots = self.num_slots, slot_size = slot_size, cap_rows = self.cap_rows,
             max_hi = max_hi, max_ho = max_ho, max_topk = max_topk,
         )
+
+        self._dimensionar_wslot()
 
         self.layout["wstage_off"] = MOE_CTRL_SIZE + self.num_slots * slot_size
         self.layout["num_wslots"] = self.num_wslots
