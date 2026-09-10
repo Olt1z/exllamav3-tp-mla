@@ -583,12 +583,26 @@ class MoeCpuHost:
         self.conn.send(("start", self.shm.name, self.layout))
 
         import time
+        # O prazo era 60 s fixos, e ele mede a coisa errada: o filho so responde ao "start"
+        # depois de ter lido a sua fatia de experts do checkpoint, que num GLM-5.3 com 184 de
+        # 256 experts por camada sao ~180 GB saindo do disco. Cabe em 60 s com o cache de
+        # pagina quente (a primeira subida, logo apos o download) e nao cabe frio -- medido em
+        # 10/09/2026 na instancia 50506348, onde religar o motor com os pesos ja no disco
+        # estourou o prazo com o filho vivo, a 181 GB de RSS e ainda lendo.
+        #
+        # Subir o padrao e seguro porque o prazo NAO e a rede de seguranca contra um filho
+        # morto: `is_alive()` logo acima ja pega esse caso na hora. Ele so limita um filho
+        # VIVO e lento, que e exatamente o caso que estava sendo morto sem motivo.
+        prazo = float(os.environ.get("EXL3_MOE_CPU_START_TIMEOUT", 900))
         t0 = time.time()
         while not self.v_ready[0]:
             if not self.proc.is_alive():
                 raise RuntimeError("CPU MoE worker process died during startup")
-            if time.time() - t0 > 60:
-                raise RuntimeError("CPU MoE worker startup timeout")
+            if time.time() - t0 > prazo:
+                raise RuntimeError(
+                    f"CPU MoE worker startup timeout ({prazo:.0f} s). O filho le a fatia dele "
+                    "do checkpoint antes de responder; com disco lento ou cache frio, suba "
+                    "EXL3_MOE_CPU_START_TIMEOUT.")
             time.sleep(0.005)
         self.started = True
         self._flags_u32 = u32
