@@ -1,0 +1,22 @@
+### E1: dcp 2, chunk 1024, denso (<2048) e esparso, varios chunks
+carga: 55 s · dispositivos [1, 0] · cp_world 2 · chunk 1024
+OK     1000 tokens · 1.2 s · ' e azul? Em uma frase: por'
+OK     1500 tokens · 0.8 s · 'u parece azul ao meio-dia.'
+OK     1992 tokens · 0.6 s · 'O céu é azul porque a luz'
+OK     2500 tokens · 0.6 s · ' que o céu é azul? Em'
+OK     2979 tokens · 0.6 s · 'O céu é azul porque a luz'
+[rank1]:[E909 18:34:31.164658747 ProcessGroupNCCL.cpp:2057] [PG ID 1 PG GUID 1 Rank 1] Process group watchdog thread terminated with exception: CUDA error: an illegal memory access was encountered
+Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
+terminate called after throwing an instance of 'c10::DistBackendError'
+  what():  [PG ID 1 PG GUID 1 Rank 1] Process group watchdog thread terminated with exception: CUDA error: an illegal memory access was encountered
+Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
+Traceback (most recent call last):
+Traceback (most recent call last):
+ConnectionResetError: [Errno 104] Connection reset by peer
+ConnectionResetError: [Errno 104] Connection reset by peer
+### E2: dcp 1 (TP2 puro), chunk 4096
+carga: 55 s · dispositivos [1, 0] · cp_world 1 · chunk 4096
+OK     4013 tokens · 4.1 s · 'O céu é azul porque as mol'
+OK     4154 tokens · 1.2 s · 'O céu é azul porque a luz'
+OK     7867 tokens · 1.0 s · 'O céu é azul porque as mol'
+FIM: todos passaram

@@ -1,0 +1,249 @@
+ !! Overriding model.language_model.layers.45.shared_head.norm.weight from /workspace/glm-5.3-flash-abliterated-exl3-4.0bpw/model-00024-of-00024.safetensors with /workspace/glm-5.3-flash-abliterated-exl3-4.0bpw/model-00023-of-00024.safetensors
+ !! Overriding model.language_model.layers.45.eh_proj.weight from /workspace/glm-5.3-flash-abliterated-exl3-4.0bpw/model-00022-of-00024.safetensors with /workspace/glm-5.3-flash-abliterated-exl3-4.0bpw/model-00023-of-00024.safetensors
+ !! Overriding model.language_model.layers.45.enorm.weight from /workspace/glm-5.3-flash-abliterated-exl3-4.0bpw/model-00022-of-00024.safetensors with /workspace/glm-5.3-flash-abliterated-exl3-4.0bpw/model-00023-of-00024.safetensors
+ !! Overriding model.language_model.layers.45.hnorm.weight from /workspace/glm-5.3-flash-abliterated-exl3-4.0bpw/model-00022-of-00024.safetensors with /workspace/glm-5.3-flash-abliterated-exl3-4.0bpw/model-00023-of-00024.safetensors
+ !! Replaced 4 tensors from /workspace/glm-5.3-flash-abliterated-exl3-4.0bpw
+ -- NCCL init: world_size 2, rank 1, device 0, init_method tcp://127.0.0.1:51963
+ -- NCCL warmup, device 0, please wait...
+ -- Finished NCCL warmup, device 0
+carga: 55 s · dispositivos [1, 0] · cp_world 2 · chunk 4096
+pagina logica 512 · 128 paginas
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [13,0,0], thread: [32,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [13,0,0], thread: [34,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [13,0,0], thread: [96,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [13,0,0], thread: [98,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [21,0,0], thread: [64,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [21,0,0], thread: [66,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [26,0,0], thread: [0,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [26,0,0], thread: [2,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [13,0,0], thread: [0,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [13,0,0], thread: [2,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [18,0,0], thread: [96,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [18,0,0], thread: [98,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [25,0,0], thread: [96,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [25,0,0], thread: [98,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [21,0,0], thread: [32,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [21,0,0], thread: [34,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [26,0,0], thread: [32,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [26,0,0], thread: [34,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [14,0,0], thread: [96,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [14,0,0], thread: [98,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [17,0,0], thread: [96,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [17,0,0], thread: [98,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [22,0,0], thread: [32,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [22,0,0], thread: [34,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [25,0,0], thread: [32,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [25,0,0], thread: [34,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [20,0,0], thread: [96,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [20,0,0], thread: [98,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [27,0,0], thread: [64,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [27,0,0], thread: [66,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [15,0,0], thread: [64,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [15,0,0], thread: [66,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [19,0,0], thread: [64,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [19,0,0], thread: [66,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [20,0,0], thread: [0,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [20,0,0], thread: [2,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [27,0,0], thread: [32,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [27,0,0], thread: [34,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [26,0,0], thread: [96,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [26,0,0], thread: [98,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [14,0,0], thread: [0,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [14,0,0], thread: [2,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [19,0,0], thread: [96,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [19,0,0], thread: [98,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [24,0,0], thread: [64,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [24,0,0], thread: [66,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [26,0,0], thread: [64,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [26,0,0], thread: [66,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [25,0,0], thread: [64,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [25,0,0], thread: [66,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [21,0,0], thread: [96,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [21,0,0], thread: [98,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [14,0,0], thread: [64,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [14,0,0], thread: [66,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [27,0,0], thread: [96,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [27,0,0], thread: [98,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [14,0,0], thread: [32,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [14,0,0], thread: [34,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [24,0,0], thread: [96,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [24,0,0], thread: [98,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [13,0,0], thread: [64,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [13,0,0], thread: [66,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [21,0,0], thread: [0,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [21,0,0], thread: [2,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [12,0,0], thread: [1,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [12,0,0], thread: [3,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [12,0,0], thread: [97,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [12,0,0], thread: [99,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [13,0,0], thread: [65,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [13,0,0], thread: [67,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [13,0,0], thread: [1,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [13,0,0], thread: [3,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [21,0,0], thread: [1,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [21,0,0], thread: [3,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [26,0,0], thread: [1,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [26,0,0], thread: [3,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [18,0,0], thread: [33,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [18,0,0], thread: [35,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [25,0,0], thread: [65,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [25,0,0], thread: [67,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [21,0,0], thread: [65,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [21,0,0], thread: [67,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [27,0,0], thread: [1,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [27,0,0], thread: [3,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [17,0,0], thread: [97,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [17,0,0], thread: [99,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [22,0,0], thread: [33,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [22,0,0], thread: [35,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [21,0,0], thread: [33,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [21,0,0], thread: [35,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [14,0,0], thread: [1,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [14,0,0], thread: [3,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [16,0,0], thread: [65,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [16,0,0], thread: [67,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [20,0,0], thread: [65,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [20,0,0], thread: [67,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [27,0,0], thread: [33,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [27,0,0], thread: [35,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [14,0,0], thread: [97,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [14,0,0], thread: [99,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [16,0,0], thread: [97,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [16,0,0], thread: [99,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [19,0,0], thread: [1,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [19,0,0], thread: [3,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [21,0,0], thread: [97,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [21,0,0], thread: [99,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [14,0,0], thread: [33,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [14,0,0], thread: [35,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [19,0,0], thread: [33,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [19,0,0], thread: [35,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [24,0,0], thread: [33,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [24,0,0], thread: [35,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [15,0,0], thread: [65,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [15,0,0], thread: [67,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [12,0,0], thread: [65,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [12,0,0], thread: [67,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [22,0,0], thread: [1,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [22,0,0], thread: [3,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [24,0,0], thread: [65,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [24,0,0], thread: [67,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [12,0,0], thread: [33,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [12,0,0], thread: [35,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+[rank1]: Traceback (most recent call last):
+[rank1]:   File "/workspace/cercar_cp.py", line 59, in <module>
+[rank1]:     main()
+[rank1]:   File "/workspace/cercar_cp.py", line 53, in main
+[rank1]:     torch.cuda.synchronize()
+[rank1]:   File "/opt/tabby/lib/python3.12/site-packages/torch/cuda/__init__.py", line 1083, in synchronize
+[rank1]:     return torch._C._cuda_synchronize()
+[rank1]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank1]: torch.AcceleratorError: CUDA error: device-side assert triggered
+[rank1]: Search for `cudaErrorAssert' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
+[rank1]: Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
+
+Process Process-1:
+Traceback (most recent call last):
+  File "/usr/lib/python3.12/multiprocessing/process.py", line 314, in _bootstrap
+    self.run()
+  File "/usr/lib/python3.12/multiprocessing/process.py", line 108, in run
+    self._target(*self._args, **self._kwargs)
+  File "/opt/tabby/lib/python3.12/site-packages/exllamav3/model/model_tp_fn.py", line 107, in mp_model_worker
+    torch.cuda.synchronize()
+  File "/opt/tabby/lib/python3.12/site-packages/torch/cuda/__init__.py", line 1083, in synchronize
+    return torch._C._cuda_synchronize()
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+torch.AcceleratorError: CUDA error: device-side assert triggered
+Search for `cudaErrorAssert' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
+Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
+
+Traceback (most recent call last):
+  File "/opt/tabby/lib/python3.12/site-packages/exllamav3/util/misc.py", line 118, in _shutdown
+    fn()
+  File "/opt/tabby/lib/python3.12/site-packages/exllamav3/model/model_tp.py", line 156, in destroy_tp_context
+    self.mp_parent_conn[self.tp_output_device].quit()
+  File "/opt/tabby/lib/python3.12/site-packages/exllamav3/model/model_tp_fn.py", line 642, in quit
+    torch.cuda.synchronize()
+  File "/opt/tabby/lib/python3.12/site-packages/torch/cuda/__init__.py", line 1083, in synchronize
+    return torch._C._cuda_synchronize()
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+torch.AcceleratorError: CUDA error: device-side assert triggered
+Search for `cudaErrorAssert' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
+Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
+
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [20,0,0], thread: [1,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [20,0,0], thread: [3,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [22,0,0], thread: [0,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [22,0,0], thread: [2,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [17,0,0], thread: [64,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [17,0,0], thread: [66,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [27,0,0], thread: [0,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py:485: unknown: block: [27,0,0], thread: [2,0,0] Assertion `dsa_split: entry idx >= pool_len` failed.
+ -- NCCL init: world_size 2, rank 0, device 1, init_method tcp://127.0.0.1:51963
+ -- NCCL warmup, device 1, please wait...
+ -- Finished NCCL warmup, device 1
+----------------------------------------
+ ## Exception in child process
+Traceback (most recent call last):
+  File "/opt/tabby/lib/python3.12/site-packages/exllamav3/model/model_tp_fn.py", line 113, in mp_model_worker
+    result = func(local_context, *args)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/tabby/lib/python3.12/site-packages/exllamav3/model/model_tp_fn.py", line 280, in mp_model_forward
+    x = module.forward(x, params)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/transformer.py", line 159, in forward
+    y = self.attn.forward(y, params)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/mla_attn.py", line 435, in forward
+    x = self.decode_flash_attn(x, bsz, seqlen, params)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/mla_attn.py", line 1053, in decode_flash_attn
+    return self._attend(
+           ^^^^^^^^^^^^^
+  File "/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/mla_attn.py", line 894, in _attend
+    return self._attend_sparse(
+           ^^^^^^^^^^^^^^^^^^^^
+  File "/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/mla_attn.py", line 991, in _attend_sparse
+    o_lat = dsa_attn(
+            ^^^^^^^^^
+  File "/opt/tabby/lib/python3.12/site-packages/exllamav3/modules/attention_fn/dsa_triton.py", line 1029, in dsa_attn
+    _dsa_attn_split_kernel[(R * hb, n_splits)](
+  File "/opt/tabby/lib/python3.12/site-packages/triton/runtime/jit.py", line 419, in <lambda>
+    return lambda *args, **kwargs: self.run(grid=grid, warmup=False, *args, **kwargs)
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/tabby/lib/python3.12/site-packages/triton/runtime/jit.py", line 757, in run
+    kernel.run(grid_0, grid_1, grid_2, stream, kernel.function, kernel.packed_metadata, launch_metadata,
+  File "/opt/tabby/lib/python3.12/site-packages/triton/backends/nvidia/driver.py", line 712, in __call__
+    self.launch(gridX, gridY, gridZ, stream, function, self.launch_cooperative_grid, self.launch_pdl,
+RuntimeError: Triton Error [CUDA]: device-side assert triggered
+
+----------------------------------------
+[rank0]:[W909 18:46:18.974228628 ProcessGroupNCCL.cpp:1524] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())
+[rank1]:[W909 18:46:19.229226331 TCPStore.cpp:125] [c10d] recvValue failed on SocketImpl(fd=58, addr=[localhost]:53470, remote=[localhost]:51963): Failed to recv, got 0 bytes. Connection was likely closed. Did the remote server shutdown or crash?
+Exception raised from recvBytes at /pytorch/torch/csrc/distributed/c10d/Utils.hpp:697 (most recent call first):
+frame #0: c10::Error::Error(c10::SourceLocation, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >) + 0x80 (0x72583977cb80 in /opt/tabby/lib/python3.12/site-packages/torch/lib/libc10.so)
+frame #1: <unknown function> + 0x5ffd531 (0x72581c84f531 in /opt/tabby/lib/python3.12/site-packages/torch/lib/libtorch_cpu.so)
+frame #2: <unknown function> + 0x5ffe92d (0x72581c85092d in /opt/tabby/lib/python3.12/site-packages/torch/lib/libtorch_cpu.so)
+frame #3: <unknown function> + 0x5fff4da (0x72581c8514da in /opt/tabby/lib/python3.12/site-packages/torch/lib/libtorch_cpu.so)
+frame #4: c10d::TCPStore::check(std::vector<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >, std::allocator<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > > > const&) + 0x31e (0x72581c84c1fe in /opt/tabby/lib/python3.12/site-packages/torch/lib/libtorch_cpu.so)
+frame #5: c10d::ProcessGroupNCCL::HeartbeatMonitor::runLoop() + 0x3c8 (0x7257db3ca6b8 in /opt/tabby/lib/python3.12/site-packages/torch/lib/libtorch_cuda.so)
+frame #6: <unknown function> + 0xecdb4 (0x72583226edb4 in /usr/lib/x86_64-linux-gnu/libstdc++.so.6)
+frame #7: <unknown function> + 0x9cb84 (0x72583a4e5b84 in /usr/lib/x86_64-linux-gnu/libc.so.6)
+frame #8: __clone + 0x44 (0x72583a572b64 in /usr/lib/x86_64-linux-gnu/libc.so.6)
+
+[rank1]:[W909 18:46:19.231808108 ProcessGroupNCCL.cpp:1771] [PG ID 0 PG GUID 0(default_pg) Rank 1] Failed to check the "should dump" flag on TCPStore, (maybe TCPStore server has shut down too early), with error: Failed to recv, got 0 bytes. Connection was likely closed. Did the remote server shutdown or crash?
+[rank1]:[W909 18:46:20.231924341 TCPStore.cpp:106] [c10d] sendBytes failed on SocketImpl(fd=58, addr=[localhost]:53470, remote=[localhost]:51963): Broken pipe
+Exception raised from sendBytes at /pytorch/torch/csrc/distributed/c10d/Utils.hpp:668 (most recent call first):
+frame #0: c10::Error::Error(c10::SourceLocation, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >) + 0x80 (0x72583977cb80 in /opt/tabby/lib/python3.12/site-packages/torch/lib/libc10.so)
+frame #1: <unknown function> + 0x5ffd531 (0x72581c84f531 in /opt/tabby/lib/python3.12/site-packages/torch/lib/libtorch_cpu.so)
+frame #2: <unknown function> + 0x5ffddc2 (0x72581c84fdc2 in /opt/tabby/lib/python3.12/site-packages/torch/lib/libtorch_cpu.so)
+frame #3: <unknown function> + 0x5fff8ce (0x72581c8518ce in /opt/tabby/lib/python3.12/site-packages/torch/lib/libtorch_cpu.so)
+frame #4: c10d::TCPStore::check(std::vector<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >, std::allocator<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > > > const&) + 0x30e (0x72581c84c1ee in /opt/tabby/lib/python3.12/site-packages/torch/lib/libtorch_cpu.so)
+frame #5: c10d::ProcessGroupNCCL::HeartbeatMonitor::runLoop() + 0x3c8 (0x7257db3ca6b8 in /opt/tabby/lib/python3.12/site-packages/torch/lib/libtorch_cuda.so)
+frame #6: <unknown function> + 0xecdb4 (0x72583226edb4 in /usr/lib/x86_64-linux-gnu/libstdc++.so.6)
+frame #7: <unknown function> + 0x9cb84 (0x72583a4e5b84 in /usr/lib/x86_64-linux-gnu/libc.so.6)
+frame #8: __clone + 0x44 (0x72583a572b64 in /usr/lib/x86_64-linux-gnu/libc.so.6)
+
+[rank1]:[W909 18:46:20.234222700 ProcessGroupNCCL.cpp:1771] [PG ID 0 PG GUID 0(default_pg) Rank 1] Failed to check the "should dump" flag on TCPStore, (maybe TCPStore server has shut down too early), with error: Broken pipe
+/usr/lib/python3.12/multiprocessing/resource_tracker.py:254: UserWarning: resource_tracker: There appear to be 6 leaked shared_memory objects to clean up at shutdown
+  warnings.warn('resource_tracker: There appear to be %d '

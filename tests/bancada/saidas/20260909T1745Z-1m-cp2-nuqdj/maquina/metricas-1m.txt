@@ -1,0 +1,32 @@
+0, 96519 MiB, 97887 MiB 1, 95590 MiB, 97887 MiB 
+2026-09-09 18:17:00.329 INFO:     Metrics (ID: 
+0.01 s, Process: 0 cached tokens and 22 new tokens at 29.33 T/s, Generate: 42.11
+2026-09-09 19:16:28.796 INFO:     Metrics (ID: 
+0.01 s, Process: 0 cached tokens and 199494 new tokens at 3404.92 T/s, Generate:
+2026-09-09 19:21:59.953 INFO:     Metrics (ID: 
+0.01 s, Process: 0 cached tokens and 959667 new tokens at 2991.11 T/s, Generate:
+servidor pronto 19:15:24; iniciando 200k e 1M
+prompt montado: 199,481 tokens (teto 200,000)
+PASSOU  alvo 200,000 tok · servidor informou 199,494 tok
+  marcadores em ambar 5%, bruma 35%, cobalto 65%, dalia 95%
+  recuperação exata: sim   contexto entrou: sim   cache: limpo
+  prefill 59.2 s · total 64.0 s · parada stop
+prompt montado: 959,654 tokens (teto 1,000,000)
+PASSOU  alvo 1,000,000 tok · servidor informou 959,667 tok
+  marcadores em ambar 5%, bruma 35%, cobalto 65%, dalia 95%
+  recuperação exata: sim   contexto entrou: sim   cache: limpo
+  prefill 322.9 s · total 328.9 s · parada stop
+resultado em /workspace/recuperacao-1m.json
+TODAS PASSARAM
+0.01 s, Process: 0 cached tokens and 22 new tokens at 29.33 T/s, Generate: 42.11
+T/s, Context: 22 tokens) 
+--
+2026-09-09 19:16:28.796 INFO:     Metrics (ID: 
+f9bfa7a74ad343f583486e9a291381e1): 299 tokens generated in 63.53 seconds (Queue:
+0.01 s, Process: 0 cached tokens and 199494 new tokens at 3404.92 T/s, Generate:
+60.55 T/s, Context: 199494 tokens) 
+--
+2026-09-09 19:21:59.953 INFO:     Metrics (ID: 
+416143d78885471e9dc3e648c5d06dc9): 361 tokens generated in 326.9 seconds (Queue:
+0.01 s, Process: 0 cached tokens and 959667 new tokens at 2991.11 T/s, Generate:
+59.58 T/s, Context: 959667 tokens) 

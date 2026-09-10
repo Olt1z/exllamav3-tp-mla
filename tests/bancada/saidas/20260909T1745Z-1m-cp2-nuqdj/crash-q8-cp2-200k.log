@@ -1,0 +1,159 @@
+200
+2026-09-09 17:43:56.274 INFO:     187.23.216.192:52790 - "GET /v1/models 
+HTTP/1.1" 200
+2026-09-09 17:43:56.471 INFO:     187.23.216.192:52806 - "GET /health HTTP/1.1" 
+200
+2026-09-09 17:44:33.169 INFO:     187.23.216.192:52804 - "GET /health HTTP/1.1" 
+200
+2026-09-09 17:45:06.784 INFO:     187.23.216.192:52783 - "GET /v1/models 
+HTTP/1.1" 200
+2026-09-09 17:45:07.434 WARNING:  Unable to switch model to x because 
+"inline_model_loading" is not True in config.yml.
+2026-09-09 17:45:07.435 INFO:     Received chat completion request 
+4ccf849cec4247b5a40a57bdd10873c6
+2026-09-09 17:45:08.451 INFO:     Finished chat completion request 
+4ccf849cec4247b5a40a57bdd10873c6
+2026-09-09 17:45:08.451 INFO:     187.23.216.192:52783 - "POST 
+/v1/chat/completions HTTP/1.1" 200
+2026-09-09 17:45:08.452 INFO:     Metrics (ID: 
+4ccf849cec4247b5a40a57bdd10873c6): 20 tokens generated in 1.01 seconds (Queue: 
+0.01 s, Process: 0 cached tokens and 17 new tokens at 24.29 T/s, Generate: 65.57
+T/s, Context: 17 tokens) 
+2026-09-09 17:45:32.227 INFO:     187.23.216.192:52787 - "GET /health HTTP/1.1" 
+200
+2026-09-09 17:45:59.143 INFO:     187.23.216.192:52842 - "POST /v1/token/encode 
+HTTP/1.1" 200
+2026-09-09 17:46:30.772 INFO:     187.23.216.192:52840 - "GET /health HTTP/1.1" 
+200
+2026-09-09 17:47:28.594 INFO:     187.23.216.192:52797 - "GET /health HTTP/1.1" 
+200
+2026-09-09 17:47:38.952 INFO:     187.23.216.192:52842 - "POST /v1/token/encode 
+HTTP/1.1" 200
+2026-09-09 17:48:26.915 INFO:     187.23.216.192:52866 - "GET /health HTTP/1.1" 
+200
+2026-09-09 17:49:25.774 INFO:     187.23.216.192:52812 - "GET /health HTTP/1.1" 
+200
+2026-09-09 17:49:31.473 WARNING:  Unable to switch model to x because 
+"inline_model_loading" is not True in config.yml.
+2026-09-09 17:49:31.655 INFO:     187.23.216.192:52780 - "POST 
+/v1/chat/completions HTTP/1.1" 200
+2026-09-09 17:49:31.656 INFO:     Received chat completion streaming request 
+576377fe99314a5ca09dbf954c1126e8
+2026-09-09 17:49:52.239 ERROR:    Request disconnected: /v1/chat/completions
+2026-09-09 17:50:23.669 INFO:     187.23.216.192:52795 - "GET /health HTTP/1.1" 
+200
+2026-09-09 17:51:00.602 INFO:     187.23.216.192:52844 - "POST /v1/token/encode 
+HTTP/1.1" 200
+2026-09-09 17:51:22.439 INFO:     187.23.216.192:52807 - "GET /health HTTP/1.1" 
+200
+2026-09-09 17:52:17.273 INFO:     187.23.216.192:52844 - "POST /v1/token/encode 
+HTTP/1.1" 200
+2026-09-09 17:52:20.904 INFO:     187.23.216.192:52860 - "GET /health HTTP/1.1" 
+200
+2026-09-09 17:53:18.693 INFO:     187.23.216.192:52828 - "GET /health HTTP/1.1" 
+200
+2026-09-09 17:54:16.815 INFO:     187.23.216.192:52816 - "GET /health HTTP/1.1" 
+200
+2026-09-09 17:54:22.534 WARNING:  Unable to switch model to x because 
+"inline_model_loading" is not True in config.yml.
+2026-09-09 17:54:22.727 INFO:     187.23.216.192:52844 - "POST 
+/v1/chat/completions HTTP/1.1" 200
+2026-09-09 17:54:22.727 INFO:     Received chat completion streaming request 
+7dac0f665b404bcb9458e582eb9e1293
+2026-09-09 17:55:22.128 INFO:     187.23.216.192:52789 - "GET /health HTTP/1.1" 
+200
+terminate called after throwing an instance of 'terminate called after throwing an instance of 'c10::AcceleratorErrorc10::AcceleratorError'
+'
+  what():  CUDA error: an illegal memory access was encountered
+Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
+CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
+For debugging consider passing CUDA_LAUNCH_BLOCKING=1
+Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
+
+Exception raised from c10_cuda_check_implementation at /pytorch/c10/cuda/CUDAException.cpp:44 (most recent call first):
+frame #0: c10::Error::Error(c10::SourceLocation, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >) + 0x80 (0x7c29fbef2b80 in /opt/tabby/lib/python3.12/site-packages/torch/lib/libc10.so)
+frame #1: <unknown function> + 0x11fb7 (0x7c2a5b121fb7 in /opt/tabby/lib/python3.12/site-packages/torch/lib/libc10_cuda.so)
+frame #2: <unknown function> + 0x5b639 (0x7c2a5b16b639 in /opt/tabby/lib/python3.12/site-packages/torch/lib/libc10_cuda.so)
+frame #3: <unknown function> + 0x5c0e4 (0x7c2a5b16c0e4 in /opt/tabby/lib/python3.12/site-packages/torch/lib/libc10_cuda.so)
+frame #4: void at::native::nonzero_cuda_out_impl<bool>(at::Tensor const&, at::Tensor&) + 0x2815 (0x7c29fe168e15 in /opt/tabby/lib/python3.12/site-packages/torch/lib/libtorch_cuda.so)
+frame #5: at::native::nonzero_out_cuda(at::Tensor const&, at::Tensor&) + 0x48b (0x7c29fe12c32b in /opt/tabby/lib/python3.12/site-packages/torch/lib/libtorch_cuda.so)
+frame #6: at::native::nonzero_cuda(at::Tensor const&) + 0x115 (0x7c29fe12c635 in /opt/tabby/lib/python3.12/site-packages/torch/lib/libtorch_cuda.so)
+frame #7: <unknown function> + 0x340a477 (0x7c29ff380477 in /opt/tabby/lib/python3.12/site-packages/torch/lib/libtorch_cuda.so)
+frame #8: <unknown function> + 0x340a4ec (0x7c29ff3804ec in /opt/tabby/lib/python3.12/site-packages/torch/lib/libtorch_cuda.so)
+frame #9: at::_ops::nonzero::call(at::Tensor const&) + 0xaf (0x7c2a3a5bd44f in /opt/tabby/lib/python3.12/site-packages/torch/lib/libtorch_cpu.so)
+frame #10: <unknown function> + 0x1e44c50 (0x7c2a3a096c50 in /opt/tabby/lib/python3.12/site-packages/torch/lib/libtorch_cpu.so)
+frame #11: at::meta::structured_index_Tensor::meta(at::Tensor const&, c10::IListRef<at::OptionalTensorRef>) + 0x3b0 (0x7c2a3a08c820 in /opt/tabby/lib/python3.12/site-packages/torch/lib/libtorch_cpu.so)
+frame #12: <unknown function> + 0x3385f20 (0x7c29ff2fbf20 in /opt/tabby/lib/python3.12/site-packages/torch/lib/libtorch_cuda.so)
+frame #13: <unknown function> + 0x33860df (0x7c29ff2fc0df in /opt/tabby/lib/python3.12/site-packages/torch/lib/libtorch_cuda.so)
+frame #14: at::_ops::index_Tensor::call(at::Tensor const&, c10::List<std::optional<at::Tensor> > const&) + 0x1b5 (0x7c2a3a783765 in /opt/tabby/lib/python3.12/site-packages/torch/lib/libtorch_cpu.so)
+frame #15: <unknown function> + 0x7da6c6 (0x7c2a4d3836c6 in /opt/tabby/lib/python3.12/site-packages/torch/lib/libtorch_python.so)
+frame #16: <unknown function> + 0x7d5854 (0x7c2a4d37e854 in /opt/tabby/lib/python3.12/site-packages/torch/lib/libtorch_python.so)
+frame #17: _PyEval_EvalFrameDefault + 0x18c2 (0x5d8262 in /opt/tabby/bin/python)
+frame #18: PyEval_EvalCode + 0x15b (0x5d594b in /opt/tabby/bin/python)
+frame #19: PyRun_StringFlags + 0xd3 (0x6089f3 in /opt/tabby/bin/python)
+frame #20: PyRun_SimpleStringFlags + 0x3e (0x6b44be in /opt/tabby/bin/python)
+frame #21: Py_RunMain + 0x481 (0x6bd181 in /opt/tabby/bin/python)
+frame #22: Py_BytesMain + 0x2d (0x6bcb9d in /opt/tabby/bin/python)
+frame #23: <unknown function> + 0x2a1ca (0x7c2a5dcc61ca in /usr/lib/x86_64-linux-gnu/libc.so.6)
+frame #24: __libc_start_main + 0x8b (0x7c2a5dcc628b in /usr/lib/x86_64-linux-gnu/libc.so.6)
+frame #25: _start + 0x25 (0x658345 in /opt/tabby/bin/python)
+
+  what():  CUDA error: an illegal memory access was encountered
+Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
+CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
+For debugging consider passing CUDA_LAUNCH_BLOCKING=1
+Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
+
+Exception raised from c10_cuda_check_implementation at /pytorch/c10/cuda/CUDAException.cpp:44 (most recent call first):
+frame #0: c10::Error::Error(c10::SourceLocation, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >) + 0x80 (0x77ace517cb80 in /opt/tabby/lib/python3.12/site-packages/torch/lib/libc10.so)
+frame #1: <unknown function> + 0x11fb7 (0x77ace5566fb7 in /opt/tabby/lib/python3.12/site-packages/torch/lib/libc10_cuda.so)
+frame #2: <unknown function> + 0x5b639 (0x77ace55b0639 in /opt/tabby/lib/python3.12/site-packages/torch/lib/libc10_cuda.so)
+frame #3: <unknown function> + 0x5c0e4 (0x77ace55b10e4 in /opt/tabby/lib/python3.12/site-packages/torch/lib/libc10_cuda.so)
+frame #4: void at::native::nonzero_cuda_out_impl<bool>(at::Tensor const&, at::Tensor&) + 0x2815 (0x77ac883e6e15 in /opt/tabby/lib/python3.12/site-packages/torch/lib/libtorch_cuda.so)
+frame #5: at::native::nonzero_out_cuda(at::Tensor const&, at::Tensor&) + 0x48b (0x77ac883aa32b in /opt/tabby/lib/python3.12/site-packages/torch/lib/libtorch_cuda.so)
+frame #6: at::native::nonzero_cuda(at::Tensor const&) + 0x115 (0x77ac883aa635 in /opt/tabby/lib/python3.12/site-packages/torch/lib/libtorch_cuda.so)
+frame #7: <unknown function> + 0x340a477 (0x77ac895fe477 in /opt/tabby/lib/python3.12/site-packages/torch/lib/libtorch_cuda.so)
+frame #8: <unknown function> + 0x340a4ec (0x77ac895fe4ec in /opt/tabby/lib/python3.12/site-packages/torch/lib/libtorch_cuda.so)
+frame #9: at::_ops::nonzero::call(at::Tensor const&) + 0xaf (0x77acc483b44f in /opt/tabby/lib/python3.12/site-packages/torch/lib/libtorch_cpu.so)
+frame #10: <unknown function> + 0x1e44c50 (0x77acc4314c50 in /opt/tabby/lib/python3.12/site-packages/torch/lib/libtorch_cpu.so)
+frame #11: at::meta::structured_index_Tensor::meta(at::Tensor const&, c10::IListRef<at::OptionalTensorRef>) + 0x3b0 (0x77acc430a820 in /opt/tabby/lib/python3.12/site-packages/torch/lib/libtorch_cpu.so)
+frame #12: <unknown function> + 0x3385f20 (0x77ac89579f20 in /opt/tabby/lib/python3.12/site-packages/torch/lib/libtorch_cuda.so)
+frame #13: <unknown function> + 0x33860df (0x77ac8957a0df in /opt/tabby/lib/python3.12/site-packages/torch/lib/libtorch_cuda.so)
+frame #14: at::_ops::index_Tensor::call(at::Tensor const&, c10::List<std::optional<at::Tensor> > const&) + 0x1b5 (0x77acc4a01765 in /opt/tabby/lib/python3.12/site-packages/torch/lib/libtorch_cpu.so)
+frame #15: <unknown function> + 0x7da6c6 (0x77acd76016c6 in /opt/tabby/lib/python3.12/site-packages/torch/lib/libtorch_python.so)
+frame #16: <unknown function> + 0x7d5854 (0x77acd75fc854 in /opt/tabby/lib/python3.12/site-packages/torch/lib/libtorch_python.so)
+frame #17: _PyEval_EvalFrameDefault + 0x18c2 (0x5d8262 in /opt/tabby/bin/python)
+frame #18: /opt/tabby/bin/python() [0x66c8d9]
+frame #19: <unknown function> + 0x9d44 (0x77ace840ad44 in /usr/lib/python3.12/lib-dynload/_asyncio.cpython-312-x86_64-linux-gnu.so)
+frame #20: <unknown function> + 0x9b5b (0x77ace840ab5b in /usr/lib/python3.12/lib-dynload/_asyncio.cpython-312-x86_64-linux-gnu.so)
+frame #21: <unknown function> + 0x5d8eb (0x77ace66d78eb in /opt/tabby/lib/python3.12/site-packages/uvloop/loop.cpython-312-x86_64-linux-gnu.so)
+frame #22: <unknown function> + 0x139a69 (0x77ace67b3a69 in /opt/tabby/lib/python3.12/site-packages/uvloop/loop.cpython-312-x86_64-linux-gnu.so)
+frame #23: <unknown function> + 0x13d96b (0x77ace67b796b in /opt/tabby/lib/python3.12/site-packages/uvloop/loop.cpython-312-x86_64-linux-gnu.so)
+frame #24: <unknown function> + 0x137e52 (0x77ace67b1e52 in /opt/tabby/lib/python3.12/site-packages/uvloop/loop.cpython-312-x86_64-linux-gnu.so)
+frame #25: <unknown function> + 0x139c88 (0x77ace67b3c88 in /opt/tabby/lib/python3.12/site-packages/uvloop/loop.cpython-312-x86_64-linux-gnu.so)
+frame #26: uv__run_idle + 0x81 (0x77ace67cf311 in /opt/tabby/lib/python3.12/site-packages/uvloop/loop.cpython-312-x86_64-linux-gnu.so)
+frame #27: uv_run + 0x97 (0x77ace67cc647 in /opt/tabby/lib/python3.12/site-packages/uvloop/loop.cpython-312-x86_64-linux-gnu.so)
+frame #28: <unknown function> + 0x73db5 (0x77ace66eddb5 in /opt/tabby/lib/python3.12/site-packages/uvloop/loop.cpython-312-x86_64-linux-gnu.so)
+frame #29: <unknown function> + 0xdbe50 (0x77ace6755e50 in /opt/tabby/lib/python3.12/site-packages/uvloop/loop.cpython-312-x86_64-linux-gnu.so)
+frame #30: <unknown function> + 0xeccf0 (0x77ace6766cf0 in /opt/tabby/lib/python3.12/site-packages/uvloop/loop.cpython-312-x86_64-linux-gnu.so)
+frame #31: PyObject_VectorcallMethod + 0x7f (0x5496ef in /opt/tabby/bin/python)
+frame #32: <unknown function> + 0xf0d60 (0x77ace676ad60 in /opt/tabby/lib/python3.12/site-packages/uvloop/loop.cpython-312-x86_64-linux-gnu.so)
+frame #33: <unknown function> + 0xf2591 (0x77ace676c591 in /opt/tabby/lib/python3.12/site-packages/uvloop/loop.cpython-312-x86_64-linux-gnu.so)
+frame #34: PyObject_Vectorcall + 0x35 (0x549835 in /opt/tabby/bin/python)
+frame #35: _PyEval_EvalFrameDefault + 0xa89 (0x5d7429 in /opt/tabby/bin/python)
+frame #36: PyEval_EvalCode + 0x15b (0x5d594b in /opt/tabby/bin/python)
+frame #37: /opt/tabby/bin/python() [0x608b12]
+frame #38: /opt/tabby/bin/python() [0x6b54b3]
+frame #39: _PyRun_SimpleFileObject + 0x1aa (0x6b521a in /opt/tabby/bin/python)
+frame #40: _PyRun_AnyFileObject + 0x4f (0x6b504f in /opt/tabby/bin/python)
+frame #41: Py_RunMain + 0x3b5 (0x6bd0b5 in /opt/tabby/bin/python)
+frame #42: Py_BytesMain + 0x2d (0x6bcb9d in /opt/tabby/bin/python)
+frame #43: <unknown function> + 0x2a1ca (0x77ace8f311ca in /usr/lib/x86_64-linux-gnu/libc.so.6)
+frame #44: __libc_start_main + 0x8b (0x77ace8f3128b in /usr/lib/x86_64-linux-gnu/libc.so.6)
+frame #45: _start + 0x25 (0x658345 in /opt/tabby/bin/python)
+
+/usr/lib/python3.12/multiprocessing/resource_tracker.py:254: UserWarning: resource_tracker: There appear to be 6 leaked shared_memory objects to clean up at shutdown
+  warnings.warn('resource_tracker: There appear to be %d '
+/root/onstart.sh: line 107: 10683 Aborted                 /opt/tabby/bin/python main.py --host 0.0.0.0 --port 5000 --model-dir /workspace --model-name glm-5.3-flash-abliterated-exl3-4.0bpw --tensor-parallel true --tensor-parallel-backend nccl --max-seq-len 1048576 --cache-size 1048576 --max-batch-size 4 --cache-mode Q8 --chunk-size 4096 --vision true --tool-format glm4_7 --reasoning true --start-in-reasoning auto
+!!! o TabbyAPI saiu com código 134 — as linhas acima são a causa
+!!! pausa de 5 min antes de deixar o container reiniciar, para o log ser lido

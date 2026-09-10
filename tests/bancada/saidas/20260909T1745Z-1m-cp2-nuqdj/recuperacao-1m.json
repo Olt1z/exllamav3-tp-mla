@@ -1,0 +1,67 @@
+{
+  "resultados": [
+    {
+      "alvo_tokens": 200000,
+      "prompt_tokens": 199494,
+      "cached_tokens": null,
+      "posicoes": {
+        "ambar": 0.05,
+        "bruma": 0.35,
+        "cobalto": 0.65,
+        "dalia": 0.95
+      },
+      "esperado": {
+        "ambar": "273beb18b56d9a56",
+        "bruma": "c102e129b789077c",
+        "cobalto": "d5d1823a40c3f37b",
+        "dalia": "5c3c2cd0208154ba"
+      },
+      "obtido": {
+        "ambar": "273beb18b56d9a56",
+        "bruma": "c102e129b789077c",
+        "cobalto": "d5d1823a40c3f37b",
+        "dalia": "5c3c2cd0208154ba"
+      },
+      "recuperacao_exata": true,
+      "contexto_entrou": true,
+      "cache_limpo": true,
+      "passou": true,
+      "finish_reason": "stop",
+      "ttft_s": 59.2,
+      "total_s": 64.05,
+      "escopo": "Quatro marcadores sintéticos em posições separadas; não é avaliação de raciocínio em contexto longo nem benchmark de qualidade."
+    },
+    {
+      "alvo_tokens": 1000000,
+      "prompt_tokens": 959667,
+      "cached_tokens": null,
+      "posicoes": {
+        "ambar": 0.05,
+        "bruma": 0.35,
+        "cobalto": 0.65,
+        "dalia": 0.95
+      },
+      "esperado": {
+        "ambar": "25e3b711f5d98584",
+        "bruma": "3d3640d2445972cd",
+        "cobalto": "5e8438becfefd1e1",
+        "dalia": "20bb2aacb4cbcad3"
+      },
+      "obtido": {
+        "ambar": "25e3b711f5d98584",
+        "bruma": "3d3640d2445972cd",
+        "cobalto": "5e8438becfefd1e1",
+        "dalia": "20bb2aacb4cbcad3"
+      },
+      "recuperacao_exata": true,
+      "contexto_entrou": true,
+      "cache_limpo": true,
+      "passou": true,
+      "finish_reason": "stop",
+      "ttft_s": 322.91,
+      "total_s": 328.87,
+      "escopo": "Quatro marcadores sintéticos em posições separadas; não é avaliação de raciocínio em contexto longo nem benchmark de qualidade."
+    }
+  ],
+  "todas_passaram": true
+}

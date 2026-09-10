@@ -1,7 +1,7 @@
 <h1 align="center">ExLlamaV3 · <code>tp-mla</code></h1>
 
 <p align="center">
-  <a href="https://github.com/turboderp-org/exllamav3"><img alt="upstream" src="https://img.shields.io/badge/upstream-exllamav3%20v1.4.8-1f6feb?style=for-the-badge"></a>
+  <a href="https://github.com/turboderp-org/exllamav3"><img alt="upstream" src="https://img.shields.io/badge/upstream-exllamav3%20v1.4.9-1f6feb?style=for-the-badge"></a>
   <img alt="cuda" src="https://img.shields.io/badge/CUDA-12.4%2B-76b900?style=for-the-badge">
   <img alt="python" src="https://img.shields.io/badge/Python-3.10%2B-3776ab?style=for-the-badge">
   <a href="#licença"><img alt="license" src="https://img.shields.io/badge/license-MIT-blue?style=for-the-badge"></a>
@@ -178,7 +178,7 @@ plantados em 5 %, 35 %, 65 % e 95 % do prompt voltaram exatos nos dois tamanhos.
 
 ## Tensor parallel para atenção latente
 
-Na v1.4.8 o padrão do motor é `supports_tp: True`, e a maioria das famílias já gera em várias
+Na v1.4.9 o padrão do motor é `supports_tp: True`, e a maioria das famílias já gera em várias
 placas. As que recusavam faziam isso por causa de uma peça só: a `MLAttention`, cujos
 `make_tp_allocation` e `tp_export` levantavam `NotImplementedError`.
 

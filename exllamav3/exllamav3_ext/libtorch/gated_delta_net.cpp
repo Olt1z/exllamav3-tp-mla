@@ -104,6 +104,23 @@ void BC_GatedDeltaNetSplit::configure_slot
     s.o_xh            = std::move(o_xh);
     s.z_flat = s.z.view({bsz, seqlen, -1});
 
+    // Sliced qkv+z bundle: output pointers into this slot's statics, one per slice
+    if (qkvz_ptrs_trellis)
+    {
+        int R = bsz * seqlen;
+        const at::Tensor& meta = qkvz_meta.value();
+        int slices = (int) meta.size(1);
+        auto t = meta.accessor<int, 2>();
+        std::vector<int64_t> ptrs(slices);
+        for (int j = 0; j < slices; ++j)
+        {
+            float* base = (float*) (t[0][j] == 0 ? s.qkv.data_ptr() : s.z_flat.data_ptr());
+            ptrs[j] = (int64_t) (base + t[1][j]);
+        }
+        s.qkvz_c_ptrs = at::tensor(ptrs, at::TensorOptions().dtype(at::kLong)).to(s.qkv.device());
+        s.qkvz_xh = at::empty({2, R, s.qkv_xh.size(-1)}, s.qkv_xh.options());
+    }
+
     TORCH_CHECK(s.qkv.is_contiguous() && s.z.is_contiguous() && s.ba.is_contiguous() &&
                 s.beta.is_contiguous() && s.g.is_contiguous() && s.mixed_qkv.is_contiguous() &&
                 s.conv_out.is_contiguous() && s.core_attn_out.is_contiguous() &&
@@ -212,6 +229,38 @@ void BC_GatedDeltaNetSplit::configure_slot_kda
     s.configured = true;
 }
 
+void BC_GatedDeltaNetSplit::set_qkvz_bundle
+(
+    at::Tensor ptrs_trellis,
+    at::Tensor ptrs_suh,
+    at::Tensor ptrs_svh,
+    at::Tensor meta,
+    int K,
+    bool mcg,
+    bool mul1
+)
+{
+    TORCH_CHECK(!kda, "BC_GatedDeltaNetSplit: qkvz bundle is for the split (non-KDA) projections");
+    TORCH_CHECK(meta.device().is_cpu() && meta.dtype() == at::kInt && meta.dim() == 2 && meta.size(0) == 5,
+                "BC_GatedDeltaNetSplit: qkvz_meta must be a CPU int32 (5, slices) tensor");
+    int slices = (int) meta.size(1);
+    TORCH_CHECK(ptrs_trellis.size(0) == slices && ptrs_svh.size(0) == slices && ptrs_suh.size(0) == 2,
+                "BC_GatedDeltaNetSplit: qkvz pointer tables must cover every slice / both sources");
+    auto dev = ptrs_trellis.device();
+    qkvz_size_n = meta.select(0, 2).contiguous().to(dev);
+    qkvz_n_stride = meta.select(0, 3).contiguous().to(dev);
+    qkvz_had_src = meta.select(0, 4).contiguous().to(dev);
+    int width = meta[2][0].item<int>();
+    qkvz_carrier = at::empty({slices, MAX_BSZ * MAX_QLEN, width}, at::TensorOptions().dtype(at::kFloat).device(dev));
+    qkvz_ptrs_trellis = std::move(ptrs_trellis);
+    qkvz_ptrs_suh = std::move(ptrs_suh);
+    qkvz_ptrs_svh = std::move(ptrs_svh);
+    qkvz_meta = std::move(meta);
+    qkvz_K = K;
+    qkvz_mcg = mcg;
+    qkvz_mul1 = mul1;
+}
+
 void BC_GatedDeltaNetSplit::run_bszN_gr
 (
     const at::Tensor& x,
@@ -224,15 +273,15 @@ void BC_GatedDeltaNetSplit::run_bszN_gr
     Graph* graph
 )
 {
-    int bsz = (int) x.size(0);
-    int seqlen = (int) x.size(1);
-    int R = bsz * seqlen;
+    int R = (int) (x.size(0) * x.size(1));
+    bool use_qkvz = qkvz_ptrs_trellis.has_value() && !kda && R <= 32;
 
     // qkv/z projections: linear_gr bypasses BC_LinearEXL3::run_gr, which hard-refuses graph
     // capture above 1 row, and calls exl3_gemm_gr with this slot's own xh scratch instead, exactly
     // like BC_GatedMLP::run_bszN_gr does for shared-expert projections. An fp16 qkv_proj is a
     // cuBLAS node with no patchable sites: x is copied into the static xp at the graph head
-    // (patched GP_copy2d_src) and the GEMM runs over all R_pad rows of the statics
+    // (patched GP_copy2d_src) and the GEMM runs over all R_pad rows of the statics. The sliced
+    // qkv+z bundle is EXL3-only by construction, so it cannot coexist with the fp16 path
     if (qkv_proj_fp16)
     {
         TORCH_CHECK(s.xp.defined() && x.size(2) == s.xp.size(1),
@@ -241,6 +290,16 @@ void BC_GatedDeltaNetSplit::run_bszN_gr
         at::Tensor xp2 = s.xp.narrow(0, 0, R);
         copy2d_gr(x2, xp2, graph);
         linear_gr(nullptr, qkv_proj_fp16, s.xp, s.qkv_pad, at::Tensor(), graph);
+    }
+    else if (use_qkvz)
+    {
+        // Both projections as one sliced mgemm into the qkv / z statics (no biases by construction)
+        TORCH_CHECK(x.is_contiguous(), "BC_GatedDeltaNetSplit: input must be contiguous");
+        at::Tensor x3 = x.view({1, R, x.size(2)});
+        at::Tensor carrier = qkvz_carrier.narrow(1, 0, R);
+        exl3_mgemm_gr(x3, qkvz_ptrs_trellis.value(), carrier, qkvz_ptrs_suh.value(), s.qkvz_xh, qkvz_ptrs_svh.value(),
+                      c10::nullopt, c10::nullopt, qkvz_K, -1, qkvz_mcg, qkvz_mul1, -1, -1, 0, graph,
+                      1, qkvz_size_n, s.qkvz_c_ptrs, qkvz_n_stride, qkvz_had_src, 2);
     }
     else
         linear_gr(qkv_proj, nullptr, x, s.qkv, s.qkv_xh, graph);
@@ -265,9 +324,12 @@ void BC_GatedDeltaNetSplit::run_bszN_gr
     }
     else
     {
-        exl3_gemm_gr(x, z_proj->trellis, s.z_flat, z_proj->suh, s.z_xh, z_proj->svh, -1, z_proj->mcg, z_proj->mul1, 0, graph);
-        if (z_proj->bias)
-            add_gr(s.z_flat, z_proj->bias.value(), s.z_flat, graph);
+        if (!use_qkvz)
+        {
+            exl3_gemm_gr(x, z_proj->trellis, s.z_flat, z_proj->suh, s.z_xh, z_proj->svh, -1, z_proj->mcg, z_proj->mul1, 0, graph);
+            if (z_proj->bias)
+                add_gr(s.z_flat, z_proj->bias.value(), s.z_flat, graph);
+        }
 
         gdn_ba_gemv_gr(x, ba_weight_t, ba_bias, s.ba, graph);
 
@@ -400,6 +462,17 @@ void BC_GatedDeltaNetSplit::run_bszN
         else
             args.emplace_back(GP_gemm_C,     (void*) y.data_ptr());     // o_proj output
     }
+    else if (qkvz_ptrs_trellis.has_value() && (int) (x.size(0) * x.size(1)) <= 32)
+        args = std::vector<PPTR>
+        {
+            PPTR(GP_mgemm_A,        (void*) x.data_ptr()),          // sliced qkv+z bundle input
+            PPTR(GP_gdn_ba_x,       (void*) x.data_ptr()),
+            PPTR(GP_conv1d_state,   (void*) conv_state.data_ptr()),
+            PPTR(GP_conv1d_slots,   (void*) slots.data_ptr()),
+            PPTR(GP_gdn_rule_state, (void*) recurrent_state.data_ptr()),
+            PPTR(GP_gdn_rule_slots, (void*) slots.data_ptr()),
+            PPTR(GP_gemm_C,         (void*) y.data_ptr())           // o_proj output
+        };
     else
         args = std::vector<PPTR>
         {

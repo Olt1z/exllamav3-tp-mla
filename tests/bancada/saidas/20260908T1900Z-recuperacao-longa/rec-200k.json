@@ -1,0 +1,36 @@
+{
+  "resultados": [
+    {
+      "alvo_tokens": 200000,
+      "prompt_tokens": 207510,
+      "cached_tokens": null,
+      "posicoes": {
+        "ambar": 0.05,
+        "bruma": 0.35,
+        "cobalto": 0.65,
+        "dalia": 0.95
+      },
+      "esperado": {
+        "ambar": "249e15a5df598b4f",
+        "bruma": "cb7110704a44c68c",
+        "cobalto": "4aef62f0a1efa3a9",
+        "dalia": "3b10a8cb22db0698"
+      },
+      "obtido": {
+        "ambar": "249e15a5df598b4f",
+        "bruma": "cb7110704a44c68c",
+        "cobalto": "4aef62f0a1efa3a9",
+        "dalia": "3b10a8cb22db0698"
+      },
+      "recuperacao_exata": true,
+      "contexto_entrou": true,
+      "cache_limpo": true,
+      "passou": true,
+      "finish_reason": "stop",
+      "ttft_s": 649.52,
+      "total_s": 747.98,
+      "escopo": "Quatro marcadores sintéticos em posições separadas; não é avaliação de raciocínio em contexto longo nem benchmark de qualidade."
+    }
+  ],
+  "todas_passaram": true
+}

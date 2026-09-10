@@ -1,0 +1,11 @@
+serie inicio 18:21:48
+=== alvo 8000
+prompt montado: 7,941 tokens (teto 8,000)
+FALHOU  alvo 8,000 tok · servidor não informou tokens
+  marcadores em ambar 5%, bruma 35%, cobalto 65%, dalia 95%
+  recuperação exata: NÃO   contexto entrou: NÃO   cache: limpo
+  prefill 321.1 s · total 321.1 s · parada None
+  esperado: {'ambar': 'ad63adfefa591169', 'bruma': 'dbc72c03086e4551', 'cobalto': 'c12a0d16cfb8fce1', 'dalia': 'fc4dd03cf11adc5a'}
+  obtido:   ''
+resultado em /workspace/serie-8000.json
+HOUVE FALHA

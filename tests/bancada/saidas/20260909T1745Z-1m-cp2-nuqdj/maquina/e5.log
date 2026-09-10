@@ -1,0 +1,13 @@
+ !! Overriding model.language_model.layers.45.shared_head.norm.weight from /workspace/glm-5.3-flash-abliterated-exl3-4.0bpw/model-00024-of-00024.safetensors with /workspace/glm-5.3-flash-abliterated-exl3-4.0bpw/model-00023-of-00024.safetensors
+ !! Overriding model.language_model.layers.45.eh_proj.weight from /workspace/glm-5.3-flash-abliterated-exl3-4.0bpw/model-00022-of-00024.safetensors with /workspace/glm-5.3-flash-abliterated-exl3-4.0bpw/model-00023-of-00024.safetensors
+ !! Overriding model.language_model.layers.45.enorm.weight from /workspace/glm-5.3-flash-abliterated-exl3-4.0bpw/model-00022-of-00024.safetensors with /workspace/glm-5.3-flash-abliterated-exl3-4.0bpw/model-00023-of-00024.safetensors
+ !! Overriding model.language_model.layers.45.hnorm.weight from /workspace/glm-5.3-flash-abliterated-exl3-4.0bpw/model-00022-of-00024.safetensors with /workspace/glm-5.3-flash-abliterated-exl3-4.0bpw/model-00023-of-00024.safetensors
+ !! Replaced 4 tensors from /workspace/glm-5.3-flash-abliterated-exl3-4.0bpw
+ -- NCCL init: world_size 2, rank 1, device 0, init_method tcp://127.0.0.1:46321
+ -- NCCL warmup, device 0, please wait...
+ -- Finished NCCL warmup, device 0
+carga: 54 s · dispositivos [1, 0] · cp_world 2 · chunk 4096
+pagina logica 512 · 128 paginas
+CUDA driver error 700: /tmp/pip-install-x0lzoozm/exllamav3_c8cca54842ee4c39973135a1c76a71ad/exllamav3/exllamav3_ext/triton_kernel.cpp 38
+/usr/lib/python3.12/multiprocessing/resource_tracker.py:254: UserWarning: resource_tracker: There appear to be 6 leaked shared_memory objects to clean up at shutdown
+  warnings.warn('resource_tracker: There appear to be %d '

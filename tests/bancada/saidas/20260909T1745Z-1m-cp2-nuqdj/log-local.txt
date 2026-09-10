@@ -1,0 +1,38 @@
+inicio 13:51:00 via proxy local
+prompt montado: 199,479 tokens (teto 200,000)
+
+FALHOU  alvo 200,000 tok · servidor não informou tokens
+  marcadores em ambar 5%, bruma 35%, cobalto 65%, dalia 95%
+  recuperação exata: NÃO   contexto entrou: NÃO   cache: limpo
+  prefill 189.7 s · total 189.7 s · parada None
+  esperado: {'ambar': 'a19be1fa86c23131', 'bruma': '0540e02df8470e63', 'cobalto': '8b3173351121ab76', 'dalia': '48d54bd57d5d0de6'}
+  obtido:   ''
+Traceback (most recent call last):
+  File "/home/oltiz-wsl/projetos/org-projeto-blackout/exllamav3-tp-mla/tests/bancada/recuperacao_longa.py", line 277, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "/home/oltiz-wsl/projetos/org-projeto-blackout/exllamav3-tp-mla/tests/bancada/recuperacao_longa.py", line 173, in main
+    texto, uso, motivo, ttft, total = perguntar(a.url, a.chave, prompt, a.max_tokens)
+                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/oltiz-wsl/projetos/org-projeto-blackout/exllamav3-tp-mla/tests/bancada/recuperacao_longa.py", line 139, in perguntar
+    with urllib.request.urlopen(req, timeout = 7200) as r:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 215, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 521, in open
+    response = meth(req, response)
+               ^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 630, in http_response
+    response = self.parent.error(
+               ^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 559, in error
+    return self._call_chain(*args)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 492, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 639, in http_error_default
+    raise HTTPError(req.full_url, code, msg, hdrs, fp)
+urllib.error.HTTPError: HTTP Error 502: Bad Gateway
+fim 13:55:30 exit=1

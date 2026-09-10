@@ -1,0 +1,31 @@
+{
+  "resultados": [
+    {
+      "alvo_tokens": 8000,
+      "prompt_tokens": null,
+      "cached_tokens": null,
+      "posicoes": {
+        "ambar": 0.05,
+        "bruma": 0.349,
+        "cobalto": 0.648,
+        "dalia": 0.947
+      },
+      "esperado": {
+        "ambar": "ad63adfefa591169",
+        "bruma": "dbc72c03086e4551",
+        "cobalto": "c12a0d16cfb8fce1",
+        "dalia": "fc4dd03cf11adc5a"
+      },
+      "obtido": null,
+      "recuperacao_exata": false,
+      "contexto_entrou": false,
+      "cache_limpo": true,
+      "passou": false,
+      "finish_reason": null,
+      "ttft_s": 321.08,
+      "total_s": 321.08,
+      "escopo": "Quatro marcadores sintéticos em posições separadas; não é avaliação de raciocínio em contexto longo nem benchmark de qualidade."
+    }
+  ],
+  "todas_passaram": false
+}
