@@ -165,6 +165,110 @@ def despejar_stats_de_roteamento(reg):
         print(f" !! EXL3_MOE_CPU_SPLIT_STATS_OUT: {e}", flush = True)
 
 
+class _TracoDeRoteamento:
+    """The (layer, expert) request sequence, in order, for offline replay.
+
+    Why this exists at all: every placement question -- which experts belong on the GPU, at
+    what fraction, under which policy -- currently costs a rented machine and ten minutes of
+    model load. It does not have to. Routing does not depend on placement: the same prompt
+    picks the same experts whether they sit in VRAM or in the worker's arena. So ONE run
+    records the sequence and that single trace answers the whole family of questions offline,
+    at any fraction, under any policy. The idea and the file format are lifted from
+    `FareedKhan-dev/kimi-k3-in-c` (`src/cache/k3_cache.c`, `tools/sim_cache.py`), which uses
+    it to produce a hit-rate-versus-cache-size curve from one execution.
+
+    Two decisions that the source of the idea got right and are worth repeating:
+
+    - The trace records what the ROUTER asked for, never a physical slot. Under a static
+      profile the router ids live in the permuted hot-to-cold order, so they are translated
+      back to checkpoint ids on the way out (`_perm_de`). Without that, a trace taken with a
+      profile and one taken without would not even be comparable, which is exactly the A/B
+      this is meant to serve.
+    - The buffer is flushed as it fills, not only at unload. A rented machine is usually
+      destroyed without a clean shutdown, and a trace that only exists at exit is a trace
+      that never exists -- the same reasoning `despejar_stats_de_roteamento` already gives.
+
+    **Do not measure tok/s with this on.** Recording costs two extra kernel launches per split
+    layer per step, and decode at batch 1 is limited by launch rate. That is a fair price
+    because the trace is about WHICH experts were chosen, not how fast; but a speed number
+    taken with tracing on is a speed number of the tracer.
+    """
+
+    def __init__(self, caminho, capacidade, device):
+        self.caminho = caminho
+        self.buf = torch.empty((capacidade, 2), dtype = torch.int32, device = device)
+        self.n = 0
+        self.pares = 0
+        self.camadas = {}
+        self.perms = {}
+        try:
+            os.remove(caminho)
+        except OSError:
+            pass
+
+    def anotar(self, m, selected):
+        k = selected.numel()
+        if k <= 0:
+            return
+        if self.n + k > self.buf.shape[0]:
+            self.despejar()
+        if self.n + k > self.buf.shape[0]:
+            return
+        idx = m.cpu_layer_idx
+        if idx not in self.camadas:
+            self.camadas[idx] = m.key
+            self.perms[idx] = getattr(m, "_split_perm", None)
+        self.buf[self.n : self.n + k, 0] = idx
+        self.buf[self.n : self.n + k, 1] = selected.view(-1).to(torch.int32)
+        self.n += k
+
+    def despejar(self):
+        """Append what is buffered to the trace file, plus a sidecar that names the layers.
+
+        The binary is flat int32 pairs (layer, expert) in request order -- the same shape
+        `tools/sim_cache.py` reads -- and the sidecar carries what a bare index cannot: which
+        model layer each index is. A trace without it is unreadable a week later.
+        """
+        if self.n == 0:
+            return
+        pares = self.buf[: self.n].cpu()
+        for idx, perm in self.perms.items():
+            if perm is None:
+                continue
+            # Router id -> checkpoint id. Table lookup on the host: the permutation is fixed
+            # for the run, and this path is the flush, not the step.
+            tabela = torch.tensor(perm, dtype = torch.int32)
+            linhas = pares[:, 0] == idx
+            pares[linhas, 1] = tabela[pares[linhas, 1].long()]
+        try:
+            with open(self.caminho, "ab") as f:
+                f.write(pares.numpy().tobytes())
+            self.pares += self.n
+            with open(f"{self.caminho}.json", "w") as f:
+                json.dump({"pares": self.pares,
+                           "camadas": {str(k): v for k, v in self.camadas.items()},
+                           "espaco": "ids do checkpoint"}, f)
+        except OSError as e:
+            print(f" !! EXL3_MOE_CPU_TRACE_OUT: {e}", flush = True)
+        self.n = 0
+
+
+def traco_de_roteamento(m):
+    """The run's shared trace, or None. One per process: the split runs on the output rank."""
+    caminho = os.environ.get("EXL3_MOE_CPU_TRACE_OUT")
+    if not caminho:
+        return None
+    ip = m.config.infer_params
+    traco = getattr(ip, "moe_cpu_traco", None)
+    if traco is None:
+        capacidade = int(os.environ.get("EXL3_MOE_CPU_TRACE_MAX", 4_000_000))
+        traco = _TracoDeRoteamento(caminho, capacidade, torch.device(m.device))
+        ip.moe_cpu_traco = traco
+        print(f" -- gravando o traco de roteamento em {caminho} "
+              f"({capacidade} pares por despejo)", flush = True)
+    return traco
+
+
 class BlockSparseMLP_CPU:
 
     def _cpu_init_state(self):
@@ -266,6 +370,9 @@ class BlockSparseMLP_CPU:
 
     def cpu_unload(self):
         if self.cpu_split_first is not None:
+            traco = getattr(self.config.infer_params, "moe_cpu_traco", None)
+            if traco is not None:
+                traco.despejar()
             host = getattr(self, "cpu_host", None)
             if host is not None:
                 host.unregister()
@@ -302,6 +409,11 @@ class BlockSparseMLP_CPU:
         big prefill batches take the single-phase streamed path, which overlaps internally.
         Expert ids ship in the worker's local range with -1 sentinels for GPU-resident
         picks."""
+        # O traço vem ANTES de qualquer tradução: o que interessa é o que o roteador pediu,
+        # não onde o expert mora. Ver `_TracoDeRoteamento`. Desligado, custa um `getattr`.
+        traco = traco_de_roteamento(self)
+        if traco is not None:
+            traco.anotar(self, selected_experts)
         if self._split_map is not None:
             self._split_swap_tick()
         if bsz < self.cpu_host.stream_min_rows:
