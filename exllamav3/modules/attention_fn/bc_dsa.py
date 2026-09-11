@@ -643,7 +643,10 @@ class BCDsaBatch:
 def build_bc_dsa_batch(module, rsl, kl):
     try:
         return BCDsaBatch(module, rsl, kl)
-    except Exception:
+    except Exception as e:
+        # Mesmo tratamento de `build_bc_dsa`: sob a chave, uma linha com o
+        # motivo, e nunca uma exceção que mate a requisição.
         if _bc_debug:
-            raise
+            import sys
+            print(f"[bc_dsa] grafo em lote RECUSADO em {getattr(module, 'key', '?')}: {e}", file = sys.stderr, flush = True)
         return None
