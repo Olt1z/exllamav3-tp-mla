@@ -29,7 +29,23 @@ no-op e a extensão compila igual: a telemetria é acessória, e uma máquina qu
 não compila por falta dela seria um preço absurdo. Ver `tel_disponivel()`.
 */
 
-#if defined(__has_include)
+/*
+spdlog é OPT-IN, e não detectado.
+
+A detecção por `__has_include` parecia segura e quebrou o build inteiro numa
+máquina de verdade (11/09/2026): o header do Ubuntu 24.04 existe — spdlog
+1.12 — e não compila dentro desta extensão, porque o torch 2.9 expõe `fmt`
+v11 no mesmo include path e o spdlog 1.12 foi escrito para fmt 9/10:
+
+    /usr/include/spdlog/common.h:373: error:
+        'basic_format_string' is not a member of 'fmt'
+
+"Existe" e "compila junto com o torch" não são a mesma pergunta, e a detecção
+só respondia a primeira. Agora o spdlog só entra com `EXL3_COM_SPDLOG=1`
+passado ao build, por quem tiver uma combinação que fecha; o padrão é o anel
+próprio abaixo, que faz o mesmo com `fprintf` e não depende de ninguém.
+*/
+#if defined(EXL3_COM_SPDLOG) && defined(__has_include)
     #if __has_include(<spdlog/spdlog.h>)
         #define EXL3_TEM_SPDLOG 1
     #endif

@@ -3,6 +3,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <cstdarg>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -84,35 +85,51 @@ namespace
         return e;
     }
 
+    /**
+     * A saída da telemetria, com ou sem spdlog.
+     *
+     * O anel, o limiar e o despejo são o valor real disto; o spdlog é só por
+     * onde a linha sai. Amarrar um ao outro fez o build inteiro cair quando o
+     * spdlog não compilou — ver a nota no `telemetria.h`. Aqui a linha sai de
+     * qualquer jeito, e quem tiver spdlog ganha o sink dele de graça.
+     */
+    void escrever(const char* formato, ...)
+    {
+        char linha[1024];
+        va_list args;
+        va_start(args, formato);
+        std::vsnprintf(linha, sizeof(linha), formato, args);
+        va_end(args);
+#ifdef EXL3_TEM_SPDLOG
+        Estado& e = estado();
+        if (e.log) { e.log->warn("{}", linha); return; }
+#endif
+        std::fprintf(stderr, "[exl3_tel] %s\n", linha);
+    }
+
+
     void garantir_iniciada()
     {
         Estado& e = estado();
         if (e.decidida) return;
         e.decidida = true;
 
-#ifdef EXL3_TEM_SPDLOG
         const char* v = std::getenv("EXL3_TEL");
         e.ligada = v && *v && std::string(v) != "0";
         if (!e.ligada) return;
 
         e.anel.resize(static_cast<size_t>(inteiro_do_ambiente("EXL3_TEL_RING", 4096)));
         e.limiar_ms = static_cast<double>(inteiro_do_ambiente("EXL3_TEL_LIMIAR_MS", 0));
+
+#ifdef EXL3_TEM_SPDLOG
         e.log = spdlog::get("exl3_tel");
         if (!e.log) e.log = spdlog::stderr_color_mt("exl3_tel");
         e.log->set_pattern("[exl3_tel] %v");
-        e.log->info(
-            "anel de {} eventos, limiar {} ms{}",
-            e.anel.size(),
-            e.limiar_ms,
-            e.limiar_ms == 0.0 ? " (automático: 2x a média móvel)" : ""
-        );
-#else
-        /// Sem spdlog compilado, a telemetria não existe — e dizer isso uma vez
-        /// é melhor que deixar alguém achar que ligou e não saiu nada.
-        if (std::getenv("EXL3_TEL"))
-            std::fprintf(stderr, "[exl3_tel] EXL3_TEL pedido, mas esta build não tem spdlog\n");
-        e.ligada = false;
 #endif
+        escrever("anel de %zu eventos, limiar %.0f ms%s",
+                 e.anel.size(),
+                 e.limiar_ms,
+                 e.limiar_ms == 0.0 ? " (automático: 2x a média móvel)" : "");
     }
 
     double limiar_atual()
@@ -197,11 +214,10 @@ namespace exl3_tel
 
     void despejar()
     {
-#ifdef EXL3_TEM_SPDLOG
         Estado& e = estado();
         if (!e.ligada || e.gravados == 0) return;
 
-        e.log->warn("--- passo acima do limiar: {} eventos no anel ---", e.gravados);
+        escrever("--- passo acima do limiar: %zu eventos no anel ---", e.gravados);
         /// Do mais velho para o mais novo, que é a ordem em que aconteceram.
         size_t inicio = (e.gravados == e.anel.size()) ? e.proximo : 0;
         long long anterior_us = -1;
@@ -211,14 +227,13 @@ namespace exl3_tel
             if (ev.nome.empty()) continue;
             /// O delta é o que importa: onde o tempo FOI, não que horas eram.
             long long delta = anterior_us < 0 ? 0 : ev.em_us - anterior_us;
-            e.log->warn("  {:>10.3f} ms  (+{:>8.3f} ms)  {}",
-                        static_cast<double>(ev.em_us) / 1000.0,
-                        static_cast<double>(delta) / 1000.0,
-                        ev.nome);
+            escrever("  %10.3f ms  (+%8.3f ms)  %s",
+                     static_cast<double>(ev.em_us) / 1000.0,
+                     static_cast<double>(delta) / 1000.0,
+                     ev.nome.c_str());
             anterior_us = ev.em_us;
         }
         e.gravados = 0;
         e.proximo = 0;
-#endif
     }
 }

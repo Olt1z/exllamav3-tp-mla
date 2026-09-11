@@ -43,11 +43,11 @@ int main()
         assert(exl3_tel::passo_fim() < 0.0);
         std::printf("ok: desligada por padrão\n");
 
-        if (!exl3_tel::compilada_com_spdlog())
-        {
-            std::printf("sem spdlog nesta build; o resto do teste não se aplica\n");
-            return 0;
-        }
+        /// O anel funciona COM ou SEM spdlog — ele só muda por onde a linha
+        /// sai. O teste roda igual nos dois casos, e é assim que se percebe se
+        /// alguém amarrar de novo o mecanismo à biblioteca.
+        std::printf("spdlog nesta build: %s\n",
+                    exl3_tel::compilada_com_spdlog() ? "sim" : "não (saída por stderr)");
     }
 
     /*
