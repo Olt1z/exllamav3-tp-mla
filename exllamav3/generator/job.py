@@ -16,6 +16,7 @@ from ..util.tensor import SeqTensor
 from ..tokenizer import MMEmbedding
 from functools import lru_cache
 from ..util import profile_opt
+from ..util import telemetria as tel
 
 # Convert list of strings to UTF32 format to pass by reference to partial matching function
 @lru_cache(100)
@@ -1524,6 +1525,12 @@ class Job:
             self.cached_pages += cached_pages
             self.total_pages += allocated_pages
             self.non_sequential_pages += non_sequential_pages
+
+        if tel.ligada():
+            tel.paginas_do_job(
+                len(self.sequences[0].sequence_ids),
+                self.total_pages, self.cached_pages, self.non_sequential_pages,
+            )
 
 
     def deallocate_pages(self):

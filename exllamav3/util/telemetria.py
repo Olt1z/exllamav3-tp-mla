@@ -135,6 +135,29 @@ def marcando_modulos() -> bool:
         return False
 
 
+def paginas_do_job(prompt_tokens: int, total: int, cache: int, nao_sequenciais: int) -> None:
+    """
+    Uma linha por alocação de páginas de um job, no mesmo stderr do anel.
+
+    O job já conta `cached_pages` e `non_sequential_pages`, mas os números
+    nunca saíam do processo — e são o dado que testa a hipótese de que as
+    requisições lentas intermitentes (fila 3x e passo 2x na MESMA requisição,
+    decididos no início do job) vêm do cache de páginas. A linha sai ANTES do
+    primeiro passo do job, então um despejo de passo lento logo abaixo é dele.
+
+    Formato próprio (`[exl3_tel job]`, sem PID) para não casar com o parser do
+    cabeçalho de passo lento do hub, que exige dígitos depois de `exl3_tel`.
+    """
+    if not _LIGADA:
+        return
+    import sys
+    sys.stderr.write(
+        f"[exl3_tel job] paginas: prompt {prompt_tokens} tokens, {total} paginas, "
+        f"{cache} do cache, {nao_sequenciais} nao sequenciais\n"
+    )
+    sys.stderr.flush()
+
+
 def despejar() -> None:
     """Despeja o anel agora, sem esperar limiar. Para a captura sob demanda."""
     if _LIGADA:
