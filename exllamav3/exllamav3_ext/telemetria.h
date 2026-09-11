@@ -73,8 +73,14 @@ namespace exl3_tel
     /// (literal de string, na prática): o anel guarda o ponteiro, não uma cópia.
     void evento(const char* nome);
 
-    /// Despeja o anel agora, sem esperar limiar. Para o `POST /traco` do hub.
-    void despejar();
+    /**
+     * Despeja o anel agora, sem esperar limiar. Para o `POST /traco` do hub.
+     *
+     * `duracao_ms` negativa marca o despejo como "sob demanda" no cabeçalho:
+     * fora de um passo não há duração que signifique alguma coisa, e imprimir
+     * a do passo anterior faria o hub gravar um passo lento que não existiu.
+     */
+    void despejar(double duracao_ms = -1.0);
 }
 
 /*

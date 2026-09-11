@@ -85,7 +85,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
     m.def("tel_passo_inicio", &exl3_tel::passo_inicio, "abre um passo de decode");
     m.def("tel_passo_fim", &exl3_tel::passo_fim, "fecha o passo; despeja se passou do limiar");
     m.def("tel_evento", &exl3_tel::evento, "marca um evento dentro do passo");
-    m.def("tel_despejar", &exl3_tel::despejar, "despeja o anel agora");
+    /// Lambda porque o pybind não enxerga o argumento padrão de um ponteiro de
+    /// função: do Python só existe o despejo sob demanda, sem duração.
+    m.def("tel_despejar", []() { exl3_tel::despejar(); }, "despeja o anel agora");
 
     m.def("stloader_read", &stloader_read, "stloader_read");
     m.def("stloader_open_file", &stloader_open_file, "stloader_open_file");
