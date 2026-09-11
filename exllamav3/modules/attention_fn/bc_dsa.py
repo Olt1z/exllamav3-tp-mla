@@ -19,7 +19,7 @@ job (position is layer-invariant, so steady-state decode needs one 8-byte host w
 step for the whole model).
 
 On by default; EXL3_BC_DSA=0 falls back to the eager path. Ineligible configurations
-decline per-layer; build failures raise with EXL3_BC_DSA_DEBUG=1, else decline.
+decline per-layer; EXL3_BC_DSA_DEBUG=1 logs the reason per layer (never raises).
 """
 
 bc_dsa_enable = os.environ.get("EXL3_BC_DSA", "1") != "0"
@@ -347,9 +347,17 @@ class BCDsa:
 def build_bc_dsa(module, rs, rsl, kl):
     try:
         return BCDsa(module, rs, rsl, kl)
-    except Exception:
+    except Exception as e:
+        # Sob EXL3_BC_DSA_DEBUG a recusa vira uma LINHA de log com o motivo, e
+        # não uma exceção: levantar aqui aborta a requisição inteira — medido na
+        # bancada de 11/09/2026, toda requisição morria com "wo_a multilinear
+        # missing" — e um modo de diagnóstico que não serve não diagnostica
+        # nada. A recusa continua sendo recusa: a camada cai no caminho eager,
+        # como sem a chave; a diferença é que agora o log diz qual camada e
+        # por quê, que é o que o hub precisa ler.
         if _bc_debug:
-            raise
+            import sys
+            print(f"[bc_dsa] grafo RECUSADO em {getattr(module, 'key', '?')}: {e}", file = sys.stderr, flush = True)
         return None
 
 
