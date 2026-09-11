@@ -6,6 +6,7 @@ import torch
 from .config import Config
 from ..util import parse_int_list
 from ..util.memory import free_mem
+from ..util import telemetria as tel
 from .model_tp import Model_TPMixin
 from .model_ls import Model_LSMixin
 from ..util.tensor import g_tensor_cache
@@ -224,17 +225,28 @@ class Model(Model_TPMixin, Model_LSMixin):
         """
         if params is None:
             params = {}
-        x = self.prepare_inputs(input_ids, params)
-        if self.loaded_tp:
-            y = self.forward_tp(x, params, self.last_kv_module_idx, self.modules)
-            advance_recurrent_states(input_ids, params, self)
-            return y
-        else:
-            for m in self._get_prefetch_layers:
-                m.prefetch(x, params)
-            y = self.forward_ls(x, params)
-            advance_recurrent_states(input_ids, params, self)
-            return y
+        # O passo de decode é marcado AQUI, e não no módulo de atenção de uma
+        # família: este `forward` é o passo de qualquer arquitetura, com ou sem
+        # tensor parallel. Pendurar a medição em `dsv4.py` daria telemetria só
+        # para o DeepSeek-V4 — e o hub serve o modelo que o dono mandar.
+        with tel.passo("model.forward"):
+            x = self.prepare_inputs(input_ids, params)
+            tel.evento("entradas preparadas")
+            if self.loaded_tp:
+                y = self.forward_tp(x, params, self.last_kv_module_idx, self.modules)
+                tel.evento("forward_tp")
+                advance_recurrent_states(input_ids, params, self)
+                tel.evento("estados recorrentes")
+                return y
+            else:
+                for m in self._get_prefetch_layers:
+                    m.prefetch(x, params)
+                tel.evento("prefetch")
+                y = self.forward_ls(x, params)
+                tel.evento("forward_ls")
+                advance_recurrent_states(input_ids, params, self)
+                tel.evento("estados recorrentes")
+                return y
 
 
     def unload(self):
