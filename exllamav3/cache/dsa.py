@@ -2,6 +2,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import torch
 from ..constants import PAGE_SIZE
+from .cp_layout import paginas_para
 from .cache import Cache, CacheLayer
 from .recurrent import new_checkpoint_handle, mp_cache_recurrent_stash, mp_cache_recurrent_unstash
 
@@ -63,6 +64,7 @@ class CacheLayer_dsa(CacheLayer):
         k_bits: int = 0,
         v_bits: int | None = None,
         compand_a: float = 0.0,
+        cp_world: int = 1,
         **kwargs
     ):
         super().__init__(config, attention, cache_id, max_num_tokens)
@@ -74,8 +76,16 @@ class CacheLayer_dsa(CacheLayer):
         m = attention.compress_rate
         assert m and PAGE_SIZE % m == 0, f"compress_rate {m} must divide {PAGE_SIZE}"
         self.compress_rate = m
-        self.epp = PAGE_SIZE // m
-        self.num_pages = max_num_tokens // PAGE_SIZE
+        # Context parallel: o pool continua REPLICADO em cada rank (toda entrada vem de tokens
+        # que todo rank ve), mas a pagina do gerador passa a ter PAGE_SIZE x cp_world tokens
+        # (cache/cp_layout.py), e um job de T tokens recebe T / (PAGE_SIZE x cp_world) paginas.
+        # Contar PAGE_SIZE // m entradas por pagina aqui daria ao job metade das entradas de que
+        # ele precisa -- "DSA pool overflow: entry 4096 beyond block table (48 pages)" na dipz5,
+        # 11/09/2026, TP 2 + CP 2 acima de ~12k tokens. A capacidade nao muda; muda so a
+        # geometria: paginas mais largas, e menos delas.
+        self.cp_world = cp_world
+        self.epp = PAGE_SIZE * cp_world // m
+        self.num_pages = paginas_para(max_num_tokens, PAGE_SIZE, cp_world)
         self.capacity = self.num_pages * self.epp
         D = attention.head_dim
         D_r = attention.rope_head_dim
@@ -185,6 +195,9 @@ class CacheLayer_dsa(CacheLayer):
                 "max_num_tokens": self.max_num_tokens,
                 "k_bits": self.k_bits,
                 "v_bits": self.v_bits,
+                # O grau vem do modulo de atencao (`_dcp`, gravado em make_tp_allocation); o
+                # cache do processo pai e sempre cp_world = 1. Mesma regra de cache/mla.py.
+                "cp_world": getattr(self.attention, "_dcp", 1) if self.attention else 1,
             }
         }
 

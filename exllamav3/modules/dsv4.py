@@ -705,8 +705,11 @@ class DSV4Attention(Module):
                 storage_dev += comp.wkv.storage_size() + comp.wgate.storage_size()
         for rl in self.recurrent_layers:
             storage_dev += rl.storage_size()
+        # Guardado para o tp_export do cache: sob CP o pool da DSA continua replicado (nao
+        # encolhe), mas precisa da geometria de pagina do gerador (cache/dsa.py).
+        self._dcp = int(options.get("dcp", 1) or 1)
         for cl in self.cache_layers:
-            storage_dev += cl.storage_size()
+            storage_dev += cl.storage_size_sob_cp(self._dcp)
         overhead_d = self.hidden_size * (self.out_dtype or torch.half).itemsize
         overhead_s = self.num_q_heads * self.head_dim * torch.half.itemsize  # q rows
         overhead_s += self.o_groups * self.o_lora_rank * torch.half.itemsize  # o intermediates
@@ -857,7 +860,12 @@ class DSV4Attention(Module):
                 module.tp_recurrent_lookup[rl["args"]["cache_id"]] = rli
             if len(exported["cache_layers"]):
                 module.has_split_cache = True
+                dcp = local_context["backend"].cp_world
                 for cl in exported["cache_layers"]:
+                    # O pool e replicado, mas a largura da pagina tem de ser a do gerador
+                    # (PAGE_SIZE x cp_world); se divergissem, o job receberia paginas de menos.
+                    assert int(cl["args"].get("cp_world", 1) or 1) == dcp, \
+                        f"{key}: cache exportado com cp_world {cl['args'].get('cp_world')}, backend com {dcp}"
                     cli = cl["cls"](None, module, **cl["args"])
                     module.cache_layers.append(cli)
                     module.tp_cache_lookup[cl["args"]["cache_id"]] = cli
