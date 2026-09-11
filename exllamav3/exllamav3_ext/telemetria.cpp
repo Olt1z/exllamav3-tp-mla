@@ -128,6 +128,45 @@ namespace
 
         /// Quantos passos ANTERIORES ao que estourou entram no despejo.
         int contexto = 2;
+
+        /**
+         * A distribuição da duração dos passos, em baldes de potência de dois.
+         *
+         * O despejo do anel mostra os passos LENTOS, que são a exceção. Isto
+         * mostra todos: "24 T/s" pode ser 40 ms constante ou 30 ms com 5% dos
+         * passos em 200 ms, e a média esconde os dois casos — é a cauda que se
+         * está caçando, foram 5 requisições em 101.
+         *
+         * Contadores, e não lista: um passo a cada 40 ms por horas não cabe em
+         * lista, e nem precisa. Trinta e dois contadores cobrem de 1 µs a uma
+         * hora, e o balde é um deslocamento de bits.
+         *
+         * Zerado a cada despejo, de propósito. Cumulativo, o aquecimento — o
+         * primeiro passo levou 1109 ms numa bancada real — ficaria na cauda
+         * para sempre e diria que o serviço tem uma cauda que ele já não tem.
+         */
+        std::vector<unsigned long long> histograma;
+        /// Passos acumulados desde o último despejo do histograma.
+        int no_histograma = 0;
+        /**
+         * De quantos em quantos passos o histograma sai. Mínimo 1.
+         *
+         * Não há como desligar só o histograma pelo ambiente, e nem faz sentido
+         * — quem não quer telemetria não liga `EXL3_TEL`. `inteiro_do_ambiente`
+         * recusa 0 e negativos, devolvendo o padrão.
+         */
+        int histograma_a_cada = 1000;
+        /**
+         * Quando o lote parcial sai mesmo sem encher.
+         *
+         * Sem isto, um processo que fez 999 passos NUNCA escreve uma linha, e o
+         * painel diria "sem histograma" numa máquina que decodificou o tempo
+         * todo. Pior no caso que mais interessa: os passos lentos daquele
+         * período aparecem, e a distribuição que diria se eles são exceção ou
+         * regra, não. O hub já lê o total de cada linha, então lote curto entra
+         * sem tratamento especial.
+         */
+        Relogio::time_point ultimo_histograma;
         /// Limiar fixo em ms; 0 = automático (ver `limiar_atual`).
         double limiar_ms = 0.0;
         /// Média móvel das durações, para o limiar automático.
@@ -210,17 +249,83 @@ namespace
         e.anel.resize(static_cast<size_t>(inteiro_do_ambiente("EXL3_TEL_RING", 4096)));
         e.limiar_ms = static_cast<double>(inteiro_do_ambiente("EXL3_TEL_LIMIAR_MS", 0));
         e.contexto = inteiro_do_ambiente("EXL3_TEL_CONTEXTO", 2);
+        e.histograma_a_cada = inteiro_do_ambiente("EXL3_TEL_HISTOGRAMA", 1000);
+        e.histograma.assign(32, 0);
+        e.ultimo_histograma = Relogio::now();
 
 #ifdef EXL3_TEM_SPDLOG
         e.log = spdlog::get("exl3_tel");
         if (!e.log) e.log = spdlog::stderr_color_mt("exl3_tel");
         e.log->set_pattern("[exl3_tel %P] %v");
 #endif
-        escrever("anel de %zu eventos, limiar %.0f ms%s, %d passos de contexto",
+        escrever("anel de %zu eventos, limiar %.0f ms%s, %d passos de contexto, histograma a cada %d",
                  e.anel.size(),
                  e.limiar_ms,
                  e.limiar_ms == 0.0 ? " (automático: 2x a média móvel)" : "",
-                 e.contexto);
+                 e.contexto,
+                 e.histograma_a_cada);
+    }
+
+    /**
+     * O balde de um passo: `floor(log2(microssegundos))`.
+     *
+     * Escala logarítmica porque distribuição de latência é assim — baldes
+     * lineares gastariam mil contadores no trecho em que nada acontece e
+     * juntariam 40 ms com 4 s no último. Em potência de dois, o balde 15 cobre
+     * 32,8 a 65,5 ms e o 17 cobre 131 a 262: separar 30 de 200 ms, que é a
+     * pergunta, sobra.
+     *
+     * O laço em vez de `__builtin_clzll` porque este arquivo compila onde os
+     * vizinhos compilam, e o MSVC não tem o builtin. São ~15 voltas num caminho
+     * que roda uma vez por passo de dezenas de milissegundos.
+     */
+    int balde(long long us)
+    {
+        /**
+         * A guarda não é cosmética: com `us` negativo o deslocamento aritmético
+         * converge para -1, que é sempre verdadeiro, e o laço nunca termina.
+         * `steady_clock` é monotônico e `passo_aberto` impede fechar um passo
+         * que não abriu, então não é alcançável — mas garantir custa uma
+         * comparação.
+         */
+        if (us < 1) return 0;
+        int k = 0;
+        while (us >>= 1) k++;
+        /// Satura em 31, o último índice do vetor de 32. O balde 31 é aberto
+        /// — `[2^31 µs, ∞)`, de 35,8 minutos para cima — e quem o rotula
+        /// (`faixaDoBalde`, no hub) fecha a faixa mesmo assim. Um passo de 35
+        /// minutos é uma máquina quebrada, não uma medição.
+        return k < 31 ? k : 31;
+    }
+
+    /**
+     * O histograma sai numa linha só, e zera.
+     *
+     * Uma linha porque é o que o `fwrite` torna indivisível — ver `escrever`.
+     * Só os baldes com contagem entram: num serviço regular são dois ou três, e
+     * imprimir os 32 gastaria a linha com zeros.
+     */
+    void despejar_histograma()
+    {
+        Estado& e = estado();
+        if (e.no_histograma == 0) return;
+        char pares[768];
+        size_t usado = 0;
+        for (size_t k = 0; k < e.histograma.size() && usado + 32 < sizeof(pares); k++)
+        {
+            if (e.histograma[k] == 0) continue;
+            int n = std::snprintf(pares + usado, sizeof(pares) - usado, "%s%zu:%llu",
+                                  usado ? " " : "", k, e.histograma[k]);
+            if (n <= 0) break;
+            usado += static_cast<size_t>(n);
+        }
+        /// O instante vem ANTES dos baldes: assim a lista de baldes vai até o
+        /// fecho da linha e quem lê não precisa adivinhar onde ela termina.
+        escrever("--- histograma: %d passos, %s, %s ---",
+                 e.no_histograma, agora_iso8601().c_str(), pares);
+        e.histograma.assign(e.histograma.size(), 0);
+        e.no_histograma = 0;
+        e.ultimo_histograma = Relogio::now();
     }
 
     double limiar_atual()
@@ -312,6 +417,16 @@ namespace exl3_tel
         /// levantaria o limiar que ele acabou de ter de passar.
         e.passos++;
         e.media_ms += (ms - e.media_ms) / static_cast<double>(e.passos < 100 ? e.passos : 100);
+
+        /// O histograma conta TODO passo, e não só os que estouram: é a
+        /// distribuição inteira que separa "constante" de "com cauda".
+        e.histograma[static_cast<size_t>(balde(us))]++;
+        e.no_histograma++;
+        /// Enche o lote OU passa o tempo, o que vier primeiro. O relógio é o
+        /// que garante que uma sessão curta deixe rastro.
+        if (e.no_histograma >= e.histograma_a_cada ||
+            Relogio::now() - e.ultimo_histograma >= std::chrono::seconds(30))
+            despejar_histograma();
 
         if (ms > limiar) despejar(ms);
         return ms;

@@ -152,6 +152,12 @@ class Generator:
 
         # Draft model
         self.draft_model = draft_model
+        # O rascunho sai da telemetria: ele passa pelo mesmo `Model.forward` do
+        # modelo principal, e com DFlash2 são 2,9 a 4,4 forwards de rascunho
+        # por rodada — a mediana da duração viraria a do rascunho, e a tela
+        # chamaria o decode de verdade de "cauda". Ver `util/telemetria.py`.
+        if draft_model is not None:
+            draft_model.tel_rascunho = True
         self.draft_cache = draft_cache
         if draft_model:
             assert not ngram_match_min, \

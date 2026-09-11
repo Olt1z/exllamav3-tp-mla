@@ -14,6 +14,12 @@ from ..cache.recurrent_util import advance_recurrent_states
 
 class Model(Model_TPMixin, Model_LSMixin):
 
+    # O gerador marca o modelo de rascunho ao recebê-lo. Atributo de CLASSE
+    # porque `Model.forward` o lê em todo passo e um `getattr` com padrão
+    # custaria mais que a leitura direta; e porque um modelo carregado fora do
+    # gerador (uma prova, um script) é o modelo principal por definição.
+    tel_rascunho = False
+
     def __init__(
         self,
         config: Config,
@@ -229,7 +235,12 @@ class Model(Model_TPMixin, Model_LSMixin):
         # família: este `forward` é o passo de qualquer arquitetura, com ou sem
         # tensor parallel. Pendurar a medição em `dsv4.py` daria telemetria só
         # para o DeepSeek-V4 — e o hub serve o modelo que o dono mandar.
-        with tel.passo("model.forward"):
+        # Só o decode do modelo PRINCIPAL é medido. Este `forward` também é o
+        # chunk de prefill (`job.py`) e o forward do rascunho (`generator.py`),
+        # e os três na mesma conta estragam a mediana e o limiar — ver
+        # `util/telemetria.py`. Prefill já é medido em outro lugar: a linha
+        # `Metrics` do servidor traz `Process: … at N T/s`.
+        with tel.passo("decode", medir=input_ids.shape[-1] == 1 and not self.tel_rascunho):
             x = self.prepare_inputs(input_ids, params)
             tel.evento("entradas preparadas")
             if self.loaded_tp:

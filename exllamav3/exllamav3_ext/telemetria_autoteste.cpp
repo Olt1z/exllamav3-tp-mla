@@ -53,6 +53,70 @@ static std::string ler(const char* caminho)
  *    o log numa janela: um despejo maior que a janela nunca chega inteiro e o
  *    passo lento é descartado em silêncio do outro lado.
  */
+/**
+ * Confere o histograma da duração dos passos.
+ *
+ * O que ele existe para responder: "24 T/s" é 40 ms constante ou 30 ms com uma
+ * cauda? A média não distingue os dois, e é a cauda que se está caçando.
+ *
+ * O teste faz 10 passos rápidos (microssegundos) e 3 lentos (dezenas de
+ * milissegundos), então a linha tem de sair com o total certo e com baldes
+ * DIFERENTES — um histograma que jogasse tudo num balde só passaria por
+ * qualquer verificação de formato e não serviria para nada.
+ */
+static void conferir_histograma(const std::string& texto, int a_cada)
+{
+    std::set<int> baldes;
+    int linhas = 0;
+    for (size_t i = texto.find("--- histograma: "); i != std::string::npos;
+         i = texto.find("--- histograma: ", i + 1))
+    {
+        linhas++;
+        /// Todo lote fecha com exatamente `a_cada` passos: o contador zera
+        /// junto com os baldes, e uma linha com total diferente quer dizer que
+        /// os dois deixaram de andar juntos.
+        assert(std::atoi(texto.c_str() + i + 16) == a_cada);
+        /// Depois do instante, que vem logo após o total.
+        size_t ini = texto.find(", ", texto.find(" passos, ", i) + 9) + 2;
+        size_t fim = texto.find(" ---", ini);
+        int total = 0;
+        for (size_t j = ini; j < fim; )
+        {
+            size_t dp = texto.find(':', j);
+            if (dp == std::string::npos || dp > fim) break;
+            baldes.insert(std::atoi(texto.c_str() + j));
+            total += std::atoi(texto.c_str() + dp + 1);
+            size_t esp = texto.find(' ', dp);
+            if (esp == std::string::npos || esp > fim) break;
+            j = esp + 1;
+        }
+        assert(total == a_cada);
+    }
+    assert(linhas >= 1);
+    /*
+    Um balde CONHECIDO, e não só "dois baldes diferentes".
+
+    O passo lento dorme 30 + 40 ms, então cai em [65,5 ms, 131,1 ms) = balde 16,
+    e o balde é `floor(log2(microssegundos))`. Sem esta linha, trocar o
+    deslocamento de 1 para 2 — log na base 4 — passava com a suíte inteira
+    verde, e a tela rotularia um passo de 70 ms como "0,26 – 0,51 ms". É o
+    "fator de dois de erro faria a tela mentir sobre a escala inteira" que o
+    `histograma.ts` documenta, e este é o único lugar onde `balde()` existe.
+    */
+    assert(baldes.count(16) == 1);
+    /*
+    Baldes DIFERENTES entre os lotes.
+
+    O teste faz passos de microssegundos e passos de dezenas de milissegundos.
+    Um histograma que jogasse tudo num balde só passaria por qualquer conferência
+    de formato e não distinguiria "40 ms constante" de "30 ms com cauda", que é a
+    única coisa para a qual ele serve.
+    */
+    assert(baldes.size() >= 2);
+    std::printf("ok: %d histogramas de %d passos, %zu baldes distintos, o lento no 16\n",
+                linhas, a_cada, baldes.size());
+}
+
 static void conferir_despejo(const std::string& texto, int contexto)
 {
     assert(texto.find("--- passo lento:") != std::string::npos);
@@ -120,6 +184,9 @@ int main()
         setenv("EXL3_TEL", "1", 1);
         setenv("EXL3_TEL_LIMIAR_MS", "50", 1);
         setenv("EXL3_TEL_CONTEXTO", "2", 1);
+        /// 4 e não o padrão 1000: o teste faz 12 passos, e com o padrão o
+        /// histograma nunca sairia — teste que não exercita não trava nada.
+        setenv("EXL3_TEL_HISTOGRAMA", "4", 1);
         char caminho[4096];
         ssize_t n = readlink("/proc/self/exe", caminho, sizeof(caminho) - 1);
         if (n <= 0) { std::printf("nao deu para reexecutar; pulando\n"); return 0; }
@@ -130,6 +197,7 @@ int main()
         std::string despejo = ler(SAIDA);
         std::fputs(despejo.c_str(), stdout);
         conferir_despejo(despejo, 2);
+        conferir_histograma(despejo, 4);
         std::remove(SAIDA);
         return 0;
     }

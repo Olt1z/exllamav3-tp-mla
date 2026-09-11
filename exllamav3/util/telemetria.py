@@ -47,15 +47,26 @@ def tem_spdlog() -> bool:
 
 
 @contextmanager
-def passo(nome: str = "decode"):
+def passo(nome: str = "decode", medir: bool = True):
     """
     Um passo de decode inteiro.
+
+    `medir=False` passa reto, e existe por um motivo específico: `Model.forward`
+    é o passo de decode, mas também é o chunk de PREFILL e o forward do modelo
+    de RASCUNHO, e os três passam pela mesma função. Medir os três juntos
+    estraga as duas coisas que esta telemetria produz — a mediana da duração
+    vira a de uma mistura de três populações, e o limiar automático (2x a média
+    móvel) passa a comparar decode com prefill, que é dezenas de vezes mais
+    caro: todo prefill despejaria o anel, e a média inflada calaria justamente
+    as anomalias de decode que se está caçando.
+
+    Os eventos de dentro se cuidam sozinhos: o anel só grava com passo aberto.
 
     Fecha mesmo com exceção no meio: um passo que estourou por erro é
     justamente o que se quer ver no anel, e deixá-lo aberto faria o próximo
     passo medir a soma dos dois.
     """
-    if not _LIGADA:
+    if not _LIGADA or not medir:
         yield
         return
     if _NVTX:
