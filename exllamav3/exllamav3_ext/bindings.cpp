@@ -5,6 +5,7 @@
 #include <pybind11/stl.h>
 
 #include "stloader.h"
+#include "telemetria.h"
 #include "cuda_host.h"
 #include "hadamard.h"
 
@@ -73,6 +74,19 @@
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
 {
+    /*
+    Telemetria fina do passo de decode. Ver `telemetria.h`.
+
+    Quem abre e fecha o passo é o Python, porque é ele que orquestra o passo —
+    o C++ daqui só vê kernels soltos e não sabe onde um passo termina.
+    */
+    m.def("tel_ativa", &exl3_tel::ativa, "telemetria ligada nesta execução");
+    m.def("tel_tem_spdlog", &exl3_tel::compilada_com_spdlog, "a build tem spdlog");
+    m.def("tel_passo_inicio", &exl3_tel::passo_inicio, "abre um passo de decode");
+    m.def("tel_passo_fim", &exl3_tel::passo_fim, "fecha o passo; despeja se passou do limiar");
+    m.def("tel_evento", &exl3_tel::evento, "marca um evento dentro do passo");
+    m.def("tel_despejar", &exl3_tel::despejar, "despeja o anel agora");
+
     m.def("stloader_read", &stloader_read, "stloader_read");
     m.def("stloader_open_file", &stloader_open_file, "stloader_open_file");
     m.def("stloader_close_file", &stloader_close_file, "stloader_close_file");

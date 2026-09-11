@@ -10,6 +10,7 @@ from .module import Module
 from .linear import Linear
 from .rmsnorm import RMSNorm
 from ..ext import exllamav3_ext as ext
+from ..util import telemetria as tel
 from ..util.rope import RopeStyle, yarn_inv_freq
 from ..util.tensor import g_tensor_cache, get_for_device
 from .quant.exl3 import LinearEXL3
@@ -1312,7 +1313,22 @@ class DSV4Attention(Module):
                 bcd = build_bc_dsa_batch(self, rsl, kl)
                 self._bc_dsa_batch[id(rsl)] = bcd if bcd is not None else False
             if bcd:
+                tel.evento("dsa: grafo")
                 return bcd.run(x, B, S, pos_l, floor_l, beg_l, ec_l, slot_l, bt)
+            tel.evento("dsa: grafo RECUSADO (build devolveu None)")
+        else:
+            # A condição de cima é a suspeita número um das requisições que
+            # rendem metade: medido em 11/09/2026, cinco de 101 vieram com
+            # `Queue: 0,06 s` e 12,7 T/s contra 24,7 T/s das outras 96, sem que
+            # contexto, rede, concorrência, `steal` de CPU ou throttle de GPU
+            # explicassem. Cair no eager custa o grafo inteiro, e é o tipo de
+            # fator que casa com "metade da velocidade".
+            # A guarda existe para a f-string NÃO ser montada a cada passo:
+            # `tel.evento` já checa por dentro, mas o argumento é avaliado antes
+            # da chamada, e formatar uma string por passo de decode num serviço
+            # limitado por lançamento é exatamente o custo que não se pode pagar.
+            if tel.ligada():
+                tel.evento(f"dsa: eager (graph={dsv4_batch_graph} B={B} S={S} R={R})")
 
         # Eager batched body (capture reference / fallback): per-job state in a device
         # array, same kernels as the graphs
