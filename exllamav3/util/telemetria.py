@@ -89,6 +89,35 @@ def evento(nome: str) -> None:
         torch.cuda.nvtx.mark(nome)
 
 
+def regiao_inicio(nome: str) -> None:
+    """
+    Abre uma região NVTX. Fecha com `regiao_fim`.
+
+    Só NVTX, e de propósito: isto marca CADA MÓDULO do passo — umas dezenas por
+    passo — e alimentar o anel com elas o encheria em 68 passos e faria cada
+    despejo sair com centenas de linhas, que é o tamanho que já provou expulsar
+    as linhas `Metrics` da janela de log do hub. O anel responde "qual etapa do
+    passo", com meia dúzia de marcos; isto responde "qual camada, e com quais
+    kernels", e quem lê essa resposta é o `nsys`/Perfetto, não o log.
+
+    Sem profiler anexado o custo é uma chamada que não faz nada — por isso o
+    `if` fica no chamador, e não aqui dentro.
+    """
+    if _NVTX:
+        torch.cuda.nvtx.range_push(nome)
+
+
+def regiao_fim() -> None:
+    if _NVTX:
+        torch.cuda.nvtx.range_pop()
+
+
+def marcando_regioes() -> bool:
+    """O chamador lê isto UMA vez e guarda: o laço de módulos é o caminho mais
+    quente do motor, e nele até a chamada de função que devolve `False` custa."""
+    return _NVTX
+
+
 def despejar() -> None:
     """Despeja o anel agora, sem esperar limiar. Para a captura sob demanda."""
     if _LIGADA:

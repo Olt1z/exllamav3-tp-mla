@@ -12,7 +12,36 @@ from ..util.memory import (
 )
 from ..util.progress import ProgressBar
 from .config import Config
+from ..util import telemetria as tel
 from abc import ABC, abstractmethod
+
+# Lido UMA vez: o laço de módulos roda dezenas de vezes por passo e o passo é o
+# caminho mais quente do motor. Com a telemetria desligada o custo aqui é a
+# leitura de um bool por módulo, sem chamada de função.
+_MARCAR_REGIOES = tel.marcando_regioes()
+
+
+def _nome_da_regiao(module, idx: int, instance: int) -> str:
+    """
+    `12:Attention` — ou `12#1:Attention` quando a camada é reutilizada.
+
+    A `instance` entra no nome porque com `layer_map` o MESMO objeto volta em
+    `fwd_modules` com o mesmo `idx` e instância diferente: sem ela, as duas
+    passagens pela camada saem com nome idêntico e o traço soma duas coisas
+    distintas na mesma barra.
+
+    Calculado uma vez e guardado no módulo, por instância: montar a string a
+    cada passo seria refazer dezenas de formatações por token.
+    """
+    cache = getattr(module, "_tel_regiao", None)
+    if cache is None:
+        cache = module._tel_regiao = {}
+    nome = cache.get(instance)
+    if nome is None:
+        rotulo = f"{idx}#{instance}" if instance else str(idx)
+        nome = cache[instance] = f"{rotulo}:{type(module).__name__}"
+    return nome
+
 
 
 class Model_LSMixin(ABC):
@@ -303,6 +332,20 @@ class Model_LSMixin(ABC):
             if module.caps.get("logits_output") and (num := params.get("last_tokens_only")):
                 x = x[..., -num:, :].contiguous()
             x = module.prepare_for_device(x, params)
-            x = module.forward(x, params)
+            # A região sai por MÓDULO, e não por família de atenção: assim o
+            # traço serve qualquer arquitetura que o hub carregue, e o nome vem
+            # da classe em vez de uma lista que alguém teria de manter.
+            if _MARCAR_REGIOES:
+                # `try/finally` porque a pilha do NVTX é pilha: um `forward` que
+                # levanta deixaria a região aberta, e TODAS as seguintes
+                # passariam a aninhar dentro dela — o `nsys` desenharia lixo
+                # justamente no traço tirado para investigar o erro.
+                tel.regiao_inicio(_nome_da_regiao(module, idx, instance))
+                try:
+                    x = module.forward(x, params)
+                finally:
+                    tel.regiao_fim()
+            else:
+                x = module.forward(x, params)
         return x
 
