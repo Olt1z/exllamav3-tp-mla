@@ -93,12 +93,12 @@ def regiao_inicio(nome: str) -> None:
     """
     Abre uma região NVTX. Fecha com `regiao_fim`.
 
-    Só NVTX, e de propósito: isto marca CADA MÓDULO do passo — umas dezenas por
-    passo — e alimentar o anel com elas o encheria em 68 passos e faria cada
-    despejo sair com centenas de linhas, que é o tamanho que já provou expulsar
-    as linhas `Metrics` da janela de log do hub. O anel responde "qual etapa do
-    passo", com meia dúzia de marcos; isto responde "qual camada, e com quais
-    kernels", e quem lê essa resposta é o `nsys`/Perfetto, não o log.
+    Só NVTX por padrão: isto marca CADA MÓDULO do passo — umas dezenas por
+    passo — e alimentar o anel com elas faria cada despejo sair com centenas de
+    linhas, que é o tamanho que já provou expulsar as linhas `Metrics` da janela
+    de log do hub. `EXL3_TEL_MODULOS=1` põe o mesmo marco no anel mesmo assim
+    (ver `marcando_modulos`), e o C++ compensa baixando o contexto do despejo
+    para 0. Quem lê a região NVTX é o `nsys`; quem lê o marco é o log.
 
     Sem profiler anexado o custo é uma chamada que não faz nada — por isso o
     `if` fica no chamador, e não aqui dentro.
@@ -116,6 +116,23 @@ def marcando_regioes() -> bool:
     """O chamador lê isto UMA vez e guarda: o laço de módulos é o caminho mais
     quente do motor, e nele até a chamada de função que devolve `False` custa."""
     return _NVTX
+
+
+def marcando_modulos() -> bool:
+    """
+    `EXL3_TEL_MODULOS=1`: um marco por módulo no ANEL, e não só no NVTX.
+
+    É o que faz o despejo do passo lento dizer `47:Attention` em vez de
+    `forward_ls`, sem profiler nenhum. A decisão e o contexto padrão (0) moram
+    no C++, que é quem lê o ambiente; aqui só se pergunta uma vez.
+    """
+    if not _LIGADA:
+        return False
+    try:
+        return bool(ext.tel_marca_modulos())
+    except AttributeError:
+        # Build antiga: a chave não existe, e não é erro.
+        return False
 
 
 def despejar() -> None:

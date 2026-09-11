@@ -64,9 +64,27 @@ static std::string ler(const char* caminho)
  * DIFERENTES — um histograma que jogasse tudo num balde só passaria por
  * qualquer verificação de formato e não serviria para nada.
  */
+/// Soma os pares `k:n` de [ini, fim) e guarda os baldes vistos.
+static int somar_pares(const std::string& texto, size_t ini, size_t fim, std::set<int>& baldes)
+{
+    int total = 0;
+    for (size_t j = ini; j < fim; )
+    {
+        size_t dp = texto.find(':', j);
+        if (dp == std::string::npos || dp >= fim) break;
+        baldes.insert(std::atoi(texto.c_str() + j));
+        total += std::atoi(texto.c_str() + dp + 1);
+        size_t esp = texto.find(' ', dp);
+        if (esp == std::string::npos || esp >= fim) break;
+        j = esp + 1;
+    }
+    return total;
+}
+
 static void conferir_histograma(const std::string& texto, int a_cada)
 {
     std::set<int> baldes;
+    std::set<int> baldes_intervalo;
     int linhas = 0;
     for (size_t i = texto.find("--- histograma: "); i != std::string::npos;
          i = texto.find("--- histograma: ", i + 1))
@@ -76,23 +94,33 @@ static void conferir_histograma(const std::string& texto, int a_cada)
         /// junto com os baldes, e uma linha com total diferente quer dizer que
         /// os dois deixaram de andar juntos.
         assert(std::atoi(texto.c_str() + i + 16) == a_cada);
-        /// Depois do instante, que vem logo após o total.
-        size_t ini = texto.find(", ", texto.find(" passos, ", i) + 9) + 2;
-        size_t fim = texto.find(" ---", ini);
-        int total = 0;
-        for (size_t j = ini; j < fim; )
-        {
-            size_t dp = texto.find(':', j);
-            if (dp == std::string::npos || dp > fim) break;
-            baldes.insert(std::atoi(texto.c_str() + j));
-            total += std::atoi(texto.c_str() + dp + 1);
-            size_t esp = texto.find(' ', dp);
-            if (esp == std::string::npos || esp > fim) break;
-            j = esp + 1;
-        }
-        assert(total == a_cada);
+        /// `..., duracao k:n k:n, intervalo(M) k:n k:n ---`
+        size_t dur = texto.find(", duracao ", i);
+        size_t itv = texto.find(", intervalo(", dur);
+        size_t fim = texto.find(" ---", itv);
+        assert(dur != std::string::npos && itv != std::string::npos && fim != std::string::npos);
+        assert(somar_pares(texto, dur + 10, itv, baldes) == a_cada);
+        int m = std::atoi(texto.c_str() + itv + 12);
+        size_t pares = texto.find(") ", itv) + 2;
+        /*
+        A soma dos intervalos bate com o M anunciado, e M é `a_cada` ou um a
+        menos: o primeiro passo do processo não tem "antes". Só o primeiro
+        lote pode ficar um abaixo — a partir daí todo passo tem intervalo.
+        */
+        assert(somar_pares(texto, pares, fim, baldes_intervalo) == m);
+        assert(m == a_cada || (linhas == 1 && m == a_cada - 1));
     }
     assert(linhas >= 1);
+    /*
+    Os intervalos são medidos de verdade, e não uma cópia da duração: o teste
+    dorme 10 ms ENTRE os passos rápidos, e 10 ms = 10.000 µs cai no balde 13
+    ([8,2 ms, 16,4 ms)), ou no 14 se o escalonador atrasar. Os passos rápidos em si duram microssegundos — balde
+    de um dígito — então as duas séries têm de ser diferentes.
+    */
+    /// 13 ou 14: `sleep_for` só promete "pelo menos", e numa máquina carregada
+    /// o escalonador devolve depois dos 16,4 ms que fecham o balde 13.
+    assert(baldes_intervalo.count(13) == 1 || baldes_intervalo.count(14) == 1);
+    assert(baldes.count(13) == 0 && baldes.count(14) == 0);
     /*
     Um balde CONHECIDO, e não só "dois baldes diferentes".
 
@@ -113,13 +141,20 @@ static void conferir_histograma(const std::string& texto, int a_cada)
     única coisa para a qual ele serve.
     */
     assert(baldes.size() >= 2);
-    std::printf("ok: %d histogramas de %d passos, %zu baldes distintos, o lento no 16\n",
+    std::printf("ok: %d histogramas de %d passos, %zu baldes de duração (o lento no 16), intervalo de 10 ms no 13\n",
                 linhas, a_cada, baldes.size());
 }
 
 static void conferir_despejo(const std::string& texto, int contexto)
 {
     assert(texto.find("--- passo lento:") != std::string::npos);
+    /// O cabeçalho do passo lento termina com o intervalo que o antecedeu: é
+    /// o número que diz se o tempo daquele passo estava dentro ou fora dele.
+    {
+        size_t cab = texto.find("--- passo lento:");
+        size_t fim = texto.find(" ---", cab);
+        assert(texto.substr(cab, fim - cab).find(", intervalo ") != std::string::npos);
+    }
 
     size_t negativos = 0;
     for (size_t i = texto.find("(+"); i != std::string::npos; i = texto.find("(+", i + 2))
@@ -180,6 +215,12 @@ int main()
     */
     if (!filho)
     {
+        char caminho[4096];
+        ssize_t n = readlink("/proc/self/exe", caminho, sizeof(caminho) - 1);
+        if (n <= 0) { std::printf("nao deu para reexecutar; pulando\n"); return 0; }
+        caminho[n] = 0;
+        std::string comando = std::string(caminho) + " 2>" + SAIDA;
+
         setenv("EXL3_TESTE_FILHO", "1", 1);
         setenv("EXL3_TEL", "1", 1);
         setenv("EXL3_TEL_LIMIAR_MS", "50", 1);
@@ -187,24 +228,40 @@ int main()
         /// 4 e não o padrão 1000: o teste faz 12 passos, e com o padrão o
         /// histograma nunca sairia — teste que não exercita não trava nada.
         setenv("EXL3_TEL_HISTOGRAMA", "4", 1);
-        char caminho[4096];
-        ssize_t n = readlink("/proc/self/exe", caminho, sizeof(caminho) - 1);
-        if (n <= 0) { std::printf("nao deu para reexecutar; pulando\n"); return 0; }
-        caminho[n] = 0;
-        std::string comando = std::string(caminho) + " 2>" + SAIDA;
-        int r = system(comando.c_str());
-        if (r != 0) return 1;
+        if (system(comando.c_str()) != 0) return 1;
         std::string despejo = ler(SAIDA);
         std::fputs(despejo.c_str(), stdout);
         conferir_despejo(despejo, 2);
         conferir_histograma(despejo, 4);
         std::remove(SAIDA);
+
+        /*
+        Segundo filho: `EXL3_TEL_MODULOS=1` SEM `EXL3_TEL_CONTEXTO`.
+
+        O que se tranca: o contexto cai para 0 sozinho. São dezenas de marcos
+        por passo, e o despejo com o padrão de 2 passos de contexto passaria de
+        300 linhas — o tamanho que já expulsou as linhas `Metrics` da janela de
+        log do hub (tarefa 4b). Um despejo com mais de um passo aqui é a
+        regressão que faria o diagnóstico quebrar a medição.
+        */
+        setenv("EXL3_TESTE_FILHO", "2", 1);
+        setenv("EXL3_TEL_MODULOS", "1", 1);
+        unsetenv("EXL3_TEL_CONTEXTO");
+        if (system(comando.c_str()) != 0) return 1;
+        despejo = ler(SAIDA);
+        assert(despejo.find("0 passos de contexto") != std::string::npos);
+        assert(despejo.find("marcos por módulo") != std::string::npos);
+        conferir_despejo(despejo, 0);
+        std::remove(SAIDA);
+        std::printf("ok: com EXL3_TEL_MODULOS o despejo traz só o passo que estourou\n");
         return 0;
     }
 
     /// No filho: a telemetria está ligada.
     assert(exl3_tel::ativa());
-    std::printf("ok: EXL3_TEL=1 liga\n");
+    const bool modulos = std::getenv("EXL3_TESTE_FILHO")[0] == '2';
+    assert(exl3_tel::marca_modulos() == modulos);
+    std::printf("ok: EXL3_TEL=1 liga%s\n", modulos ? ", com marcos por módulo" : "");
 
     /*
     Dez passos rápidos NÃO despejam. É o ponto todo do anel: o caso normal não
@@ -214,6 +271,9 @@ int main()
     */
     for (int i = 0; i < 10; i++)
     {
+        /// FORA do passo: é o intervalo que o histograma mede, e 10 ms é um
+        /// balde conhecido (13). Dentro, mediria duração, que é outra série.
+        dorme_ms(10);
         exl3_tel::passo_inicio();
         TEL_EVENTO("rapido: projecao");
         TEL_EVENTO("rapido: atencao");

@@ -28,13 +28,22 @@ namespace
 {
     using Relogio = std::chrono::steady_clock;
 
-    int inteiro_do_ambiente(const char* nome, int padrao)
+    /// `minimo` é 1 para tudo o que não faz sentido zerado (anel, lote do
+    /// histograma) e 0 para o contexto do despejo, que zerado É um valor: "só o
+    /// passo que estourou".
+    int inteiro_do_ambiente(const char* nome, int padrao, int minimo = 1)
     {
         const char* v = std::getenv(nome);
         if (!v || !*v) return padrao;
         char* fim = nullptr;
         long n = std::strtol(v, &fim, 10);
-        return (fim && *fim == 0 && n > 0) ? static_cast<int>(n) : padrao;
+        return (fim && *fim == 0 && n >= minimo) ? static_cast<int>(n) : padrao;
+    }
+
+    bool ambiente_ligado(const char* nome)
+    {
+        const char* v = std::getenv(nome);
+        return v && *v && std::string(v) != "0";
     }
 
     /**
@@ -125,6 +134,43 @@ namespace
 
         Relogio::time_point inicio_do_passo;
         bool passo_aberto = false;
+
+        /**
+         * O INTERVALO entre passos, ao lado da duração.
+         *
+         * A duração diz quanto custou o `forward`; o intervalo diz quanto se
+         * passou do fim de um `forward` ao início do seguinte — sampler,
+         * servidor, event loop, tudo o que o anel não vê por dentro. Foi a
+         * revisão externa de 11/09/2026 que apontou o buraco: `time_generate`
+         * é relógio de parede entre tokens e inclui o servidor, então "24 T/s"
+         * com passos de 20 ms é um serviço que gasta metade do tempo FORA do
+         * forward — e o histograma da duração sozinho diria que está tudo bem.
+         *
+         * Entre duas requisições o intervalo é a fila mais o prefill, segundos:
+         * ele cai nos baldes altos, uma vez por requisição, e não move a
+         * mediana. Quem lê o histograma sabe que a cauda dele tem essa origem.
+         * E com rascunho ligado o forward do rascunho roda com `medir=False`
+         * entre TODO par de passos: ali o intervalo é rascunho + sampler +
+         * servidor, em cada passo, e não só entre requisições.
+         */
+        Relogio::time_point fim_do_passo;
+        bool tem_fim_anterior = false;
+        std::vector<unsigned long long> histograma_intervalo;
+        int no_histograma_intervalo = 0;
+        /// O intervalo que antecedeu o passo aberto, em µs; -1 no primeiro.
+        long long intervalo_us = -1;
+
+        /**
+         * Marcos por MÓDULO no anel (`EXL3_TEL_MODULOS=1`).
+         *
+         * Chave própria, e não a `EXL3_TEL`: são dezenas de marcos por passo,
+         * e quem quer só a etapa (meia dúzia de marcos) não paga o despejo
+         * gordo. Com ela ligada o contexto do despejo cai para 0 por padrão:
+         * ~120 linhas por passo, e o hub lê o log numa janela de 1000 — três
+         * passos de contexto estourariam a janela e expulsariam as linhas
+         * `Metrics`, que é o estrago que a tarefa 4b já mediu.
+         */
+        bool modulos = false;
 
         /// Quantos passos ANTERIORES ao que estourou entram no despejo.
         int contexto = 2;
@@ -248,9 +294,11 @@ namespace
 
         e.anel.resize(static_cast<size_t>(inteiro_do_ambiente("EXL3_TEL_RING", 4096)));
         e.limiar_ms = static_cast<double>(inteiro_do_ambiente("EXL3_TEL_LIMIAR_MS", 0));
-        e.contexto = inteiro_do_ambiente("EXL3_TEL_CONTEXTO", 2);
+        e.modulos = ambiente_ligado("EXL3_TEL_MODULOS");
+        e.contexto = inteiro_do_ambiente("EXL3_TEL_CONTEXTO", e.modulos ? 0 : 2, 0);
         e.histograma_a_cada = inteiro_do_ambiente("EXL3_TEL_HISTOGRAMA", 1000);
         e.histograma.assign(32, 0);
+        e.histograma_intervalo.assign(32, 0);
         e.ultimo_histograma = Relogio::now();
 
 #ifdef EXL3_TEM_SPDLOG
@@ -258,12 +306,13 @@ namespace
         if (!e.log) e.log = spdlog::stderr_color_mt("exl3_tel");
         e.log->set_pattern("[exl3_tel %P] %v");
 #endif
-        escrever("anel de %zu eventos, limiar %.0f ms%s, %d passos de contexto, histograma a cada %d",
+        escrever("anel de %zu eventos, limiar %.0f ms%s, %d passos de contexto, histograma a cada %d%s",
                  e.anel.size(),
                  e.limiar_ms,
                  e.limiar_ms == 0.0 ? " (automático: 2x a média móvel)" : "",
                  e.contexto,
-                 e.histograma_a_cada);
+                 e.histograma_a_cada,
+                 e.modulos ? ", marcos por módulo" : "");
     }
 
     /**
@@ -298,33 +347,52 @@ namespace
         return k < 31 ? k : 31;
     }
 
+    /// `k:n k:n ...` só dos baldes com contagem: num serviço regular são dois
+    /// ou três, e imprimir os 32 gastaria a linha com zeros.
+    size_t formatar_baldes(const std::vector<unsigned long long>& h, char* pares, size_t tamanho)
+    {
+        size_t usado = 0;
+        pares[0] = 0;
+        for (size_t k = 0; k < h.size() && usado + 32 < tamanho; k++)
+        {
+            if (h[k] == 0) continue;
+            int n = std::snprintf(pares + usado, tamanho - usado, "%s%zu:%llu",
+                                  usado ? " " : "", k, h[k]);
+            if (n <= 0) break;
+            usado += static_cast<size_t>(n);
+        }
+        return usado;
+    }
+
     /**
      * O histograma sai numa linha só, e zera.
      *
      * Uma linha porque é o que o `fwrite` torna indivisível — ver `escrever`.
-     * Só os baldes com contagem entram: num serviço regular são dois ou três, e
-     * imprimir os 32 gastaria a linha com zeros.
      */
     void despejar_histograma()
     {
         Estado& e = estado();
         if (e.no_histograma == 0) return;
-        char pares[768];
-        size_t usado = 0;
-        for (size_t k = 0; k < e.histograma.size() && usado + 32 < sizeof(pares); k++)
-        {
-            if (e.histograma[k] == 0) continue;
-            int n = std::snprintf(pares + usado, sizeof(pares) - usado, "%s%zu:%llu",
-                                  usado ? " " : "", k, e.histograma[k]);
-            if (n <= 0) break;
-            usado += static_cast<size_t>(n);
-        }
-        /// O instante vem ANTES dos baldes: assim a lista de baldes vai até o
-        /// fecho da linha e quem lê não precisa adivinhar onde ela termina.
-        escrever("--- histograma: %d passos, %s, %s ---",
-                 e.no_histograma, agora_iso8601().c_str(), pares);
+        /// Dois de 448: com o cabeçalho, cabe no `corpo` de 1024 de `escrever`
+        /// mesmo com os 32 baldes de cada um preenchidos.
+        char duracao[448];
+        char intervalo[448];
+        formatar_baldes(e.histograma, duracao, sizeof(duracao));
+        formatar_baldes(e.histograma_intervalo, intervalo, sizeof(intervalo));
+        /**
+         * O instante vem ANTES dos baldes, e cada lista tem o seu rótulo: a
+         * de duração é dos `N passos`; a de intervalo tem a própria contagem
+         * entre parênteses, porque o primeiro passo do processo não tem
+         * intervalo antes dele e as duas somas diferem por um nesse lote. O
+         * hub confere as duas somas contra os dois totais.
+         */
+        escrever("--- histograma: %d passos, %s, duracao %s, intervalo(%d) %s ---",
+                 e.no_histograma, agora_iso8601().c_str(), duracao,
+                 e.no_histograma_intervalo, intervalo);
         e.histograma.assign(e.histograma.size(), 0);
+        e.histograma_intervalo.assign(e.histograma_intervalo.size(), 0);
         e.no_histograma = 0;
+        e.no_histograma_intervalo = 0;
         e.ultimo_histograma = Relogio::now();
     }
 
@@ -361,6 +429,12 @@ namespace exl3_tel
         return estado().ligada;
     }
 
+    bool marca_modulos()
+    {
+        garantir_iniciada();
+        return estado().ligada && estado().modulos;
+    }
+
     void evento(const char* nome)
     {
         Estado& e = estado();
@@ -392,6 +466,15 @@ namespace exl3_tel
         if (e.passo_aberto) return;
         e.inicio_do_passo = Relogio::now();
         e.passo_aberto = true;
+        /// O intervalo desde o fim do passo anterior entra no histograma AQUI,
+        /// no início: é o único instante em que os dois relógios existem.
+        e.intervalo_us = -1;
+        if (e.tem_fim_anterior)
+        {
+            e.intervalo_us = std::chrono::duration_cast<std::chrono::microseconds>(e.inicio_do_passo - e.fim_do_passo).count();
+            e.histograma_intervalo[static_cast<size_t>(balde(e.intervalo_us))]++;
+            e.no_histograma_intervalo++;
+        }
         /**
          * O anel NÃO é zerado aqui.
          *
@@ -429,6 +512,17 @@ namespace exl3_tel
             despejar_histograma();
 
         if (ms > limiar) despejar(ms);
+        /**
+         * O fim é carimbado DEPOIS dos despejos, não antes.
+         *
+         * Escrever o despejo é trabalho da telemetria, não do serviço: com
+         * `EXL3_TEL_MODULOS` são ~120 linhas num pipe do docker, milissegundos,
+         * e carimbar antes os colaria no intervalo do passo seguinte —
+         * justamente no que vem depois de todo passo lento. O histograma diria
+         * "intervalo grande depois de passo lento" sobre um custo que é seu.
+         */
+        e.fim_do_passo = Relogio::now();
+        e.tem_fim_anterior = true;
         return ms;
     }
 
@@ -482,11 +576,19 @@ namespace exl3_tel
             }
         }
 
-        escrever("--- %s: %.3f ms, %zu eventos, %s ---",
-                 duracao_ms >= 0.0 ? "passo lento" : "sob demanda",
-                 duracao_ms >= 0.0 ? duracao_ms : 0.0,
-                 e.gravados - primeiro,
-                 agora_iso8601().c_str());
+        /// O intervalo que antecedeu o passo lento vai no cabeçalho, no fim, e
+        /// só quando existe: o despejo sob demanda não é de um passo, e o
+        /// primeiro passo do processo não tem "antes".
+        char cabeca[256];
+        std::snprintf(cabeca, sizeof(cabeca), "--- %s: %.3f ms, %zu eventos, %s",
+                      duracao_ms >= 0.0 ? "passo lento" : "sob demanda",
+                      duracao_ms >= 0.0 ? duracao_ms : 0.0,
+                      e.gravados - primeiro,
+                      agora_iso8601().c_str());
+        if (duracao_ms >= 0.0 && e.intervalo_us >= 0)
+            escrever("%s, intervalo %.3f ms ---", cabeca, static_cast<double>(e.intervalo_us) / 1000.0);
+        else
+            escrever("%s ---", cabeca);
         long long anterior_us = -1;
         int passo_anterior = -1;
         for (size_t i = primeiro; i < e.gravados; i++)

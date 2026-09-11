@@ -19,10 +19,20 @@ passo passa do limiar o anel é despejado. Os passos normais não deixam rastro.
 Desligado por padrão. `EXL3_TEL=1` liga.
 
 Variáveis:
-  EXL3_TEL           1 liga (padrão 0)
-  EXL3_TEL_RING      eventos guardados no anel (padrão 4096)
-  EXL3_TEL_LIMIAR_MS despeja o anel quando o passo passa disto (padrão 0 =
-                     automático, 2x a mediana móvel dos últimos passos)
+  EXL3_TEL            1 liga (padrão 0)
+  EXL3_TEL_RING       eventos guardados no anel (padrão 4096)
+  EXL3_TEL_LIMIAR_MS  despeja o anel quando o passo passa disto (padrão 0 =
+                      automático, 2x a média móvel dos últimos passos)
+  EXL3_TEL_CONTEXTO   passos ANTERIORES ao lento que entram no despejo
+                      (padrão 2; 0 com EXL3_TEL_MODULOS)
+  EXL3_TEL_HISTOGRAMA de quantos em quantos passos o histograma sai (padrão 1000;
+                      sai também a cada 30 s)
+  EXL3_TEL_MODULOS    1 grava um marco por MÓDULO do forward no anel (padrão 0)
+
+O histograma tem duas séries: a DURAÇÃO do passo e o INTERVALO do fim de um
+passo ao início do seguinte. A segunda é o que o anel não vê por dentro —
+sampler, servidor, event loop, e o forward do rascunho quando há um — e é a
+que diz se o tempo está fora do forward.
 
 O spdlog é opcional em tempo de COMPILAÇÃO. Sem o header, tudo aqui vira
 no-op e a extensão compila igual: a telemetria é acessória, e uma máquina que
@@ -53,8 +63,12 @@ próprio abaixo, que faz o mesmo com `fprintf` e não depende de ninguém.
 
 namespace exl3_tel
 {
-    /// Ligada por `EXL3_TEL=1` E com spdlog compilado junto. Lida uma vez.
+    /// Ligada por `EXL3_TEL=1`. Lida uma vez.
     bool ativa();
+
+    /// `EXL3_TEL_MODULOS=1` com a telemetria ligada: o laço de módulos grava
+    /// um marco por módulo no anel. Lida uma vez; o chamador guarda.
+    bool marca_modulos();
 
     /// A extensão foi compilada COM spdlog? Serve para o Python não prometer
     /// traço que esta build não sabe produzir.

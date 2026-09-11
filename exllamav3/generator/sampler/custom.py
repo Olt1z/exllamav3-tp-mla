@@ -1133,13 +1133,20 @@ class CustomSampler(Sampler):
         # path.
         simplified = []
         for step in steps:
-            self.reqs_past_ids = self.reqs_past_ids or step.reqs_past_ids()
-            self.reqs_torch_seed = self.reqs_torch_seed or step.reqs_torch_seed()
             alt = step.alt()
             if alt:
                 step = alt
-            if not isinstance(step, SS_NoOp):
-                simplified.append(step)
+            if isinstance(step, SS_NoOp):
+                continue
+            simplified.append(step)
+            # Os requisitos vêm DEPOIS da simplificação, e só das etapas que
+            # sobraram. Antes vinham de todas: `SS_RepP(1.0)` e
+            # `SS_PresFreqP(0, 0)` pediam o histórico e viravam no-op na linha
+            # seguinte, e o job copiava a sequência inteira para a GPU a cada
+            # passo — 8 bytes por token de contexto, 8 MB a 1M — para um kernel
+            # que nunca rodava. O TabbyAPI empilha as duas em toda requisição.
+            self.reqs_past_ids = self.reqs_past_ids or step.reqs_past_ids()
+            self.reqs_torch_seed = self.reqs_torch_seed or step.reqs_torch_seed()
 
         head = []
         fused_tail = None

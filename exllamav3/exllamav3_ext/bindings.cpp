@@ -82,6 +82,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
     */
     m.def("tel_ativa", &exl3_tel::ativa, "telemetria ligada nesta execução");
     m.def("tel_tem_spdlog", &exl3_tel::compilada_com_spdlog, "a build tem spdlog");
+    m.def("tel_marca_modulos", &exl3_tel::marca_modulos, "marcos por módulo no anel (EXL3_TEL_MODULOS)");
     m.def("tel_passo_inicio", &exl3_tel::passo_inicio, "abre um passo de decode");
     m.def("tel_passo_fim", &exl3_tel::passo_fim, "fecha o passo; despeja se passou do limiar");
     m.def("tel_evento", &exl3_tel::evento, "marca um evento dentro do passo");

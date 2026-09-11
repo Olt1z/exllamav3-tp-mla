@@ -19,6 +19,8 @@ from abc import ABC, abstractmethod
 # caminho mais quente do motor. Com a telemetria desligada o custo aqui é a
 # leitura de um bool por módulo, sem chamada de função.
 _MARCAR_REGIOES = tel.marcando_regioes()
+_MARCAR_MODULOS = tel.marcando_modulos()
+_MARCAR = _MARCAR_REGIOES or _MARCAR_MODULOS
 
 
 def _nome_da_regiao(module, idx: int, instance: int) -> str:
@@ -335,16 +337,24 @@ class Model_LSMixin(ABC):
             # A região sai por MÓDULO, e não por família de atenção: assim o
             # traço serve qualquer arquitetura que o hub carregue, e o nome vem
             # da classe em vez de uma lista que alguém teria de manter.
-            if _MARCAR_REGIOES:
+            if _MARCAR:
+                nome = _nome_da_regiao(module, idx, instance)
                 # `try/finally` porque a pilha do NVTX é pilha: um `forward` que
                 # levanta deixaria a região aberta, e TODAS as seguintes
                 # passariam a aninhar dentro dela — o `nsys` desenharia lixo
                 # justamente no traço tirado para investigar o erro.
-                tel.regiao_inicio(_nome_da_regiao(module, idx, instance))
+                if _MARCAR_REGIOES:
+                    tel.regiao_inicio(nome)
                 try:
                     x = module.forward(x, params)
                 finally:
-                    tel.regiao_fim()
+                    if _MARCAR_REGIOES:
+                        tel.regiao_fim()
+                # O marco vai DEPOIS do forward: o delta até ele é o custo de
+                # host deste módulo, que é a pergunta num serviço preso em
+                # lançamento. Antes, o delta seria o do módulo anterior.
+                if _MARCAR_MODULOS:
+                    tel.evento(nome)
             else:
                 x = module.forward(x, params)
         return x
