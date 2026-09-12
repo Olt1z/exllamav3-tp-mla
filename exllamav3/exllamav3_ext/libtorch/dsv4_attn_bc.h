@@ -16,7 +16,9 @@ py::class_<BC_DSV4Attention, std::shared_ptr<BC_DSV4Attention>>(m, "BC_DSV4Atten
         int, int, int, int, int, int, int, int, int, int, int, int, int, float, float, int, int,
         c10::optional<at::Tensor>, c10::optional<at::Tensor>, c10::optional<at::Tensor>,
         c10::optional<at::Tensor>, c10::optional<at::Tensor>,
-        c10::optional<at::Tensor>, c10::optional<at::Tensor>, c10::optional<at::Tensor>, int
+        c10::optional<at::Tensor>, c10::optional<at::Tensor>, c10::optional<at::Tensor>, int,
+        std::shared_ptr<BC_LinearFP16>, std::shared_ptr<BC_LinearFP16>, std::shared_ptr<BC_LinearFP16>,
+        std::shared_ptr<BC_LinearFP16>, std::shared_ptr<BC_LinearFP16>, c10::optional<at::Tensor>
     >()
 )
 .def("needs_configure", &BC_DSV4Attention::needs_configure)

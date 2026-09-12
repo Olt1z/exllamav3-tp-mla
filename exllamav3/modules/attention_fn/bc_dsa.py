@@ -37,6 +37,29 @@ def _exl3_bc(lin):
     return lin.inner.bc
 
 
+def _lin_bc(lin):
+    """(exl3_bc, fp16_bc) for a projection the graph can run: EXL3 with a bound BC, or a plain
+    fp16 weight the graph runs through cuBLAS between the statics -- contiguous (in, out) half
+    on the device, no bias, not a pinned-host alias (the BC_MLAttention `_proj_ok` rule).
+    Raises with the reason otherwise; the builders turn that into the RECUSADO log line."""
+    if lin is None:
+        raise RuntimeError("missing projection")
+    if lin.quant_type == "exl3":
+        if lin.inner.bc is None:
+            raise RuntimeError(f"exl3 projection {lin.key} without BC")
+        return lin.inner.bc, None
+    if lin.quant_type != "fp16":
+        raise RuntimeError(f"non-exl3/fp16 projection {lin.key} ({lin.quant_type})")
+    w = getattr(lin.inner, "weight", None)
+    if (
+        w is None or w.dtype != torch.half or not w.is_contiguous() or not w.is_cuda or
+        tuple(w.shape) != (lin.in_features, lin.out_features) or lin.inner.bias is not None or
+        getattr(lin.inner, "_pinned_store", None) is not None or getattr(lin.inner, "bc", None) is None
+    ):
+        raise RuntimeError(f"fp16 projection {lin.key} not graph-safe")
+    return None, lin.inner.bc
+
+
 class BCDsa:
 
     def __init__(self, module, rs, rsl, kl):
@@ -65,11 +88,27 @@ class BCDsa:
             raise RuntimeError("compressor BC missing")
         if self.has_idx and m.indexer.bc is None:
             raise RuntimeError("indexer BC missing")
-        if m.wo_a_multi is None:
-            raise RuntimeError("wo_a multilinear missing")
-        for lin in [m.q_a, m.q_b, m.wkv, m.wo_b] + ([m.idx_wq_b] if self.has_idx else []):
-            if _exl3_bc(lin) is None:
-                raise RuntimeError(f"non-exl3 projection {lin.key}")
+        # Projections: EXL3 xor fp16, per projection (the DSv4 Kalibrated keeps its whole
+        # attention in 16 bits, and refusing it here cost ~1.300 cuBLAS launches per token from
+        # python -- the launch-bound ceiling the telemetry of 11/09/2026 measured)
+        q_a_e, q_a_f = _lin_bc(m.q_a)
+        q_b_e, q_b_f = _lin_bc(m.q_b)
+        wkv_e, wkv_f = _lin_bc(m.wkv)
+        wo_b_e, wo_b_f = _lin_bc(m.wo_b)
+        idx_e, idx_f = _lin_bc(m.idx_wq_b) if self.has_idx else (None, None)
+        # wo_a: the EXL3 multilinear over the group slices, or all slices fp16 stacked into one
+        # (G, hpg * hd, o_lora) static (mixed slices are declined -- one kind per tensor)
+        woa_kinds = {l.quant_type for l in m.wo_a}
+        if woa_kinds == {"exl3"}:
+            if m.wo_a_multi is None:
+                raise RuntimeError("wo_a multilinear missing")
+            woa_fp16 = None
+        elif woa_kinds == {"fp16"}:
+            for l in m.wo_a:
+                _lin_bc(l)
+            woa_fp16 = torch.stack([l.inner.weight for l in m.wo_a]).contiguous()
+        else:
+            raise RuntimeError(f"mixed wo_a slices {sorted(woa_kinds)}")
         if m.q_a.out_features != m.q_a.out_features_unpadded or \
                 m.q_b.out_features != m.q_b.out_features_unpadded or \
                 m.wkv.out_features != m.wkv.out_features_unpadded:
@@ -101,9 +140,10 @@ class BCDsa:
         self.pos_dev, self.rb_dev, self.pos_pin, self.pos_mirror, self.bt_st, self.bt_mirror \
             = store[key]
 
-        mu = m.wo_a_multi
+        mu = m.wo_a_multi if woa_fp16 is None else None
         q_lora = m.q_a.out_features
         self.q_lora = q_lora
+        vazio = torch.empty(0, dtype = torch.long, device = self.device)
 
         # x-side projection fan: q_a/wkv/comp/idx as one per-matrix-N mgemm, when the whole
         # group shares bits/format and q_a is the widest output (the dtype/locks carrier)
@@ -138,12 +178,13 @@ class BCDsa:
             torch.zeros((1, 1), dtype = torch.int32, device = self.device)
 
         self.bc = ext.BC_DSV4Attention(
-            _exl3_bc(m.q_a), _exl3_bc(m.q_b), _exl3_bc(m.wkv), _exl3_bc(m.wo_b),
-            _exl3_bc(m.idx_wq_b) if self.has_idx else _exl3_bc(m.q_a), idx_w,
+            q_a_e, q_b_e, wkv_e, wo_b_e,
+            idx_e, idx_w,
             m.compressor.bc if self.has_comp else None,
             m.indexer.bc if self.has_idx else None,
-            mu.ptrs_trellis, mu.ptrs_suh, mu.ptrs_svh, m.woa_indices,
-            mu.K, mu.mcg, mu.mul1,
+            mu.ptrs_trellis if mu else vazio, mu.ptrs_suh if mu else vazio,
+            mu.ptrs_svh if mu else vazio, m.woa_indices if mu else vazio,
+            mu.K if mu else 0, mu.mcg if mu else False, mu.mul1 if mu else False,
             m.q_norm.weight.data, m.q_ones, m.kv_norm_w,
             m._rope_type(), m._rope_type_neg(), m.sinks,
             rsl.ring[slot],
@@ -170,6 +211,7 @@ class BCDsa:
             self.fan["n"] if self.fan else None,
             self.fan["idx"] if self.fan else None,
             *self._pool_quant_args(kl, (MAX_QLEN // self.m_rate + 1, self.head_dim), "bcd_stage"),
+            q_a_f, q_b_f, wkv_f, wo_b_f, idx_f, woa_fp16,
         )
         self.scores_max = -(-cap // 128) * 128
 
@@ -257,7 +299,7 @@ class BCDsa:
             "pool_s": "*fp16:16", "h32": "*fp16:16",
         } | {n: "constexpr" for n in (
             "H", "page_size", "D_c", "D_c_pad", "D_r", "K_pad", "compress_rate", "scale",
-            "HAS_WINDOW", "DENSE_POOL", "BLOCK_H", "BLOCK_N", "BLOCK_W", "SEQ", "MULTIROW", "DEBUG_BOUNDS", "DEBUG_PAGES", "Q_SPLIT", "OUT_LATENT", "QC")}
+            "HAS_WINDOW", "DENSE_POOL", "BLOCK_H", "BLOCK_N", "BLOCK_W", "SEQ", "MULTIROW", "DEBUG_BOUNDS", "DEBUG_PAGES", "Q_SPLIT", "OUT_LATENT", "QC", "CP_WORLD", "CP_RANK")}
         consts_s = dict(
             H = H, page_size = self.epp, D_c = D_c,
             D_c_pad = 1 << (D_c - 1).bit_length(), D_r = self.rd, K_pad = kp,
@@ -266,6 +308,10 @@ class BCDsa:
             BLOCK_H = BLOCK_H, BLOCK_N = 32, BLOCK_W = 16,
             SEQ = 1, MULTIROW = 0, DEBUG_BOUNDS = 0, DEBUG_PAGES = 0,
             Q_SPLIT = 0, OUT_LATENT = 0, QC = self.pool_bits,
+            # O kernel ganhou CP_WORLD/CP_RANK com o context parallel da MLA; o pool da DSA e
+            # replicado (cache/dsa.py), entao o grafo sempre compila com 1/0. Sem isto o Triton
+            # via `None > 1` e a primeira requisicao com grafo morria (xp3jr, 12/09/2026)
+            CP_WORLD = 1, CP_RANK = 0,
         )
         k_split = _compile_kernel(dev, _dsa_attn_split_kernel, sig_s, consts_s, 4, 2)
 
@@ -390,11 +436,14 @@ class BCDsaBatch:
         self.epp = kl.epp if self.has_comp else PAGE_SIZE
         self.kp = -(-m.index_topk // 32) * 32 if self.has_idx else 32
 
+        # The batched body still assumes EXL3 everywhere (one projection mgemm); fp16 attention
+        # is served by the per-job graph above, and here it is declined with the reason so the
+        # batch never falls to eager in silence
         if m.wo_a_multi is None:
-            raise RuntimeError("wo_a multilinear missing")
+            raise RuntimeError("wo_a multilinear missing (fp16 wo_a: batch graph not implemented, per-job graph serves it)")
         for lin in [m.q_b, m.wo_b] + ([m.idx_wq_b] if self.has_idx else []):
             if _exl3_bc(lin) is None:
-                raise RuntimeError(f"non-exl3 projection {lin.key}")
+                raise RuntimeError(f"non-exl3 projection {lin.key} (batch graph is EXL3-only; per-job graph serves fp16)")
         if m.q_b.out_features != m.q_b.out_features_unpadded:
             raise RuntimeError("padded projections")
 
@@ -575,7 +624,7 @@ class BCDsaBatch:
             "pool_s": "*fp16:16", "h32": "*fp16:16",
         } | {n: "constexpr" for n in (
             "H", "page_size", "D_c", "D_c_pad", "D_r", "K_pad", "compress_rate", "scale",
-            "HAS_WINDOW", "DENSE_POOL", "BLOCK_H", "BLOCK_N", "BLOCK_W", "SEQ", "MULTIROW", "DEBUG_BOUNDS", "DEBUG_PAGES", "Q_SPLIT", "OUT_LATENT", "QC")}
+            "HAS_WINDOW", "DENSE_POOL", "BLOCK_H", "BLOCK_N", "BLOCK_W", "SEQ", "MULTIROW", "DEBUG_BOUNDS", "DEBUG_PAGES", "Q_SPLIT", "OUT_LATENT", "QC", "CP_WORLD", "CP_RANK")}
         consts_s = dict(
             H = H, page_size = self.epp, D_c = D_c,
             D_c_pad = 1 << (D_c - 1).bit_length(), D_r = self.rd, K_pad = self.kp,
@@ -584,6 +633,10 @@ class BCDsaBatch:
             BLOCK_H = BLOCK_H, BLOCK_N = 32, BLOCK_W = 16,
             SEQ = S, MULTIROW = 1, DEBUG_BOUNDS = 0, DEBUG_PAGES = 0,
             Q_SPLIT = 0, OUT_LATENT = 0, QC = self.pool_bits,
+            # O kernel ganhou CP_WORLD/CP_RANK com o context parallel da MLA; o pool da DSA e
+            # replicado (cache/dsa.py), entao o grafo sempre compila com 1/0. Sem isto o Triton
+            # via `None > 1` e a primeira requisicao com grafo morria (xp3jr, 12/09/2026)
+            CP_WORLD = 1, CP_RANK = 0,
         )
         k_split = _compile_kernel(dev, _dsa_attn_split_kernel, sig_s, consts_s, 4, 2)
 

@@ -30,6 +30,12 @@ struct BC_DSV4Attention
     std::shared_ptr<BC_LinearEXL3> wo_b;
     std::shared_ptr<BC_LinearEXL3> idx_wq_b;        // csa only
     c10::optional<at::Tensor> idx_weights_w;        // (hidden, H_i) fp16 (cublas, static in)
+    // fp16 alternatives (checkpoints whose attention was left in 16 bits, e.g. the DSv4
+    // Kalibrated "routed experts only" recipe): each projection is EXL3 xor fp16, the fp16
+    // one runs through cuBLAS between the same statics (the BC_MLAttention pattern). wo_a in
+    // fp16 is the stacked (G, hpg * hd, o_lora) tensor, replayed as G gemms inside the graph
+    std::shared_ptr<BC_LinearFP16> q_a_fp16, q_b_fp16, wkv_fp16, wo_b_fp16, idx_wq_b_fp16;
+    c10::optional<at::Tensor> woa_fp16;
 
     std::shared_ptr<BC_DSV4Compressor> comp_bc;     // null for sliding layers
     std::shared_ptr<BC_DSV4Compressor> idx_bc;      // csa only
@@ -133,10 +139,18 @@ struct BC_DSV4Attention
         c10::optional<at::Tensor> _fan_svh = {}, c10::optional<at::Tensor> _fan_n = {},
         c10::optional<at::Tensor> _fan_indices = {},
         c10::optional<at::Tensor> _pool_s = {}, c10::optional<at::Tensor> _pool_stage = {},
-        c10::optional<at::Tensor> _h32 = {}, int _pool_bits = 0
+        c10::optional<at::Tensor> _h32 = {}, int _pool_bits = 0,
+        std::shared_ptr<BC_LinearFP16> _q_a_fp16 = nullptr,
+        std::shared_ptr<BC_LinearFP16> _q_b_fp16 = nullptr,
+        std::shared_ptr<BC_LinearFP16> _wkv_fp16 = nullptr,
+        std::shared_ptr<BC_LinearFP16> _wo_b_fp16 = nullptr,
+        std::shared_ptr<BC_LinearFP16> _idx_wq_b_fp16 = nullptr,
+        c10::optional<at::Tensor> _woa_fp16 = {}
     ) :
         q_a(_q_a), q_b(_q_b), wkv(_wkv), wo_b(_wo_b), idx_wq_b(_idx_wq_b),
         idx_weights_w(std::move(_idx_weights_w)),
+        q_a_fp16(_q_a_fp16), q_b_fp16(_q_b_fp16), wkv_fp16(_wkv_fp16), wo_b_fp16(_wo_b_fp16),
+        idx_wq_b_fp16(_idx_wq_b_fp16), woa_fp16(std::move(_woa_fp16)),
         comp_bc(_comp_bc), idx_bc(_idx_bc),
         woa_trellis(std::move(_woa_trellis)), woa_suh(std::move(_woa_suh)),
         woa_svh(std::move(_woa_svh)), woa_indices(std::move(_woa_indices)),
@@ -165,6 +179,17 @@ struct BC_DSV4Attention
         fan_svh(std::move(_fan_svh)), fan_n(std::move(_fan_n)),
         fan_indices(std::move(_fan_indices))
     {
+        TORCH_CHECK((q_a != nullptr) != (q_a_fp16 != nullptr), "BC_DSV4Attention: q_a must be EXL3 or fp16");
+        TORCH_CHECK((q_b != nullptr) != (q_b_fp16 != nullptr), "BC_DSV4Attention: q_b must be EXL3 or fp16");
+        TORCH_CHECK((wkv != nullptr) != (wkv_fp16 != nullptr), "BC_DSV4Attention: wkv must be EXL3 or fp16");
+        TORCH_CHECK((wo_b != nullptr) != (wo_b_fp16 != nullptr), "BC_DSV4Attention: wo_b must be EXL3 or fp16");
+        TORCH_CHECK(!(idx_wq_b && idx_wq_b_fp16), "BC_DSV4Attention: idx_wq_b must be EXL3 or fp16");
+        TORCH_CHECK(woa_fp16.has_value() == (woa_trellis.numel() == 0), "BC_DSV4Attention: wo_a must be EXL3 or fp16");
+        TORCH_CHECK(!woa_fp16 || (woa_fp16->dim() == 3 && woa_fp16->size(0) == o_groups &&
+                                  woa_fp16->size(2) == o_lora && woa_fp16->dtype() == at::kHalf &&
+                                  woa_fp16->is_contiguous()),
+                    "BC_DSV4Attention: fp16 wo_a must be a contiguous (G, hpg * hd, o_lora) half tensor");
+        TORCH_CHECK(!fan_trellis || !(q_a_fp16 || wkv_fp16), "BC_DSV4Attention: the EXL3 fan needs EXL3 q_a/wkv");
         slots.resize(MAX_QLEN * 2);
     }
 

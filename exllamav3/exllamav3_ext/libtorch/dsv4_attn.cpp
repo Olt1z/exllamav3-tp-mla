@@ -100,15 +100,21 @@ void BC_DSV4Attention::run_gr
     }
     else
     {
-        exl3_gemm_gr(x_rows, q_a->trellis, s.qa_st, q_a->suh, s.xh_a, q_a->svh, -1, q_a->mcg, q_a->mul1, 0, graph);
-        exl3_gemm_gr(x_rows, wkv->trellis, s.kv_st, wkv->suh, s.xh_a, wkv->svh, -1, wkv->mcg, wkv->mul1, 0, graph);
+        // fp16 projections run through cuBLAS between the same statics: a launch inside the
+        // graph costs nothing on replay, which is the whole point (the eager path paid ~1.300
+        // cuBLAS launches per token from python on the DSv4 Kalibrated, 11/09/2026)
+        if (q_a_fp16) hgemm_gr(x_rows, q_a_fp16->weight, s.qa_st, graph);
+        else exl3_gemm_gr(x_rows, q_a->trellis, s.qa_st, q_a->suh, s.xh_a, q_a->svh, -1, q_a->mcg, q_a->mul1, 0, graph);
+        if (wkv_fp16) hgemm_gr(x_rows, wkv_fp16->weight, s.kv_st, graph);
+        else exl3_gemm_gr(x_rows, wkv->trellis, s.kv_st, wkv->suh, s.xh_a, wkv->svh, -1, wkv->mcg, wkv->mul1, 0, graph);
     }
     {
         c10::optional<at::Tensor> qnw = q_norm_w;
         rms_norm_gr(s.qa_st, qnw, s.qres_st, rms_norm_eps, 0.0f, 1.0f, false, graph);
     }
-    exl3_gemm_gr(s.qres_st, q_b->trellis, s.q_st, q_b->suh, s.xh_b, q_b->svh,
-                 -1, q_b->mcg, q_b->mul1, 0, graph);
+    if (q_b_fp16) hgemm_gr(s.qres_st, q_b_fp16->weight, s.q_st, graph);
+    else exl3_gemm_gr(s.qres_st, q_b->trellis, s.q_st, q_b->suh, s.xh_b, q_b->svh,
+                      -1, q_b->mcg, q_b->mul1, 0, graph);
 
     // Fused head norms + partial rope, positions from the device scalar
     {
@@ -167,8 +173,9 @@ void BC_DSV4Attention::run_gr
     // Long-ctx regime: indexer scoring + capture-safe top-k selection
     if (topk_regime)
     {
-        exl3_gemm_gr(s.qres_st, idx_wq_b->trellis, s.qidx_st.value(), idx_wq_b->suh,
-                     s.xh_b, idx_wq_b->svh, -1, idx_wq_b->mcg, idx_wq_b->mul1, 0, graph);
+        if (idx_wq_b_fp16) hgemm_gr(s.qres_st, idx_wq_b_fp16->weight, s.qidx_st.value(), graph);
+        else exl3_gemm_gr(s.qres_st, idx_wq_b->trellis, s.qidx_st.value(), idx_wq_b->suh,
+                          s.xh_b, idx_wq_b->svh, -1, idx_wq_b->mcg, idx_wq_b->mul1, 0, graph);
         {
             at::Tensor qi4 = s.qidx_st.value().view({1, seq, index_n_heads, index_head_dim});
             at::Tensor qi_sl = qi4.narrow(3, index_head_dim - rope_dim, rope_dim);
@@ -281,10 +288,23 @@ void BC_DSV4Attention::run_gr
     {
         at::Tensor A = s.attn_out_st;    // (G, seq, hpg * hd)
         at::Tensor C = s.woa_c_st;       // (G, seq, o_lora)
-        at::Tensor ah = s.woa_xh.view({o_groups, seq, A.size(2)});
-        c10::optional<at::Tensor> mi = woa_indices;
-        c10::optional<at::Tensor> no_w = {};
-        exl3_mgemm_gr(A, woa_trellis, C, woa_suh, ah, woa_svh, mi, no_w, woa_k, -1, woa_mcg, woa_mul1, -1, -1, 0, graph, 1);
+        if (woa_fp16)
+        {
+            // One gemm per group, all inside the graph: (seq, hpg * hd) x (hpg * hd, o_lora)
+            for (int g = 0; g < o_groups; ++g)
+            {
+                at::Tensor Ag = A.select(0, g);
+                at::Tensor Cg = C.select(0, g);
+                hgemm_gr(Ag, woa_fp16->select(0, g), Cg, graph);
+            }
+        }
+        else
+        {
+            at::Tensor ah = s.woa_xh.view({o_groups, seq, A.size(2)});
+            c10::optional<at::Tensor> mi = woa_indices;
+            c10::optional<at::Tensor> no_w = {};
+            exl3_mgemm_gr(A, woa_trellis, C, woa_suh, ah, woa_svh, mi, no_w, woa_k, -1, woa_mcg, woa_mul1, -1, -1, 0, graph, 1);
+        }
     }
     at::Tensor wo_b_in;
     if (seq == 1)
@@ -303,8 +323,12 @@ void BC_DSV4Attention::run_gr
         }
         wo_b_in = s.woa_t_st;
     }
-    at::Tensor wo_b_xh = s.woa_xh.view({-1}).narrow(0, 0, wo_b_in.numel()).view({(int64_t) seq, (int64_t) o_groups * o_lora});
-    exl3_gemm_gr(wo_b_in, wo_b->trellis, s.y_st, wo_b->suh, wo_b_xh, wo_b->svh, -1, wo_b->mcg, wo_b->mul1, 0, graph);
+    if (wo_b_fp16) hgemm_gr(wo_b_in, wo_b_fp16->weight, s.y_st, graph);
+    else
+    {
+        at::Tensor wo_b_xh = s.woa_xh.view({-1}).narrow(0, 0, wo_b_in.numel()).view({(int64_t) seq, (int64_t) o_groups * o_lora});
+        exl3_gemm_gr(wo_b_in, wo_b->trellis, s.y_st, wo_b->suh, wo_b_xh, wo_b->svh, -1, wo_b->mcg, wo_b->mul1, 0, graph);
+    }
 
     // SWA ring append (device-scalar addressed; shift/rebase handled host-side pre-replay)
     dsv4_ring_append_gr(s.kv_st, ring, pos_dev, ring_beg_dev, graph);
