@@ -106,7 +106,13 @@ class BCDsa:
         elif woa_kinds == {"fp16"}:
             for l in m.wo_a:
                 _lin_bc(l)
-            woa_fp16 = torch.stack([l.inner.weight for l in m.wo_a]).contiguous()
+            # Stacked ONCE per module: there is one BCDsa per (layer, cache layer, slot), and
+            # stacking here would duplicate the whole wo_a (64 MiB per layer on the DSv4) per
+            # slot -- gigabytes on the full model with max_batch_size > 1 (review of bc1af31)
+            woa_fp16 = getattr(m, "_woa_fp16_stack", None)
+            if woa_fp16 is None:
+                woa_fp16 = torch.stack([l.inner.weight for l in m.wo_a]).contiguous()
+                m._woa_fp16_stack = woa_fp16
         else:
             raise RuntimeError(f"mixed wo_a slices {sorted(woa_kinds)}")
         if m.q_a.out_features != m.q_a.out_features_unpadded or \
