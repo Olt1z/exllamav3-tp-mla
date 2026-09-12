@@ -10,7 +10,8 @@
 <p align="center">
   <b>Tensor parallel e context parallel para os modelos de atenção latente</b><br>
   que o ExLlamaV3 ainda gera numa placa por vez — mais um grafo CUDA que aceita<br>
-  atenção em 16 bits, um rascunho DFlash&nbsp;2 e um conversor mais rápido.
+  atenção em 16 bits (MLA, KDA e a DSA do DeepSeek-V4), telemetria do passo,<br>
+  um rascunho DFlash&nbsp;2 e um conversor mais rápido.
 </p>
 
 <div align="center">
@@ -29,6 +30,7 @@
   <a href="#context-parallel-o-cache-repartido-pela-sequência">Context parallel</a> ·
   <a href="#tensor-parallel-para-atenção-latente">Tensor parallel</a> ·
   <a href="#atenção-em-16-bits-dentro-do-grafo-cuda">Grafo CUDA</a> ·
+  <a href="#telemetria-do-passo">Telemetria</a> ·
   <a href="#rascunho-dflash-2">DFlash 2</a> ·
   <a href="#conversor-mais-rápido">Conversor</a> ·
   <a href="#experts-na-ram-do-host">Experts na RAM</a> ·
@@ -236,6 +238,48 @@ M = 8 o cuBLASLt escolhe um kernel cerca de 13× mais lento.
 
 </div>
 
+O mesmo vale para a atenção esparsa comprimida do DeepSeek-V4: `BC_DSV4Attention` aceita
+`q_a`, `q_b`, `wkv`, `wo_b` e `idx_wq_b` em fp16, e o `wo_a` fp16 vira um tensor empilhado
+`(G, hpg·hd, o_lora)` replicado em G GEMMs dentro do grafo. O `DSV4-Flash-Vision Kalibrated`
+guarda a atenção inteira em 16 bits (só os experts roteados são EXL3), e antes disso as 43 camadas
+recusavam o grafo — ~1.300 lançamentos cuBLAS por token a partir de Python.
+
+<div align="center">
+
+| DSv4, corte de 24 camadas, A100, 345k de contexto | eager | grafo fp16 |
+|:--|--:|--:|
+| decode | 28,0 tok/s | **52,5 tok/s** |
+| passo | 32–65 ms | **8–16 ms** |
+| kernels por passo | 2.488 | 473 |
+
+</div>
+
+Com `EXL3_BC_DSA_DEBUG=1` cada camada que recusa o grafo escreve uma linha
+`[bc_dsa] grafo RECUSADO em layers.N.attn: <motivo>` em vez de abortar a requisição.
+O lote (`BC_DSV4BatchAttention`) continua EXL3-only e recusa com o motivo.
+
+---
+
+## Telemetria do passo
+
+Para saber ONDE o tempo de um passo de decode vai, sem profiler anexado e sem custo mensurável
+(medido numa H200: 24,5–25,3 tok/s com tudo ligado contra 24,7 sem nada):
+
+- **Anel de eventos em C++** (`exllamav3_ext/telemetria.cpp`): cada passo grava marcos com
+  carimbo; quando um passo passa do limiar (automático, 2× a média móvel), o anel é despejado
+  no stderr com o delta de cada marco — `[exl3_tel PID] --- passo lento: 3052 ms, 3 eventos, ...,
+  intervalo 230689 ms ---`.
+- **Histograma de duas séries**, a cada 1.000 passos: a duração do passo e o **intervalo** entre
+  o fim de um passo e o início do seguinte. É a segunda série que separa "o modelo está lento"
+  de "o servidor/sampler está lento".
+- **Marcos por módulo** (`EXL3_TEL_MODULOS=1`): o despejo diz `47:Attention` em vez de
+  `forward_ls`.
+- **Páginas por job** (`[exl3_tel job] paginas: prompt N tokens, P paginas, C do cache, S nao
+  sequenciais`), uma linha por alocação — o dado que testa hipóteses sobre o cache de prefixo.
+- **NVTX** do mesmo ponto de marcação, para o `nsys` desenhar o passo inteiro com os kernels.
+
+Tudo desligado por padrão: sem `EXL3_TEL=1`, cada função é um `return`.
+
 ---
 
 ## Rascunho DFlash 2
@@ -393,6 +437,16 @@ As que este fork acrescenta ou torna configuráveis:
 | `EXL3_GSCALE_STAGE2_STRIDE` | — | Passo da etapa fina da busca de escala |
 | `EXL3_TP_MOE_TENSOR_SPLIT` | — | Experts na RAM sob tensor parallel, no modo de canais |
 | `EXL3_MOE_CPU_SPLIT_STATS_OUT` | — | Despeja o perfil de roteamento por camada, para a colocação estática |
+| `EXL3_BC_DSA` | `1` | Grafo CUDA do passo inteiro da atenção DSA (DeepSeek-V4); `0` cai no eager |
+| `EXL3_BC_DSA_DEBUG` | — | Uma linha por camada que recusa o grafo, com o motivo |
+| `EXL3_DSV4_BATCH_EAGER` | `1` | Lote > 1 em eager batido; `0` roda um grafo por job |
+| `EXL3_TEL` | — | Liga a telemetria do passo (anel, histograma, marcos, páginas por job) |
+| `EXL3_TEL_MODULOS` | — | Um marco por módulo no anel (o despejo nomeia a camada) |
+| `EXL3_TEL_NVTX` | `1` | Regiões NVTX do mesmo ponto, para o `nsys` (só com `EXL3_TEL=1`) |
+| `EXL3_TEL_LIMIAR_MS` | `0` | Limiar do passo lento em ms; `0` = automático, 2× a média móvel |
+| `EXL3_TEL_HISTOGRAMA` | `1000` | Passos entre despejos do histograma |
+| `EXL3_TEL_CONTEXTO` | `2` | Passos anteriores incluídos no despejo (`0` com marcos por módulo) |
+| `EXL3_TEL_RING` | `4096` | Tamanho do anel de eventos |
 
 > [!TIP]
 > O caminho de grafo da MLA compartilha o interruptor do upstream: `EXL3_BC_ATTN=0` desliga, e
@@ -440,6 +494,9 @@ python tests/bancada/provar_plano_cp.py        # o plano de context parallel, SE
 python tests/bancada/provar_cp_denso.py        # combine denso contra a placa única
 python tests/bancada/provar_cp_esparso.py      # combine esparso, acima de index_topk
 python tests/bancada/provar_fatia_do_cache.py  # a união das fatias reproduz o cache inteiro, bit a bit
+python tests/test_dsa_cache_cp.py              # pool da DSA sob context parallel: página de PAGE_SIZE × world
+EXL3_TEL=1 EXL3_TEL_MODULOS=1 EXL3_TEL_NVTX=0 python -m pytest tests/test_telemetria_modulos.py tests/test_telemetria_paginas.py
+python tests/test_sampler_reqs_past_ids.py     # o sampler só calcula os requisitos dos passos que sobrevivem
 ```
 
 Contra um servidor já no ar:
