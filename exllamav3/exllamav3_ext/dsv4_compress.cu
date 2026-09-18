@@ -209,15 +209,25 @@ void dsv4_compress_windows_kernel
     else
         dest_b[drow * (size_t) (hd - Wa) + (c - Wa)] = __float2half_rn(out);
 
-    // Overlap snapshot for the next call: last window's Ca slice, written by block 0 AFTER
-    // its restore read (see header comment). Sources are kv_new / pre-pos0 ring rows only,
-    // both stable within this kernel
+    // Overlap snapshots for later calls: the Ca slice of EVERY window emitted here, written by
+    // block 0 AFTER its restore read (see header comment). Sources are kv_new / pre-pos0 ring
+    // rows only, both stable within this kernel.
+    //
+    // Writing only the last window was wrong under speculative verify: a step of k+1 >= m+1
+    // tokens can emit windows e and e+1, and when the drafts are rejected inside e+1 the next
+    // call restarts at window e+1 and reads snapshot e -- a slot this call never wrote, holding
+    // window e-ovl_depth or a rejected attempt. Window e+1's pooled entry then went to the pool
+    // (and the CSA indexer key) permanently wrong, and survived into later requests via the
+    // stash. Each slot written here is either re-read by a restart inside the next window or
+    // overwritten before it can be read again, so the extra writes never change the
+    // no-rejection path.
     if (overlap && w == 0)
+    for (int v = max(0, nw - ovl_depth); v < nw; ++v)
     {
-        float* snap = ovl + (size_t) ((ec0 + nw - 1) % ovl_depth) * 2 * m * hd;
+        float* snap = ovl + (size_t) ((ec0 + v) % ovl_depth) * 2 * m * hd;
         for (int e = 0; e < m; ++e)
         {
-            int abs_pos = (ec0 + nw - 1) * m + e;
+            int abs_pos = (ec0 + v) * m + e;
             float kvv, gv;
             if (abs_pos >= pos0)
             {

@@ -44,6 +44,17 @@ def fwd_cached(model, ids, state, chunks):
     return torch.cat(outs, dim = 0)
 
 
+def csa_rate(model):
+    """Compression rate of the first CSA (overlapping compressor) attention, or None."""
+    stack = list(model.modules)
+    while stack:
+        mod = stack.pop()
+        if getattr(mod, "layer_type", None) == "csa":
+            return mod.compress_rate
+        stack.extend(getattr(mod, "modules", None) or [])
+    return None
+
+
 def compare(tag, got, ref, kl_tol, arg_tol):
     am = (got.argmax(-1) == ref.argmax(-1)).float().mean().item()
     lp_r = torch.log_softmax(ref.double(), -1)
@@ -130,6 +141,28 @@ def main():
             state = cache.get_new_state()
         got = fwd_cached(model, ids2, state, chunks)
         ok &= compare(f"big-chunk cached vs nc, {tag}", got[-32:], ref2[-32:], kl_tol, arg_tol)
+        state.free()
+
+    # Speculative verify with rejected drafts across two CSA windows (18/09/2026). A verify step
+    # of m+2 tokens starting at pos % m == m-1 emits two windows; the compressor used to
+    # snapshot only the last one, so after the drafts were rejected inside the second window
+    # the next call restored the first window's overlap from a slot this state never wrote,
+    # and the second window's pooled entry stayed wrong for good. The replay of the true tokens
+    # must match the stateless reference like any other cached run.
+    m = csa_rate(model)
+    if m is not None and m > 1:
+        pos0 = (300 // m) * m + (m - 1)
+        verify, accepted = m + 2, 2
+        drafts = ids[:, pos0:pos0 + verify].clone()
+        drafts[:, accepted:] = (drafts[:, accepted:] + 1) % TINY["vocab_size"]
+        with torch.inference_mode():
+            state = cache.get_new_state()
+        fwd_cached(model, ids[:, :pos0], state, [pos0])
+        fwd_cached(model, drafts, state, [verify])
+        state.rewind(verify - accepted)
+        got = fwd_cached(model, ids[:, pos0 + accepted:], state, [1] * (seq - pos0 - accepted))
+        ok &= compare(f"rejected drafts across two CSA windows (m={m}, pos {pos0})",
+                      got, ref[pos0 + accepted:], kl_tol, arg_tol)
         state.free()
 
     # Rewind consistency: logits for re-decoded tokens must match the first pass exactly

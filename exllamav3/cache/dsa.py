@@ -261,7 +261,11 @@ class DSV4State:
         self.last_history = 0
 
     def rollback_capacity(self):
-        return self.position - self.window_beg
+        # The compressor rings (buf_rows = PAGE_SIZE + m) and the overlap snapshots (depth
+        # PAGE_SIZE // m + 2) only guarantee PAGE_SIZE of history (see the header). The SWA
+        # window can hold more, and promising it let a long banned-string rewind silently
+        # replay from overwritten ring rows.
+        return min(self.position - self.window_beg, PAGE_SIZE)
 
     def post_advance(self):
         self.window_beg += self.wshift
