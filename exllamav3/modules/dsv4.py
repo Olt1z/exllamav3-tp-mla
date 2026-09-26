@@ -567,6 +567,10 @@ class DSV4Attention(Module):
                 for m in comp.modules():
                     self.register_submodule(m)
 
+        # The DSV4 bundle contexts take integer bitrates; keep these projections off the half-integer rates
+        for m in self.modules:
+            m.q_half_bits = False
+
         self.inv_freq_main = None
         self.inv_freq_compress = None
 
@@ -873,6 +877,7 @@ class DSV4Attention(Module):
         module.device = device
         if not kwargs.get("skip_reduction"):
             module.tp_reduce = True
+            module.tp_owner = module.tp_single_owner(local_context, key)
 
         module.load_local(device)
         torch.cuda.synchronize()
@@ -1073,7 +1078,7 @@ class DSV4Attention(Module):
             # Zero-width TP shard: contribute nothing, keep the collective aligned
             y = torch.zeros_like(x, dtype = out_dtype or self.out_dtype)
             if self.tp_reduce:
-                params["backend"].all_reduce(y, False)
+                self.tp_collect(params["backend"], y, False)
             return y
         mode = params.get("attn_mode", "flash_attn_nc")
         if mode == "flash_attn":
@@ -1082,7 +1087,7 @@ class DSV4Attention(Module):
             assert mode == "flash_attn_nc", f"DSV4Attention: unsupported attn_mode {mode}"
             y = self._forward_nc(x, params, out_dtype)
         if self.tp_reduce:
-            params["backend"].all_reduce(y)
+            self.tp_collect(params["backend"], y)
         return y
 
 
@@ -1321,9 +1326,13 @@ class DSV4Attention(Module):
                 bcd = build_bc_dsa_batch(self, rsl, kl)
                 self._bc_dsa_batch[id(rsl)] = bcd if bcd is not None else False
             if bcd:
-                tel.evento("dsa: grafo")
-                return bcd.run(x, B, S, pos_l, floor_l, beg_l, ec_l, slot_l, bt)
-            tel.evento("dsa: grafo RECUSADO (build devolveu None)")
+                y = bcd.run(x, B, S, pos_l, floor_l, beg_l, ec_l, slot_l, bt)
+                if y is not None:   # None: the graph kernels do not fit this device's shared memory
+                    tel.evento("dsa: grafo")
+                    return y
+                tel.evento("dsa: grafo RECUSADO (kernels nao cabem na memoria compartilhada)")
+            else:
+                tel.evento("dsa: grafo RECUSADO (build devolveu None)")
         else:
             # A condição de cima é a suspeita número um das requisições que
             # rendem metade: medido em 11/09/2026, cinco de 101 vieram com
@@ -1419,20 +1428,29 @@ class DSV4Attention(Module):
                     int(RopeStyle.GPTJ), 1.0, None, None, 1e-6, 0.0, 0.0, 0, 1, 0)
                 wts = g_tensor_cache.get(device, (R, Hi), torch.half, "dsv4_b_wts")
                 self.idx_weights.inner.bc.run(x.view(R, -1), wts)
-                s_max = -(-kl.capacity // 128) * 128
-                scores = g_tensor_cache.get(device, (R, s_max), torch.half, "dsv4_b_scores")
-                with torch.cuda.device(device):
-                    _dsa_indexer_fewq_kernel[(R, triton.cdiv(s_max, 128))](
-                        qi.view(R, Hi, Di), wts.view(R, Hi), kl.pool_idx.view(-1, Di),
-                        scores, a_ec, R, a_pos, a_ec, bt_st,
-                        bt_st.stride(0),
+                # The score stride and the tile alignment both follow the kv tile, which the
+                # ladder may shrink on small-smem devices (smem.py)
+                from .attention_fn.smem import pick_config, shared_bytes, halving_ladder
+                def i_args(bn):
+                    s_max = -(-kl.capacity // bn) * bn
+                    scores = g_tensor_cache.get(device, (R, s_max), torch.half, "dsv4_b_scores")
+                    args = (qi.view(R, Hi, Di), wts.view(R, Hi), kl.pool_idx.view(-1, Di),
+                            scores, a_ec, R, a_pos, a_ec, bt_st, bt_st.stride(0))
+                    consts = dict(
                         H_i = Hi, H_pad = max(triton.next_power_of_2(Hi), 16), D_i = Di,
                         S_stride = s_max, compress_rate = m,
-                        scale = Di ** -0.5 * Hi ** -0.5, BLOCK_N = 128,
+                        scale = Di ** -0.5 * Hi ** -0.5, BLOCK_N = bn,
                         SEQ = S, MULTIROW = 1, EPP = kl.epp,
                         DEBUG_BOUNDS = 1 if dsa_debug_bounds else 0,
-                        DEBUG_PAGES = kl.num_pages if dsa_debug_bounds else 0,
-                        num_warps = 8, num_stages = 2)
+                        DEBUG_PAGES = kl.num_pages if dsa_debug_bounds else 0)
+                    return s_max, scores, args, consts
+                with torch.cuda.device(device):
+                    def probe(bn):
+                        _, _, args, consts = i_args(bn)
+                        return shared_bytes(_dsa_indexer_fewq_kernel, args, **consts, num_warps = 8, num_stages = 2)
+                    idx_bn = pick_config(device, "dsv4_indexer_fewq", (Hi, Di, m, S, kl.epp, kl.capacity), halving_ladder(128), probe)
+                    s_max, scores, args, consts = i_args(idx_bn)
+                    _dsa_indexer_fewq_kernel[(R, triton.cdiv(s_max, idx_bn))](*args, **consts, num_warps = 8, num_stages = 2)
                 indices = g_tensor_cache.get(device, (R, kp), torch.int32, "dsv4_b_idx")
                 # Per-row scan bound from the state array: each row reads only its own
                 # causal region, so the score buffer needs no -inf backfill

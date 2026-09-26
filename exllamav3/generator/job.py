@@ -1338,7 +1338,8 @@ class Job:
                         continue
                     if cut != prefill_end:
                         prefill_end = cut
-                        p1 = (prefill_end + PAGE_SIZE - 1) // PAGE_SIZE
+                        # Pagina LOGICA, como o p1 de cima: PAGE_SIZE aqui contava paginas erradas sob CP
+                        p1 = (prefill_end + self.page_tokens - 1) // self.page_tokens
                         recurrent_last_page = False
                         prefill_ids = seq.sequence_ids.torch_slice(prefill_start, prefill_end)
                     break

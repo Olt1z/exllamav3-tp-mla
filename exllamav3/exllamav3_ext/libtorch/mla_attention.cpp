@@ -71,6 +71,7 @@ BC_MLAttention::BC_MLAttention
     norm_eps            (_norm_eps),
     inv_freq            (std::move(_inv_freq)),
     rope_style          (_rope_style),
+    rope_active         (_qk_rope_head_dim > 0 && _rope_style != 0),
     attn_factor         (_attn_factor),
     rotate_dims         (_rotate_dims),
     l4_scaling_beta     (_l4_scaling_beta),
@@ -458,7 +459,7 @@ void BC_MLAttention::run_gr
     // Partial RoPE on the rope halves, in place on the statics; the position sources are patched
     // per call and the kernel branches on the pointers at runtime. NoPE models (GLM5.3,
     // qk_rope_head_dim 0) skip the stage entirely
-    if (qk_rope_head_dim > 0)
+    if (rope_active)
     {
         c10::optional<at::Tensor> out_k = s.kpe4;
         rope_gr(s.q_pe4, s.q_pe4, s.kpe4, out_k, inv_freq, (uint32_t) position, positions, position_ids,
@@ -550,7 +551,7 @@ void BC_MLAttention::run_gr
             s.k_idx_norm->launch(R, 1, 1, args, stream);
         }
         dbg("idx_norm");
-        if (qk_rope_head_dim > 0)
+        if (rope_active)
         {
             c10::optional<at::Tensor> no_k = {};
             c10::optional<at::Tensor> no_ko = {};
@@ -658,7 +659,7 @@ void BC_MLAttention::run_gr
             bool f = idx_wq_b_fp16 != nullptr;
             at::Tensor qidx = rows(s.qidx, f);
             linear_gr(idx_wq_b, idx_wq_b_fp16, rows(s.q_a, f), qidx, xh_for(idx_wq_b, q_lora_rank), graph);
-            if (qk_rope_head_dim > 0)
+            if (rope_active)
             {
                 c10::optional<at::Tensor> no_k = {};
                 c10::optional<at::Tensor> no_ko = {};
@@ -999,7 +1000,7 @@ void BC_MLAttention::run
         params.emplace_back(GP_gemm_A, (void*) x.data_ptr());
 
     // RoPE position sources (NoPE models never captured the stage)
-    if (qk_rope_head_dim > 0)
+    if (rope_active)
     {
         params.emplace_back(GP_rope_inv_freq, (void*) inv_freq.data_ptr());
         params.emplace_back(GP_rope_position, (void*) (uintptr_t) (uint32_t) position);
@@ -1021,7 +1022,7 @@ void BC_MLAttention::run
     {
         if (!stage_x)
             params.emplace_back(GP_copy2d_src, (void*) x.data_ptr());
-        if (qk_rope_head_dim > 0)
+        if (rope_active)
         {
             params.emplace_back(GP_rope_inv_freq, (void*) inv_freq.data_ptr());
             params.emplace_back(GP_rope_position, (void*) (uintptr_t) (uint32_t) position);
@@ -1055,7 +1056,7 @@ void BC_MLAttention::run
             // the scalar scan width and clamps
             if (multirow)   // seq-state derive precedes the qidx stages in the graph
                 params.emplace_back(GP_attn_seqlens, (void*) cache_seqlens.data_ptr());
-            if (qk_rope_head_dim > 0)
+            if (rope_active)
             {
                 params.emplace_back(GP_rope_inv_freq, (void*) inv_freq.data_ptr());
                 params.emplace_back(GP_rope_position, (void*) (uintptr_t) (uint32_t) position);

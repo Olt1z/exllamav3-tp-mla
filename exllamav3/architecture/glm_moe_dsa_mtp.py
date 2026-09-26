@@ -245,9 +245,6 @@ class GlmMoeDsaMTPModel(Model):
                 return ids
             return torch.argmax(logits, dim = -1)
         else:
-            # Tensor-parallel target: its lm_head was exported to the rank processes and unloaded
-            # here (inner is None). Same path as the Qwen3.5 / HY3 heads; the input layer already
-            # fetches the embedding through tp_dispatch_master
+            # The target's lm_head lives in the TP workers (sharded): argmax over the shards
             state = self.attached_model().tp_producer.send(state)
-            argmax = self.attached_model().tp_dispatch_lm_head_argmax((state, {}))
-            return argmax
+            return self.attached_model().tp_dispatch_lm_head_argmax((state, {}))

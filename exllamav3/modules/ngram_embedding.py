@@ -209,6 +209,7 @@ class NGramEmbedding(Module):
             assert all(s[1] == ROW_DIM for s in shapes)
 
         quantized = trellis_keys != []
+        self._table_keys = keys      # for tp_export: workers stream the table by their own handles
         stream_from_disk = self.stream_from_disk
         if stream_from_disk is None:
             infer_params = getattr(self.config, "infer_params", None)
@@ -238,12 +239,24 @@ class NGramEmbedding(Module):
                 for h in set(h.filename for h in self.handles):
                     stc.release_file(h)
         else:
-            # loaded shard by shard and KEPT as individual tensors (never concatenated)
             self.mode = "trellis_ram" if quantized else "fp16_ram"
-            self.tables = [
-                stc.get_tensor(k, "cpu", allow_bf16 = not quantized, no_defer = True)
-                for k in keys
-            ]
+            if len(keys) == 1:
+                self.tables = [stc.get_tensor(keys[0], "cpu", allow_bf16 = not quantized, no_defer = True)]
+            else:
+                # Sharded table: one contiguous slab, each shard copied into its slice as it loads
+                slab = None
+                for s_i, k in enumerate(keys):
+                    t = stc.get_tensor(k, "cpu", allow_bf16 = not quantized, no_defer = True)
+                    if slab is None:
+                        from ..util.memory import check_host_memory
+                        check_host_memory(self.num_rows * t[0].numel() * t.element_size(),
+                                          f"n-gram table {self.key} held in RAM (--ngram_ram)")
+                        slab = torch.empty((self.num_rows, *t.shape[1:]), dtype = t.dtype)
+                    r0 = s_i * self.rows_per_shard
+                    slab[r0 : r0 + t.shape[0]].copy_(t)
+                    del t
+                self.tables = [slab]
+                self.rows_per_shard = self.num_rows
             if not quantized:
                 self._row_dtype = self.tables[0].dtype
 
@@ -271,6 +284,65 @@ class NGramEmbedding(Module):
     @override
     def weights_numel(self):
         return self.num_rows * ROW_DIM
+
+    def tp_export(self, plan, producer):
+        """
+        Tensor-parallel: the table itself never travels. Every rank streams rows from disk through
+        its own handles (a per-rank RAM copy of a table this size is not an option, and the gather
+        is a few hundred rows per forward), so the export carries the shard locations plus the
+        small hashing/dequant parameters. A table held in RAM here (--ngram_ram) is still streamed
+        from disk by the workers.
+        """
+        assert self.mode is not None, "Cannot export module for TP before loading."
+        stc = self.config.stc
+        handles = [stc.get_tensor_handle(k) for k in self._table_keys]
+        return {
+            "cls": NGramEmbedding,
+            "kwargs": {
+                "key": self.key,
+                "ngram_size": self.ngram_size,
+                "heads_per_ngram": self.heads_per_ngram,
+                "ple_embed_dim": self.ple_embed_dim,
+                "eos_token_id": self.eos_token_id,
+                "out_dtype": self.out_dtype,
+            },
+            "mode": "trellis_disk" if self.mode.startswith("trellis") else "fp16_disk",
+            "K": self.K,
+            "num_rows": self.num_rows,
+            "rows_per_shard": handles[0].shape[0],
+            "handles": [(h.key, h.filename, h.abs_offset, list(h.shape), str(h.dtype)) for h in handles],
+            "row_dtype": str(self._row_dtype) if self._row_dtype is not None else None,
+            "head_offsets": producer.send(self.head_offsets),
+            "head_vocab_sizes": producer.send(self.head_vocab_sizes),
+            "layer_multipliers": producer.send(self.layer_multipliers),
+            "head_bias": producer.send(self.head_bias) if self.head_bias is not None else None,
+            "device": self.device,
+        }
+
+    @staticmethod
+    def tp_import(local_context, exported, plan):
+        consumer = local_context["consumer"]
+        device = local_context["device"]
+        def dt(s):
+            return getattr(torch, s.split(".")[1]) if s is not None else None
+        module = NGramEmbedding(config = None, **exported["kwargs"], stream_from_disk = True)
+        module.device = device
+        module.mode = exported["mode"]
+        module.K = exported["K"]
+        module.num_rows = exported["num_rows"]
+        module.rows_per_shard = exported["rows_per_shard"]
+        module.handles = [
+            DiskTensorHandle(key = k, filename = fn, abs_offset = off, shape = shape, dtype = dt(d))
+            for k, fn, off, shape, d in exported["handles"]
+        ]
+        module._row_dtype = dt(exported["row_dtype"])
+        module.head_offsets = consumer.recv(exported["head_offsets"], cuda = False).long().contiguous()
+        module.head_vocab_sizes = consumer.recv(exported["head_vocab_sizes"], cuda = False).long().contiguous()
+        module.layer_multipliers = consumer.recv(exported["layer_multipliers"], cuda = False).long().contiguous()
+        module.head_bias = consumer.recv(exported["head_bias"], cuda = True) if exported.get("head_bias") is not None else None
+        if module.mode.startswith("trellis"):
+            module.codebook = mul1_codebook(device)
+        return module
 
     def _fetch_packed(self, uids_cpu: torch.Tensor) -> torch.Tensor:
         """Gather rows of the backing store (packed int16 or raw fp16/bf16) to CPU, routing
@@ -446,13 +518,15 @@ class NGramEmbedding(Module):
         """Gather the (sorted) unique rows into the pinned staging buffer, routing shard
         segments (contiguous in the sorted list) to their tensor/handle."""
         stores = self.tables if self.tables is not None else self.handles
+        if len(stores) > 1:
+            # One searchsorted for every shard boundary (a per-shard call costs ~2.5 us each)
+            bounds = torch.arange(1, len(stores), dtype = torch.int64) * self.rows_per_shard
+            cuts = torch.searchsorted(uids, bounds).tolist() + [uids.numel()]
+        else:
+            cuts = [uids.numel()]
         i0 = 0
         for s, store in enumerate(stores):
-            if s + 1 < len(stores):
-                bound = torch.tensor((s + 1) * self.rows_per_shard, dtype = torch.int64)
-                i1 = int(torch.searchsorted(uids, bound).item())
-            else:
-                i1 = uids.numel()
+            i1 = cuts[s]
             if i1 > i0:
                 seg = uids[i0 : i1]
                 base = s * self.rows_per_shard

@@ -18,6 +18,7 @@ from ..util import log_tp
 
 GLOBALS_SIZE = 128*1024
 SHBUF_SIZE = 16 * 1024 ** 2
+_nccl_fp32 = os.environ.get("EXL3_TP_NCCL_FP32", "0") != "0"
 # 17 slots (16 devices + accumulator) x 2MB: 8 ring stages of the 256KB reduce chunk size
 SHBUF_SIZE_R = 17 * 8 * 256 * 1024
 # Acima de quantos bytes o backend NATIVO reduz na GPU em vez de na CPU do host. 2 MiB é o
@@ -49,6 +50,40 @@ class TPBackend:
 
     def fwd_barrier(self):
         raise NotImplementedError()
+
+
+class TPBackendNull:
+    """
+    Collective-free stand-in used by Model.warmup() in TP mode: every rank walks its module list
+    on its own and compiles/tunes its kernels concurrently with the others, never waiting in a
+    collective (a rank cold-compiling Triton kernels can hold a real reduce past its sync deadline).
+    Reductions leave the local partial sums in place and the output gather leaves the output
+    buffer untouched: the values are garbage but finite, which is all a warmup pass needs.
+    """
+
+    def close(self):
+        pass
+
+    def fwd_barrier(self):
+        pass
+
+    def broadcast(self, tensor: torch.Tensor, src_device: int):
+        pass
+
+    def all_reduce(self, tensor: torch.Tensor, contribution: bool = True):
+        pass
+
+    def gather(self, tensor, out_tensor, gather_devices, output_device, ldims):
+        pass
+
+    def gather_small(self, tensor, out_tensor, gather_devices, output_device, ldims):
+        pass
+
+    def run_cpu_reduce_jobs(self):
+        pass
+
+    def end_cpu_reduce_jobs(self):
+        pass
 
 
 class TPBackendNCCL:
@@ -172,7 +207,9 @@ class TPBackendNCCL:
         # Abaixo do limiar o fio vai em fp32, que o NCCL reduz nativamente. Sai de graça o
         # arredondamento que fazia o TP divergir da placa única em modelo de saída fp32 — no
         # decode a comparação passa a ser contra a base crua, não contra `--simular-fio-bf16`.
-        if tensor.dtype == torch.float32 and tensor.numel() * 4 >= LIMIAR_FIO_BF16:
+        #
+        # EXL3_TP_NCCL_FP32=1 (upstream) forca o fp32 em qualquer tamanho, para A/B do arredondamento.
+        if tensor.dtype == torch.float32 and not _nccl_fp32 and tensor.numel() * 4 >= LIMIAR_FIO_BF16:
             temp = tensor.to(torch.bfloat16)
             dist.all_reduce(temp, async_op = False)
             temp = temp.to(torch.float32)

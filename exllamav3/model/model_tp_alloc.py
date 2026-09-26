@@ -27,6 +27,7 @@ class TPAllocation:
         limit_key: str = None,
         max_devices: int = None,
         cp: bool = False,
+        affinity_key: str = None,
     ):
         self.key = key
         # Context parallel: so um componente que COMBINA entre os ranks do grupo pode receber a
@@ -46,6 +47,10 @@ class TPAllocation:
         self.recons_temp = recons_temp
         self.channels_to_split = channels_to_split
         self.max_devices = max_devices
+        # Components sharing an affinity key are placed on the device the first of them (the
+        # group leader) lands on: DSA "shared" indexer layers read the selection of the nearest
+        # preceding "full" layer out of that layer's process
+        self.affinity_key = affinity_key
 
         self.current_split = []
 
@@ -111,6 +116,7 @@ class TPAllocator:
             )
         storage_sum = [0] * self.num_devices
         overhead_max = [0] * self.num_devices
+        affinity_dev = {}
 
         self.grupos = [ranks[g * self.dcp:(g + 1) * self.dcp] for g in range(len(ranks) // self.dcp)]
         self.grupo_de = {d: g for g, gr in enumerate(self.grupos) for d in gr}
@@ -134,13 +140,20 @@ class TPAllocator:
                 else:
                     break
 
-            # Mask out devices to satisy max split per component type
-            if c.max_devices is not None or c.limit_key:
-                dev_limit = self.dev_limits.get(c.limit_key, c.max_devices)
-                if dev_limit is not None:
-                    dev_limit = min(dev_limit, len(active_devices))
-                if dev_limit is not None:
-                    top_k_mask_(rem_mem_s, dev_limit)
+            # Mask out devices to satisfy the max split per component type. A module-enforced cap
+            # (max_devices, e.g. 1 for attention variants that only run whole on one device) is a
+            # hard limit on top of whatever the user set for the type
+            dev_limit = self.dev_limits.get(c.limit_key) if c.limit_key else None
+            if c.max_devices is not None:
+                dev_limit = c.max_devices if dev_limit is None else min(dev_limit, c.max_devices)
+            if c.affinity_key is not None and c.affinity_key in affinity_dev:
+                # Pinned to the group leader's device, whatever the memory picture (the estimate
+                # then overshoots there and the load's headroom checks catch a real shortfall)
+                d = affinity_dev[c.affinity_key]
+                rem_mem_s = [max(r, 1) if i == d else 0 for i, r in enumerate(rem_mem_s)]
+            elif dev_limit is not None:
+                dev_limit = min(dev_limit, len(active_devices))
+                top_k_mask_(rem_mem_s, dev_limit)
 
             # Perform split. Sob CP o canal vai para o GRUPO e depois se espalha; sem CP
             # (dcp = 1) `por_grupo`/`por_placa` sao identidade e isto e o codigo de sempre.
@@ -150,6 +163,10 @@ class TPAllocator:
             else:
                 split = ratio_split(channels, rem_mem_s, chunk_size = 1)
             c.current_split = split
+            if c.affinity_key is not None and c.affinity_key not in affinity_dev:
+                owners = [i for i, s in enumerate(split) if s]
+                if len(owners) == 1:
+                    affinity_dev[c.affinity_key] = owners[0]
 
             # Active devices on layer: those that actually received channels. A device with free
             # memory but zero channels holds none of the module, so it must not be charged the

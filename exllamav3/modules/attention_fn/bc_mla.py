@@ -4,7 +4,7 @@ from ...util.device_copy import to_device
 from ...ext import exllamav3_ext as ext
 from ...constants import PAGE_SIZE
 from ...util.tensor import g_tensor_cache
-from .bc_attn import bc_attn_enable, _trace_build, _compile_kernel, _get_sm_count, _is_pow2, \
+from .bc_attn import bc_attn_enable, _trace_build, _compile_kernel, _get_sm_count, _is_pow2, BCKernelTooLarge, \
     MAX_BSZ, MAX_QLEN
 
 """
@@ -622,7 +622,10 @@ class BCMLA:
                     ext_indices = to_device(ext_indices, x.device)
 
         if (bsz, q_len, regime) not in self.configured:
-            self._configure(bsz, q_len, regime)
+            try:
+                self._configure(bsz, q_len, regime)
+            except BCKernelTooLarge:
+                return None   # eager path sizes its own tiles
             self.configured.add((bsz, q_len, regime))
         y = torch.empty((bsz, q_len, self.hidden_size), dtype = self.o_dtype, device = x.device)
         if self.cp_world == 1:
@@ -698,10 +701,11 @@ def build_bc_mla(module, layer):
     dev = torch.device(m.device)
     if not (
         bc_attn_enable and
-        # NoPE models (D_r 0) compile the rope stages out; otherwise a rope instance with a
-        # supported style is required
+        # NoPE models (D_r 0) compile the rope stages out, as do models whose pe slices are
+        # never rotated (Kimi Linear: D_r > 0 without a rope instance); otherwise a rope instance
+        # with a supported style is required
         (D_r == 0 or (
-            m.rope is not None and m.rope.rope_settings.rope_style != RopeStyle.NONE and
+            (m.rope is None or m.rope.rope_settings.rope_style != RopeStyle.NONE) and
             _is_pow2(D_r)
         )) and
         # The staging/attention kernels index with tl.arange over these widths

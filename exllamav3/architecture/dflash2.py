@@ -1,162 +1,378 @@
 from __future__ import annotations
 from typing_extensions import override
 import torch
+import weakref
 
+from ..cache import Cache
 from ..model.config import no_default
-from .dflash import DFlashConfig, DFlashModel
-from ..modules.arch_specific.dflash2 import GroupedDynamicCausalConv, ConvSandwich, CandidateSelector
+from ..model.model import Model
+from ..modules import RMSNorm, Attention, GatedMLP
+from ..modules.arch_specific.dflash import DFlashInputLayer
+from ..modules.arch_specific.dflash2 import DFlash2Block, DFlash2DynConv, DFlash2Selector
+from ..modules.attn import prepare_for_attn
+from .dflash import DFlashConfig, dflash_update_kv_from_target
+from ..util.tensor import get_for_device
+from ..util.device_copy import to_device
 
-# DFlash 2 drafter (z-lab/dflash `DFlash2DraftModel`; checkpoints incoai/GLM-5.3-Flash-DFlash2,
-# incoai/GLM-5.3-DFlash2, incoai/Qwen3.8-27B-DFlash2, ...). Same block-diffusion drafter as
-# dflash.py (block of [anchor, mask...], K/V of the context derived from the target's hidden
-# states, one forward per block, the target's lm_head on top), plus:
-#   - a two-tap dynamic causal convolution before and after every attention and MLP sublayer;
-#   - a candidate selector that keeps the top-k tokens at every position and traces one coherent
-#     path through them (replaces the per-position argmax of sample_from_state);
-#   - `is_causal: false` in the config: the sliding-window layers attend both ways inside the
-#     block (the reference builds a two-sided window mask), so the window here is (sw, sw).
-# Everything else -- target taps, block size, vocab, hidden sizes -- comes from the checkpoint's
-# config.json, which is what makes one reader serve every DFlash 2 target. Taps use the raw ids:
-# the reference reads hidden_states[layer_id + 1] (output of layer layer_id), and SGLang's
-# glm5_next capture (PR 36708) takes the layer input at index layer_id + 1, i.e. the same
-# tensor, as the unweighted mean of the mHC streams -- exactly what export_state_layers[layer_id]
-# yields here. Measured on the TR3 (06/09/2026): shift 0 and 1 accept alike (28-33 % short,
-# 65 % at 5k), so the index is set by the reference, not by the number.
-# The generator is untouched: it still gets one sequence per block and verifies it as before.
+# DFlash2 draft model: the DFlash encoder (fc + hidden_norm over the concatenated target taps)
+# and SWA/GQA layers, with grouped dynamic convolutions around every attention/MLP sublayer and
+# a top-k candidate selector in place of row-wise argmax.
+#
+# Conventions:
+#   - Block input = [anchor, mask x (block_size-1)]; each remaining row predicts
+#     its own position and the selector walks candidates starting from the anchor.
+#   - Taps: reference reads HF hidden_states[target_layer_ids[i] + 1] = output
+#     of target layer id  =>  tap_shift 0 (exl3 export index = layer output).
+#   - Block attention direction: the checkpoint's "is_causal" decides whether block rows
+#     see later rows (reference default: causal only on sliding-window layers); windowed
+#     layers express it through (left, right) window bounds, see DFlashConfig.block_window.
+#   - Draft cache ctx K/V come from the shared DFlash K/V update (fc+hidden_norm
+#     projected tap stream); per-round writes at the new cache position overwrite
+#     the transient noise-block K/V, reproducing the reference's crop semantics.
+#   - Proposals are the greedy selector path (T-independent), verified by the
+#     stock accept-while-match rule — trivially lossless at every temperature
+#     (per-position output marginal equals the target distribution).
 
 
 class DFlash2Config(DFlashConfig):
+
     arch_string = "DFlash2DraftModel"
+
+    # Reference extract uses hidden_states[id + 1] == output of layer id
     tap_shift = 0
 
-    def __init__(self, directory: str, **kwargs):
-        super().__init__(directory, {"text": DFlash2Model}, **kwargs)
-        self.conv_kernel_size = self.read_cfg(int, "dflash_config->conv_kernel_size", no_default)
-        self.conv_group_size = self.read_cfg(int, "dflash_config->conv_group_size", no_default)
-        self.selector_rank = self.read_cfg(int, "dflash_config->selector_rank", no_default)
-        self.selector_top_k = self.read_cfg(int, "dflash_config->selector_top_k", no_default)
-        self.draft_vocab_size = self.read_cfg(int, "vocab_size", no_default)
-        # None = the reference's default (sliding layers causal); False = two-sided window
-        self.is_causal = self.read_cfg(bool, "is_causal", None)
-        # Gemma-style targets (the reference reads these with the same defaults)
-        self.input_embedding_scale = self.read_cfg(float, ["dflash_config->input_embedding_scale", "input_embedding_scale"], 1.0)
-        self.output_multiplier = self.read_cfg(float, ["dflash_config->output_multiplier", "output_multiplier"], 1.0)
-        self.final_logit_softcapping = self.read_cfg(float, ["dflash_config->final_logit_softcapping", "final_logit_softcapping"], None)
-        assert self.hidden_size % self.conv_group_size == 0, \
-            f"DFlash2: hidden_size {self.hidden_size} não é múltiplo de conv_group_size {self.conv_group_size}"
+    def __init__(
+        self,
+        directory: str,
+        model_classes: dict | None = None,
+        **kwargs,
+    ):
+        super().__init__(
+            directory,
+            model_classes or {"text": DFlash2Model},
+            **kwargs
+        )
+
+        self.conv_kernel_size = self.read_cfg(
+            int, ["dflash_config->conv_kernel_size", "conv_kernel_size"], 2)
+        self.conv_group_size = self.read_cfg(
+            int, ["dflash_config->conv_group_size", "conv_group_size"], 16)
+        self.selector_rank = self.read_cfg(
+            int, ["dflash_config->selector_rank", "selector_rank"], no_default)
+        self.selector_top_k = self.read_cfg(
+            int, ["dflash_config->selector_top_k", "selector_top_k"], no_default)
+        self.input_embedding_scale = float(self.read_cfg(
+            [float, int], ["dflash_config->input_embedding_scale", "input_embedding_scale"], 1.0))
+        self.output_multiplier = float(self.read_cfg(
+            [float, int], ["dflash_config->output_multiplier", "output_multiplier"], 1.0))
+        self.final_logit_softcapping = float(self.read_cfg(
+            [float, int], ["dflash_config->final_logit_softcapping", "final_logit_softcapping"], 0.0))
+        assert 0 < self.conv_kernel_size <= self.block_size, \
+            "DFlash2 conv_kernel_size must be positive and no larger than block_size"
+        assert self.conv_group_size > 0 and self.hidden_size % self.conv_group_size == 0, \
+            "DFlash2 hidden_size must be divisible by a positive conv_group_size"
+        assert self.selector_rank > 0, \
+            "DFlash2 selector_rank must be positive"
+        assert 0 < self.selector_top_k <= self.vocab_size, \
+            "DFlash2 selector_top_k must be between 1 and vocab_size"
 
 
-class DFlash2Model(DFlashModel):
+class DFlash2Model(Model):
     config_class = DFlash2Config
 
-    def __init__(self, config: DFlash2Config, **kwargs):
+    # Encoder tensor keys
+    key_fc = "fc"
+    key_fc_norm = "hidden_norm"
+
+    def __init__(
+        self,
+        config: DFlash2Config,
+        **kwargs
+    ):
         super().__init__(config, **kwargs)
 
-        # Wrap each block's attention and MLP with its dynamic convolution. The TransformerBlock
-        # keeps calling self.attn.forward / self.mlp.forward; the sandwich does prepare -> inner
-        # -> finish around them. self.attn_modules keeps the bare Attention modules, which is what
-        # update_kv_from_target needs.
+        self.input_layer = DFlashInputLayer(
+            config = config,
+            key = self.key_fc,
+            key_norm = self.key_fc_norm,
+            hidden_size = config.hidden_size,
+            target_state_size = config.hidden_size * len(config.target_layer_ids),
+            mask_token_id = config.mask_token_id,
+            rms_norm_eps = config.rms_norm_eps,
+            native_draft_len = config.block_size,
+            qmap = "target_hidden",
+            input_embedding_scale = config.input_embedding_scale,
+        )
+        self.modules += [self.input_layer]
+
+        self.first_block_idx = len(self.modules)
+        self.attn_modules = []
+
         for idx in range(config.num_hidden_layers):
-            blk = self.modules[self.first_block_idx + idx]
-            for nome, conv_key in (("attn", "attention_conv"), ("mlp", "mlp_conv")):
-                inner = getattr(blk, nome)
-                conv = GroupedDynamicCausalConv(
+            window_left, window_right = config.block_window(idx)
+
+            attn = Attention(
+                config = config,
+                key = f"layers.{idx}.self_attn",
+                layer_idx = idx,
+                hidden_size = config.hidden_size,
+                head_dim = config.head_dim,
+                num_q_heads = config.num_q_heads,
+                num_kv_heads = config.num_kv_heads,
+                rope_settings = config.rope_settings,
+                key_q = "q_proj",
+                key_k = "k_proj",
+                key_v = "v_proj",
+                key_o = "o_proj",
+                qmap = "block.attn",
+                sliding_window = window_left,
+                window_right = window_right,
+                q_norm = RMSNorm(
                     config = config,
-                    key = f"layers.{idx}.{conv_key}",
+                    key = f"layers.{idx}.self_attn.q_norm",
+                    rms_norm_eps = config.rms_norm_eps,
+                ),
+                k_norm = RMSNorm(
+                    config = config,
+                    key = f"layers.{idx}.self_attn.k_norm",
+                    rms_norm_eps = config.rms_norm_eps,
+                ),
+                out_dtype = torch.float,
+            )
+            self.attn_modules.append(attn)
+
+            def dynconv(name: str, qmap: str):
+                return DFlash2DynConv(
+                    config = config,
+                    key = f"layers.{idx}.{name}",
                     hidden_size = config.hidden_size,
                     kernel_size = config.conv_kernel_size,
                     group_size = config.conv_group_size,
+                    qmap = qmap,
                 )
-                sandwich = ConvSandwich(config, f"layers.{idx}.{conv_key}", inner, conv)
-                blk.modules[blk.modules.index(inner)] = sandwich
-                setattr(blk, nome, sandwich)
 
-            if config.is_causal is False and config.layer_types[idx] == "sliding_attention":
-                # ponytail: the reference masks a two-sided window (|q - k| < sw); the fork's window
-                # is (left, 0) end to end (AttnArgs.get_window_size, cache.get_kv), so a right side
-                # would mean plumbing a tuple through four places. Full attention is identical for
-                # contexts up to sw (2048) and only differs beyond it, where the draft sees more
-                # context than it was trained on; the target's verification keeps decoding lossless
-                # either way. Do the tuple if acceptance measurably drops at long contexts.
-                self.attn_modules[idx].sliding_window = -1
+            self.modules += [
+                DFlash2Block(
+                    config = config,
+                    key = f"layers.{idx}",
+                    layer_idx = idx,
+                    attn_norm = RMSNorm(
+                        config = config,
+                        key = f"layers.{idx}.input_layernorm",
+                        rms_norm_eps = config.rms_norm_eps,
+                    ),
+                    attn = attn,
+                    mlp_norm = RMSNorm(
+                        config = config,
+                        key = f"layers.{idx}.post_attention_layernorm",
+                        rms_norm_eps = config.rms_norm_eps,
+                    ),
+                    mlp = GatedMLP(
+                        config = config,
+                        key = f"layers.{idx}.mlp",
+                        hidden_size = config.hidden_size,
+                        intermediate_size = config.intermediate_size,
+                        key_up = "up_proj",
+                        key_gate = "gate_proj",
+                        key_down = "down_proj",
+                        qmap = "block.mlp",
+                        interm_dtype = torch.half,
+                        out_dtype = torch.float,
+                    ),
+                    attn_conv = dynconv("attention_conv", "block.attn"),
+                    mlp_conv = dynconv("mlp_conv", "block.mlp"),
+                )
+            ]
 
-        # The selector is not part of the forward chain: loaded after the chain, on the device of
-        # the final norm (RMSNorm.load does not recurse into registered children)
-        self.candidate_selector = CandidateSelector(
+        self.last_kv_module_idx = len(self.modules) - 1
+
+        self.selector = DFlash2Selector(
             config = config,
             key = "candidate_selector",
+            vocab_size = config.vocab_size,
             hidden_size = config.hidden_size,
-            vocab_size = config.draft_vocab_size,
             rank = config.selector_rank,
             top_k = config.selector_top_k,
         )
 
+        self.modules += [
+            RMSNorm(
+                config = config,
+                key = f"norm",
+                rms_norm_eps = config.rms_norm_eps,
+                out_dtype = torch.half,
+            ),
+            # Identity in the module walk; part of the list so loading, autosplit and compilation
+            # account for its tensors. sample_from_state runs its walk after the target's head
+            self.selector,
+        ]
 
-    @override
-    def load_gen(self, *args, **kwargs):
-        yield from super().load_gen(*args, **kwargs)
-        self.candidate_selector.load(torch.device(self.modules[-1].device))
+        # Logits come from the attached target's head
+        self.logit_layer_idx = None
+        self.caps.update({
+            "uncalibrated_quantize": True,
+            "supports_tp": False,
+            "attach_target": True,
+            "dflash_draft": True,
+            "default_draft_size": config.block_size - 1,
+            "autosplit_load_fwd": False,
+        })
+
+        self.attached_model = None
+
+        self.draft_verifier_params.update({
+            "export_state_layers": set(config.target_layer_ids),
+        })
 
 
-    @override
-    def unload(self):
-        self.candidate_selector.unload()
-        super().unload()
+    def attach_to(self, target):
+        # Alvo em tensor parallel (fork tp-mla): o lm_head esta fatiado entre os ranks e os logits
+        # inteiros nao existem num processo so. Cada rank devolve o top-k da sua fatia e o mestre
+        # funde as listas (tp_dispatch_lm_head_topk); o seletor recebe (valores, ids) prontos, ver
+        # sample_from_state. Sem o dispatch (backend sem ele), a recusa de antes continua valendo.
+        if target.loaded_tp and not hasattr(target, "tp_dispatch_lm_head_topk"):
+            raise NotImplementedError(
+                "DFlash2 does not support tensor-parallel targets because the selector needs top-k logits"
+            )
+        if target.config.vocab_size != self.config.vocab_size:
+            raise ValueError(
+                f"DFlash2 vocabulary size {self.config.vocab_size} does not match "
+                f"target vocabulary size {target.config.vocab_size}"
+            )
+        if target.config.hidden_size != self.config.hidden_size:
+            raise ValueError(
+                f"DFlash2 hidden size {self.config.hidden_size} does not match "
+                f"target hidden size {target.config.hidden_size}"
+            )
+        if not 0 <= self.config.mask_token_id < target.config.vocab_size:
+            raise ValueError("DFlash2 mask_token_id is outside the target vocabulary")
+        if target.logit_layer_idx is None:
+            raise ValueError("DFlash2 target has no compatible LM head")
+        if any(not 0 <= layer_id < target.config.num_hidden_layers
+               for layer_id in self.config.target_layer_ids):
+            raise ValueError("DFlash2 target_layer_ids contains a layer outside the target model")
+        self.attached_model = weakref.ref(target)
+        self.input_layer.attached_model = weakref.ref(target)
+
+
+    def update_kv_from_target(
+        self,
+        target_hidden: list,
+        cache: Cache,
+        params: dict,
+        lengths: list[int] = None,
+    ):
+        dflash_update_kv_from_target(self, target_hidden, cache, params, lengths)
+
+
+    def sample_from_state(
+        self,
+        state: torch.Tensor,
+        params: dict
+    ) -> torch.Tensor:
+        """Target lm_head over all block rows, then the selector walk over
+        rows 1.. (rows predict their own position; row 0 is the anchor).
+        Returns (bsz, block) ids [anchor, path...]; the generator crops the
+        anchor. The selector is greedy; sampling remains lossless because the
+        target verifier still samples normally and accepts only exact matches."""
+        target = self.attached_model()
+        dev = self.selector.device
+        if target.loaded_tp:
+            return self._sample_from_state_tp(target, state, params, dev)
+        lm = target.modules[target.logit_layer_idx]
+        logits = lm.prepare_for_device(state.half(), params)
+        logits = lm.forward(logits, params)
+
+        # The generator stages the block ids in pinned memory: upload without a host sync
+        anchor = get_for_device(params, "dflash2_anchor_ids", dev)[:, -1]
+        export_conf = params.get("export_draft_conf", False)
+        # [anchor, path...] and [0, score...] straight from the selector, in the block layout
+        # the generator consumes. The head's padded width, the output multiplier and the
+        # softcap (Gemma-class targets) are handled inside the selector's top-k. The state
+        # (draft's last block) and the logits (target's head) may sit on other devices than
+        # the selector: to_device bounces pairs with a broken peer path through the host
+        out, confidence = self.selector.walk_block(
+            to_device(state[:, 1:], dev), to_device(logits[:, 1:], dev), anchor,
+            return_confidence = export_conf,
+            vocab_size = target.config.vocab_size,
+            scale = self.config.output_multiplier,
+            softcap = self.config.final_logit_softcapping,
+        )
+        if export_conf:
+            params["draft_conf"] = confidence
+        return out
+
+
+    def _sample_from_state_tp(self, target, state, params, dev):
+        """sample_from_state com o alvo em tensor parallel (fork tp-mla).
+
+        O top-k vem do lm_head fatiado, fundido no mestre, e entra no seletor ja pronto: a
+        caminhada e a mesma, so a origem dos candidatos muda. Escala e softcap sao monotonicas,
+        entao aplica-las aos k valores depois do top-k da o mesmo que aplica-las aos logits antes.
+
+        As colunas de enchimento do lm_head (acima de vocab_size) nao sao tokens. Fora do TP o
+        kernel do upstream as corta; aqui cada rank faz o top-k da sua fatia inteira, enchimento
+        incluido, e um id >= vocab_size chegaria ao codebook do seletor. Viram -inf e id valido."""
+        k = self.selector.top_k
+        # .half() nao copia um tensor que ja e fp16, e a fatia nao e contigua (ca5aa4f: o Linear do
+        # seletor caia com hidden nao contiguo)
+        rows = state[:, 1:].half().contiguous()
+        v, i = target.tp_dispatch_lm_head_topk((target.tp_producer.send(rows), {}), k)
+        v = v.float() * self.config.output_multiplier
+        softcap = self.config.final_logit_softcapping
+        if softcap:
+            v = torch.tanh(v / softcap) * softcap
+        vocab = target.config.vocab_size
+        fora = i >= vocab
+        v = v.masked_fill(fora, float("-inf"))
+        i = i.masked_fill(fora, 0)
+
+        anchor = get_for_device(params, "dflash2_anchor_ids", dev)[:, -1]
+        export_conf = params.get("export_draft_conf", False)
+        out, confidence = self.selector.walk_block(
+            to_device(rows, dev), None, anchor,
+            return_confidence = export_conf,
+            vocab_size = vocab,
+            topk = (to_device(v, dev), to_device(i, dev)),
+        )
+        if export_conf:
+            params["draft_conf"] = confidence
+        return out
+
+
+    def default_load_shape_dtype(self, chunk_size):
+        return (1, 1), torch.long
+
+
+    def default_load_params(self, max_chunk_size):
+        return {}
 
 
     @override
     def prepare_inputs(self, input_ids: torch.Tensor, params: dict) -> torch.Tensor:
-        # The last real token of the block is the selector's predecessor for position 1
-        params["dflash2_anchor_ids"] = input_ids[:, -1].clone()
-        return super().prepare_inputs(input_ids, params)
-
-
-    def draft_logits_topk(self, state: torch.Tensor, params: dict):
-        """Top-k (values, ids) of the target's lm_head over the drafter's state, on the master."""
-        k = self.candidate_selector.top_k
-        target = self.attached_model()
-        if not target.loaded_tp:
-            lm = target.modules[target.logit_layer_idx]
-            logits = lm.forward(lm.prepare_for_device(state, params), params)
-            logits = logits[..., :target.config.vocab_size].float()
-            logits = self._ajustar_logits(logits)
-            v, i = logits.topk(k, dim = -1)
-            return v, i
-        state = target.tp_producer.send(state)
-        v, i = target.tp_dispatch_lm_head_topk((state, {}), k)
-        return self._ajustar_logits(v.float()), i
-
-    def _ajustar_logits(self, logits: torch.Tensor):
-        cfg = self.config
-        if cfg.output_multiplier != 1.0:
-            logits = logits * cfg.output_multiplier
-        if cfg.final_logit_softcapping:
-            logits = torch.tanh(logits / cfg.final_logit_softcapping) * cfg.final_logit_softcapping
-        return logits
+        assert input_ids.shape[-1] == 1, \
+            "DFlash2 expects one verified anchor token per draft block"
+        params["dflash2_anchor_ids"] = input_ids
+        # Block attention direction per the checkpoint (DFlashConfig.block_window): the kernel
+        # flag is only needed when every layer is causal; windowed layers carry their own bounds
+        params["causal"] = self.config.is_causal is True
+        return prepare_for_attn(input_ids, params)
 
 
     @override
-    def sample_from_state(self, state: torch.Tensor, params: dict) -> torch.Tensor:
-        """state (bsz, block_size, hidden): the drafter's normed output for [anchor, masks...].
-        Position 0 is the anchor (the generator drops it); positions 1.. get the selector's path."""
-        unary, candidates = self.draft_logits_topk(state, params)              # (b, n, k)
-        anchor = params["dflash2_anchor_ids"].to(state.device)
-        dev = state.device
-        # `state[:, 1:]` is a non-contiguous slice, and `hidden_projection` ends up in
-        # `Linear.forward`, which does `x.view(-1, x.shape[-1])` -- that raises on a
-        # non-contiguous tensor. It never showed up under TP because `.to(dev)` crosses
-        # devices there and the copy silently makes it contiguous; with autosplit the
-        # target state is already on `dev`, `.to` is a no-op and the view blows up mid
-        # generation. Measured 2026-09-08 on a 5x RTX 5090 autosplit box: "RuntimeError:
-        # view size is not compatible with input tensor's size and stride", which aborts
-        # the request and makes TabbyAPI reload the whole model.
-        path, conf = self.candidate_selector.select(
-            state[:, 1:].to(dev).contiguous(), unary[:, 1:].to(dev), candidates[:, 1:].to(dev), anchor,
-        )
-        # position 0: the plain argmax, kept only for shape
-        p0 = candidates[:, :1].to(dev).gather(-1, unary[:, :1].to(dev).argmax(-1, keepdim = True))[..., 0]
-        ids = torch.cat((p0, path), dim = 1)
-        if params.get("export_draft_conf"):
-            c0 = unary[:, :1].to(dev).max(dim = -1).values
-            params["draft_conf"] = torch.cat((c0, conf), dim = 1)
-        return ids
+    def default_chat_prompt(self, prompt: str, system_prompt: str = None) -> str:
+        raise NotImplementedError()
+
+
+    @classmethod
+    @override
+    def get_additional_compiled_tensors(cls, config: DFlash2Config) -> dict:
+        # Encoder norm (stored in DFlashInputLayer under a key that doesn't match the fc module
+        # prefix), conv base kernels and selector codebooks: raw tensors outside any Linear
+        tensors = dict(config.stc.list_tensors(prefix = cls.key_fc_norm))
+        tensors.update(config.stc.list_tensors(prefix = "candidate_selector."))
+        for idx in range(config.num_hidden_layers):
+            for conv in ("attention_conv", "mlp_conv"):
+                tensors.update(config.stc.list_tensors(
+                    prefix = f"layers.{idx}.{conv}.base_kernel"))
+        return tensors

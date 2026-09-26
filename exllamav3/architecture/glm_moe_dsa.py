@@ -126,6 +126,16 @@ class GlmMoeDsaModel(Model):
 
         self.first_block_idx = len(self.modules)
 
+        # DSA indexer groups for tensor-parallel placement: a "shared" layer reads the top-k
+        # selection published by the nearest preceding "full" layer (params dict, per process),
+        # so the group must live whole on one device
+        dsa_group = []
+        for idx in range(config.num_hidden_layers):
+            if config.indexer_types[idx] == "full":
+                dsa_group.append(idx)
+            else:
+                dsa_group.append(dsa_group[-1])
+
         self.modules += [
             TransformerBlock(
                 config = config,
@@ -157,6 +167,7 @@ class GlmMoeDsaModel(Model):
                     index_n_heads = config.index_n_heads,
                     index_head_dim = config.index_head_dim,
                     index_topk = config.index_topk,
+                    tp_affinity = f"dsa_indexer_group_{dsa_group[idx]}",
                 ),
                 mlp_norm = RMSNorm(
                     config = config,

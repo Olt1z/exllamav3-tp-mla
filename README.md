@@ -1,7 +1,7 @@
 <h1 align="center">ExLlamaV3 · <code>tp-mla</code></h1>
 
 <p align="center">
-  <a href="https://github.com/turboderp-org/exllamav3"><img alt="upstream" src="https://img.shields.io/badge/upstream-exllamav3%20v1.4.9-1f6feb?style=for-the-badge"></a>
+  <a href="https://github.com/turboderp-org/exllamav3"><img alt="upstream" src="https://img.shields.io/badge/upstream-exllamav3%20v1.5.2-1f6feb?style=for-the-badge"></a>
   <img alt="cuda" src="https://img.shields.io/badge/CUDA-12.4%2B-76b900?style=for-the-badge">
   <img alt="python" src="https://img.shields.io/badge/Python-3.10%2B-3776ab?style=for-the-badge">
   <a href="#licença"><img alt="license" src="https://img.shields.io/badge/license-MIT-blue?style=for-the-badge"></a>
@@ -53,7 +53,7 @@
 | **Context parallel na MLA** | Reparte o cache pela **sequência** e junta as parciais pelo `lse` | **1M de tokens em 2 placas** de 96 GB; o cache latente cai para `1/N` por placa e custa 4–5 % de decode |
 | **TP na `MLAttention`** | Fatia as **cabeças de query** entre as placas e replica o latente | Destrava GLM-5.3, GLM-5.3-Flash, DeepSeek V3/V3.1/R1, Kimi K2 e Mistral-4 em várias placas |
 | **Atenção fp16 no grafo CUDA** | `BC_MLAttention` e `BC_GatedDeltaNetSplit` aceitam projeções em 16 bits | **+37 % a +69 %** de decode, KL ≤ 0,00007 |
-| **Rascunho DFlash 2** | Arquitetura de rascunho própria, com taps no modelo alvo | **2,9–4,4** tokens aceitos por rodada; ganha do MTP em todos os prompts |
+| **DFlash 2 com alvo em TP** | O rascunho DFlash 2 do upstream, com o top-k do `lm_head` fatiado entre as placas | O upstream recusa alvo em TP; aqui ele gera. A implementação anterior do fork aceitava **2,9–4,4** tokens por rodada |
 | **Conversor mais rápido** | Captura sem sincronizar, estado em memória pinada, cronômetro por fase | **1,7×** mais rápido e KL melhor (0,00249 contra 0,00422) |
 
 ---
@@ -180,9 +180,18 @@ plantados em 5 %, 35 %, 65 % e 95 % do prompt voltaram exatos nos dois tamanhos.
 
 ## Tensor parallel para atenção latente
 
-Na v1.4.9 o padrão do motor é `supports_tp: True`, e a maioria das famílias já gera em várias
-placas. As que recusavam faziam isso por causa de uma peça só: a `MLAttention`, cujos
-`make_tp_allocation` e `tp_export` levantavam `NotImplementedError`.
+Até a v1.4.9 as famílias com `MLAttention` recusavam tensor parallel: `make_tp_allocation` e
+`tp_export` levantavam `NotImplementedError`. Foi isso que este fork destravou primeiro.
+
+Desde a v1.5.0 o upstream também põe a MLA em TP, com **outro desenho**: a camada roda inteira em
+UMA placa (`max_devices = 1`), as outras recebem um stub sem cabeças que só entra no all-reduce, e
+as camadas da DSA que compartilham o indexador ficam presas à mesma placa (`tp_affinity`). É o
+paralelismo de camada dentro do TP: o cache latente não se reparte e cada camada usa uma placa só.
+
+Este fork continua com a divisão por cabeças, porque é ela que torna possível o
+[context parallel](#context-parallel-o-cache-repartido-pela-sequência) — e com ele o 1M em duas
+placas. Do TP do upstream vêm o `tp_collect` (broadcast quando uma placa só tem cabeças) e o
+`affinity_key` do alocador, que continua servindo aos outros módulos.
 
 O desenho é **replicar o pequeno, fatiar as cabeças**:
 
@@ -198,7 +207,9 @@ Toda dimensão sai do módulo — `num_q_heads`, `qk_nope_head_dim`, `qk_rope_he
 GLM-5.3 (rope 64, nope 192), ao Flash (NoPE, nope 256, k-pool) e ao DeepSeek V3.
 
 O mesmo trabalho destravou a variante **KDA** do `GatedDeltaNet` (projeções `q`/`k`/`v`
-separadas, portas `f`/`g`, sem `z_proj`), que o Flash usa em 34 das suas 45 camadas.
+separadas, portas `f`/`g`, sem `z_proj`), que o Flash usa em 34 das suas 45 camadas. Desde a
+v1.5.0 o upstream também a fatia por cabeça, com a mesma conta, e o fork passou a usar a
+implementação dele; fica daqui o caminho de grafo com projeções fp16.
 
 Cada rank guarda uma cópia inteira do cache latente: é MQA, uma cabeça só, sem por onde fatiar
 por cabeça — a mesma escolha que vLLM e TensorRT-LLM fazem. Quem quer contexto longo reparte esse
@@ -284,13 +295,19 @@ Tudo desligado por padrão: sem `EXL3_TEL=1`, cada função é um `return`.
 
 ## Rascunho DFlash 2
 
-Arquitetura de rascunho própria (`exllamav3/architecture/dflash2.py` e
-`modules/arch_specific/dflash2.py`), que lê estados do modelo alvo por taps em vez de rodar um
-modelo separado do zero. Funciona com o alvo em tensor parallel, com os ids crus dos taps — a
-mesma convenção da implementação de referência e do SGLang.
+Desde a v1.5.0 o rascunho DFlash 2 é do upstream (`exllamav3/architecture/dflash2.py` e
+`modules/arch_specific/dflash2.py`), com a convolução dinâmica, o top-k e a caminhada do seletor em
+kernels CUDA. Ele recusa alvo em tensor parallel, porque o seletor precisa do top-k dos logits e os
+logits inteiros não existem num processo só. O fork acrescenta esse caminho: cada placa calcula o
+top-k da sua fatia do `lm_head` (`tp_dispatch_lm_head_topk`), o mestre funde as listas e o seletor
+do upstream recebe os candidatos prontos. As colunas de enchimento do `lm_head` saem da disputa.
 
-Aceita **2,9 a 4,4 tokens por rodada** e ganha do MTP em todos os prompts da régua na mesma
-máquina:
+> [!NOTE]
+> As medidas abaixo são da implementação anterior, própria do fork (06/09/2026), que lia os mesmos
+> checkpoints. A do upstream ainda não foi medida nesta bancada.
+
+A implementação anterior aceitava **2,9 a 4,4 tokens por rodada** e ganhava do MTP em todos os
+prompts da régua na mesma máquina:
 
 <div align="center">
 
