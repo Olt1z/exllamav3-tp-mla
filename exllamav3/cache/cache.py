@@ -3,6 +3,7 @@ from abc import ABC, abstractmethod
 from collections import deque
 from typing import Type
 import torch
+from ..constants import PAGE_SIZE
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from ..model import Model, Config
@@ -147,6 +148,11 @@ class Cache:
         self.initialized = False
         self.config = model.config
         self.max_num_tokens = max_num_tokens
+        # Paginas fisicas (PAGE_SIZE tokens) por pagina LOGICA do gerador. 1 fora de context
+        # parallel. Sob CP o gerador conta paginas de PAGE_SIZE * cp_world tokens (ver PageTable), e
+        # um cache que NAO reparte a sequencia -- o do rascunho, que roda inteiro no mestre -- guarda
+        # cada pagina logica em cp_world paginas suas. O Generator define isto; ver `tabela_fisica`.
+        self.paginas_por_logica = 1
 
         from .fp16 import CacheLayer_fp16
         self.layer_type = layer_type or CacheLayer_fp16
@@ -302,10 +308,18 @@ class Cache:
             "Cannot copy pages between TP and non-TP caches, or between distinct TP caches."
         assert target.num_layers == self.num_layers
         if not self.model.loaded_tp:
-            for instance, src in self.layers.items():
-                dst = target.layers[instance]
-                assert type(src) is type(dst)
-                dst.copy_page(src, from_page, to_page, num_tokens)
+            # Pagina logica maior que a fisica (rascunho sob context parallel, ver `tabela_fisica`):
+            # a copia cobre as r paginas fisicas dela, cada uma com a sua parte dos num_tokens
+            r = self.paginas_por_logica
+            assert target.paginas_por_logica == r, "copy_page entre caches com paginas logicas diferentes"
+            for s in range(r):
+                n = min(max(num_tokens - s * PAGE_SIZE, 0), PAGE_SIZE) if r > 1 else num_tokens
+                if n == 0:
+                    break
+                for instance, src in self.layers.items():
+                    dst = target.layers[instance]
+                    assert type(src) is type(dst)
+                    dst.copy_page(src, from_page * r + s, to_page * r + s, n)
         else:
             self.model.tp_cache_page_copy(id(self), from_page, to_page, num_tokens)
 
@@ -315,6 +329,44 @@ class Cache:
         for layer in self.layers.values():
             tensors += layer.get_tensors()
         return tensors
+
+
+    def tabela_fisica(self, block_table: torch.Tensor | None) -> torch.Tensor | None:
+        """
+        A tabela de paginas do gerador, em paginas fisicas deste cache.
+
+        Sob context parallel o gerador indexa paginas LOGICAS de PAGE_SIZE * cp_world tokens, e todo
+        kernel de cache e de atencao paginada le `block_table[pos // PAGE_SIZE]`, com PAGE_SIZE fixo em
+        256. Para o cache do alvo isso e certo (cada rank guarda PAGE_SIZE tokens intercalados de cada
+        pagina logica). Para o do rascunho, que nao reparte a sequencia, nao: a posicao 1.024 caia no
+        indice 4 de uma tabela contada em paginas de 1.024 -- a pagina logica 4, de outra posicao. Ate
+        ~4.096 tokens isso so corrompia o cache do rascunho em silencio; acima, o indice saia da tabela
+        e o kernel do cache Q8 escrevia fora da memoria (Xid 31, `q_cache.cu:228`, 26/09/2026, GLM-5.3-
+        Flash com DFlash 2 e EXL3_DCP=4 em 4x A100, com prompt de 9.605 tokens).
+
+        A pagina logica L vira as fisicas L*r .. L*r + r - 1: a mesma memoria contigua que uma pagina de
+        r * PAGE_SIZE tokens ocuparia, e o cache tem max_num_tokens // PAGE_SIZE paginas, exatamente r
+        vezes as logicas. Devolve um tensor NOVO: quem chama reaproveita o `block_index` entre voltas.
+        """
+        r = self.paginas_por_logica
+        if r == 1 or block_table is None:
+            return block_table
+        sub = torch.arange(r, dtype = block_table.dtype, device = block_table.device)
+        fisica = block_table.unsqueeze(-1) * r + sub
+        return fisica.reshape(*block_table.shape[:-1], block_table.shape[-1] * r)
+
+
+    def por_pagina_logica(self, t: torch.Tensor) -> torch.Tensor:
+        """Um tensor de cache (page-major) visto em paginas LOGICAS, para quem move paginas pelo indice
+        do gerador (rotacao da desfragmentacao, camada de cache em CPU). Mesma memoria, sem copia."""
+        r = self.paginas_por_logica
+        if r == 1 or t is None:
+            return t
+        return t.view(t.shape[0] // r, t.shape[1] * r, *t.shape[2:])
+
+
+    def get_all_tensors_logicas(self):
+        return [self.por_pagina_logica(t) for t in self.get_all_tensors()]
 
 
     def alloc_state(self, layer_instance, device: torch.Device):

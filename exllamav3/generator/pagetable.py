@@ -1025,7 +1025,8 @@ class PageTable:
             if c.model.loaded_tp:
                 c.model.tp_rotate_cache_pages(id(c), all_rotations_cpu)
             else:
-                for cache in c.get_all_tensors():
+                # Visao em paginas logicas: a rotacao chega com o indice do gerador (ver Cache.tabela_fisica)
+                for cache in c.get_all_tensors_logicas():
                     buffer = get_buffer(cache[0].shape, cache.device, cache.dtype)
                     all_rotations = get_all_rotations(cache.device)
                     ext.cache_rotate(cache, all_rotations, buffer)

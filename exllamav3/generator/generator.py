@@ -159,6 +159,10 @@ class Generator:
         if draft_model is not None:
             draft_model.tel_rascunho = True
         self.draft_cache = draft_cache
+        if draft_cache is not None:
+            # O rascunho nao reparte a sequencia: cada pagina logica do gerador ocupa page_tokens //
+            # PAGE_SIZE paginas dele. Ver `Cache.tabela_fisica`.
+            draft_cache.paginas_por_logica = self.page_tokens // PAGE_SIZE
         if draft_model:
             assert not ngram_match_min, \
                 "Cannot use both draft model and n-gram draft."
@@ -671,7 +675,7 @@ class Generator:
                 input_ids = batch_ids,
                 params = {
                     "attn_mode": "flash_attn",
-                    "block_table": block_index,
+                    "block_table": self.draft_cache.tabela_fisica(block_index),
                     "cache": self.draft_cache,
                     "cache_seqlens": cache_seqlens,
                 }
@@ -696,7 +700,7 @@ class Generator:
             input_ids = batch_ids,
             params = {
                 "attn_mode": "flash_attn",
-                "block_table": block_index,
+                "block_table": self.draft_cache.tabela_fisica(block_index),
                 "cache": self.draft_cache,
                 "cache_seqlens": cache_seqlens
             }
@@ -774,7 +778,7 @@ class Generator:
             params = {
                 "target_hidden": temp_hidden,
                 "attn_mode": "flash_attn",
-                "block_table": block_index,
+                "block_table": self.draft_cache.tabela_fisica(block_index),
                 "cache": self.draft_cache,
                 "cache_seqlens": cache_seqlens,
                 "draft_step": idx,   # heads specialized per depth pick their head from this
@@ -863,7 +867,7 @@ class Generator:
         # Run draft model
         params = {
             "attn_mode": "flash_attn",
-            "block_table": block_index,
+            "block_table": self.draft_cache.tabela_fisica(block_index),
             "cache": self.draft_cache,
             "cache_seqlens": cache_seqlens,
         }
@@ -1304,7 +1308,7 @@ class Generator:
                 cache = self.draft_cache,
                 lengths = accepted_lengths,
                 params = {
-                    "block_table": block_index,
+                    "block_table": self.draft_cache.tabela_fisica(block_index),
                     "cache_seqlens": p_cache_seqlens,
                 }
             )
@@ -1333,7 +1337,7 @@ class Generator:
                         batch_ids[a_idx:b_idx, 1:accepted_length],
                         {
                             "attn_mode": "flash_attn",
-                            "block_table": block_index[a_idx:b_idx],
+                            "block_table": self.draft_cache.tabela_fisica(block_index[a_idx:b_idx]),
                             "cache": self.draft_cache,
                             "cache_seqlens": p_cache_seqlens[a_idx:b_idx] + 1,
                             "target_hidden": target_hidden[a_idx:b_idx, :accepted_length - 1, :],

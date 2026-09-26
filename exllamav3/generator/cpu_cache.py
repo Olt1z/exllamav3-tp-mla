@@ -116,6 +116,8 @@ class CPUPageCache:
                 for t in layer.get_tensors():
                     if t is None:
                         continue
+                    # O indice guardado e o do gerador: pagina logica (ver Cache.tabela_fisica)
+                    t = cache.por_pagina_logica(t)
                     assert t.device.type == "cuda", \
                         "Cannot build CPU page cache tier before the model (and its cache tensors) are loaded."
                     page_shape = tuple(t.shape[1:])

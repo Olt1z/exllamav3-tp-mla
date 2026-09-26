@@ -1411,7 +1411,7 @@ class Job:
                         target_hidden = params.get("export_states"),
                         cache = self.generator.draft_cache,
                         params = {
-                            "block_table": seq.block_index_tensor,
+                            "block_table": self.generator.draft_cache.tabela_fisica(seq.block_index_tensor),
                             "cache_seqlens": params["cache_seqlens"],
                         }
                     )
@@ -1431,7 +1431,7 @@ class Job:
                         params = {
                             "target_hidden": shifted_hidden,
                             "attn_mode": "flash_attn",
-                            "block_table": seq.block_index_tensor,
+                            "block_table": self.generator.draft_cache.tabela_fisica(seq.block_index_tensor),
                             "cache": self.generator.draft_cache,
                             "cache_seqlens": torch.tensor([prefill_start], dtype = torch.int32),
                             "indexed_embeddings": self.embeddings if self.generator.mtp_draft else None,
