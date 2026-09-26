@@ -158,6 +158,24 @@ def paginas_do_job(prompt_tokens: int, total: int, cache: int, nao_sequenciais: 
     sys.stderr.flush()
 
 
+def pagina_parcial(tokens: int, pagina: int, de_graca: int) -> None:
+    """
+    Uma linha quando o job retoma do checkpoint de fim de prompt no meio de uma pagina.
+
+    `tokens` sao os reaproveitados daquela pagina, que antes o motor recalculava a cada turno: ate
+    1.023 sob context parallel 4, onde a pagina logica tem 1.024. `de_graca` e o total do prompt que
+    nao passou pelo prefill. Mesmo prefixo da linha de paginas, e pelo mesmo motivo.
+    """
+    if not _LIGADA:
+        return
+    import sys
+    sys.stderr.write(
+        f"[exl3_tel job] parcial: {tokens} tokens reaproveitados da pagina {pagina}, "
+        f"{de_graca} do cache no total\n"
+    )
+    sys.stderr.flush()
+
+
 def despejar() -> None:
     """Despeja o anel agora, sem esperar limiar. Para a captura sob demanda."""
     if _LIGADA:

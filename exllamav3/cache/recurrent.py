@@ -10,6 +10,12 @@ from ..util.memory import malloc_trim
 _TRIM_THRESHOLD = 256 * 1024**2
 _freed_bytes = 0
 
+# Quantos checkpoints de pagina PARCIAL (fim de prompt fora da fronteira de pagina) ficam guardados.
+# Cada um serve a UMA conversa, e so ate o turno seguinte dela: o turno seguinte grava o seu e o de
+# antes vira passado. Quatro cobre conversas alternadas sem deixar o LRU dos checkpoints de pagina
+# inteira -- os que retomam um prefixo longo -- ser expulso por eles.
+MAX_PARCIAIS = 4
+
 def note_freed(nbytes: int):
     global _freed_bytes
     _freed_bytes += nbytes
@@ -36,6 +42,8 @@ class RecurrentCache(OrderedDict):
             "stash_evictions_stranded": 0,  # of those, checkpoints that were already unrestorable
             "stash_evictions_live_kv": 0,   # of those, checkpoints whose anchor KV page was still cached
             "stash_pruned": 0,              # stranded checkpoints dropped by prune_stranded()
+            "parciais_guardados": 0,        # checkpoints de fim de prompt no meio da pagina
+            "parciais_descartados": 0,      # os que sairam pelo limite MAX_PARCIAIS
         }
 
 
@@ -49,14 +57,21 @@ class RecurrentCache(OrderedDict):
         return default
 
 
-    def put(self, key, state):
+    def put(self, key, state, parcial: dict | None = None):
         """
         Add state to cache
+
+        `parcial` marca um checkpoint de fim de prompt no MEIO de uma pagina (ver
+        `Job.maybe_stash_recurrent_parcial`): a chave nao e o hash de uma pagina, e sim o do prefixo da
+        pagina ate aquela posicao, e o dicionario leva `prev_hash` (a pagina anterior, a ancora da
+        cadeia) e `n` (quantos tokens da pagina o estado ja viu).
         """
         if key in self:
             self.move_to_end(key)
         else:
             stashed_state = state.stash()
+            if parcial is not None:
+                stashed_state["parcial"] = parcial
             state_size = stashed_state["checkpoint_size"]
             while self.update_total_size() + state_size > self.max_size:
                 assert self.current_size >= 0, "Not enough space in cache for single state"
@@ -68,8 +83,8 @@ class RecurrentCache(OrderedDict):
                 # extra cost, since the missing pages force a replay past this position either way.
                 popped_key = None
                 if pt is not None:
-                    for k in self:
-                        if not pt.is_resumable(k):
+                    for k, v in self.items():
+                        if self._encalhado(k, v):
                             popped_key = k
                             break
                 if popped_key is not None:
@@ -89,6 +104,44 @@ class RecurrentCache(OrderedDict):
 
             self[key] = stashed_state
             self.update_total_size()
+            if parcial is not None:
+                self.metrics["parciais_guardados"] += 1
+                parciais = [k for k, v in self.items() if "parcial" in v]
+                for k in parciais[:-MAX_PARCIAIS]:
+                    self._descartar(k)
+                    self.metrics["parciais_descartados"] += 1
+
+
+    def _descartar(self, key):
+        popped = self.pop(key)
+        note_freed(popped["checkpoint_size"])
+        if self.model.loaded_tp:
+            self.model.tp_dispatch_all(mp_cache_recurrent_del, (id(self), popped["tp_handle"]))
+        self.update_total_size()
+
+
+    def _encalhado(self, key, stashed) -> bool:
+        """
+        O checkpoint nunca mais pode ser restaurado.
+
+        O de pagina inteira depende da cadeia ate a pagina da chave. O parcial nao tem pagina com o
+        hash da chave -- a pagina dele ainda nao esta completa --, entao a ancora e a pagina ANTERIOR;
+        sem esta distincao o `is_resumable` diria que todo parcial esta encalhado, e o
+        `prune_stranded` do fim de fila apagaria cada um antes do turno seguinte chegar.
+        """
+        parcial = stashed.get("parcial")
+        if parcial is None:
+            return not self.pagetable.is_resumable(key)
+        prev = parcial["prev_hash"]
+        return prev is not None and not self.pagetable.is_resumable(prev)
+
+
+    def parciais(self, prev_hash):
+        """Os checkpoints parciais ancorados em `prev_hash`, como (chave, n, parcial)."""
+        for k, v in self.items():
+            p = v.get("parcial")
+            if p is not None and p["prev_hash"] == prev_hash:
+                yield k, p["n"], p
 
 
     def prune_stranded(self) -> int:
@@ -100,7 +153,7 @@ class RecurrentCache(OrderedDict):
         """
         if self.pagetable is None:
             return 0
-        stranded = [k for k in self if not self.pagetable.is_resumable(k)]
+        stranded = [k for k, v in self.items() if self._encalhado(k, v)]
         for k in stranded:
             popped = self.pop(k)
             self.metrics["stash_pruned"] += 1

@@ -36,6 +36,21 @@ def _randomhash():
 tensor_hash_checksum = _tensor_blake2b_checksum
 random_hash = _randomhash
 
+def chave_parcial(ids: torch.Tensor, prev_hash: bytes | None) -> bytes:
+    """
+    A chave de um checkpoint recorrente no MEIO de uma pagina: o hash do prefixo da pagina ate ali.
+
+    Prefixada para nunca coincidir com a de uma pagina inteira, que usa o mesmo blake2b sobre
+    `page_tokens` tokens: sem o prefixo, um prefixo parcial de uma pagina e a pagina inteira de
+    outra conversa so se separariam pelo tamanho, e o dicionario dos checkpoints e um so.
+    """
+    hasher = hashlib.blake2b(digest_size = 16, person = b"exl3-parcial")
+    if prev_hash is not None:
+        hasher.update(prev_hash)
+    hasher.update(ids.numpy().tobytes())
+    return hasher.digest()
+
+
 def is_content_hash(h: bytes) -> bool:
     # Random (placeholder) hashes are counter values whose top eight bytes stay zero; a blake2b content
     # hash matches that pattern with vanishing probability
@@ -522,6 +537,29 @@ class PageTable:
                     self.metrics["stashes_stranded"] += 1
 
 
+    def pagina_parcial(
+        self,
+        prev_hash: bytes | None,
+        ids: torch.Tensor,
+        n: int,
+        excluir: CachePage | None = None,
+    ) -> CachePage | None:
+        """
+        Uma pagina que ainda guarda K/V validos para os `n` primeiros tokens de `ids`, continuando
+        `prev_hash`.
+
+        Pelo CONTEUDO, e nao pelo indice: a desfragmentacao do fim de fila move as paginas, e uma
+        pagina liberada pode ter sido tomada por outra continuacao do mesmo prefixo. `kv_position`
+        diz ate onde o K/V dela vale; a comparacao token a token diz que e o mesmo texto.
+        """
+        for page in self.all_pages:
+            if page is excluir or page.prev_hash != prev_hash or page.kv_position < n:
+                continue
+            if ext.count_match_tensor(page.sequence, ids, n) >= n:
+                return page
+        return None
+
+
     def get_live_page(self, phash: bytes) -> CachePage | None:
         """
         Return the complete page currently holding phash, if any.
@@ -745,6 +783,13 @@ class PageTable:
         stash_bytes_anchored, stash_bytes_stranded = 0, 0
         for h, stash in recurrent_cache.items():
             size = stash.get("checkpoint_size", 0)
+            # O parcial nao tem pagina com o hash dele: a ancora e a pagina anterior (ou a raiz)
+            if "parcial" in stash:
+                h = stash["parcial"]["prev_hash"]
+                if h is None:
+                    stashes_anchored += 1
+                    stash_bytes_anchored += size
+                    continue
             if chain_complete(h):
                 stashes_anchored += 1
                 stash_bytes_anchored += size
