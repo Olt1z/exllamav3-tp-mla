@@ -127,7 +127,9 @@ class Model_TPMixin:
         self.mp_children: list = [None] * (num_devices + 1)
         self.mp_parent_conn: list = [None] * (num_devices + 1)
         self.mp_child_conn: list = [None] * (num_devices + 1)
-        self.tp_producer = SMProducer(buffer_size = 64 * 1024**2)
+        # A arena de inferencia transborda para arquivo, e nao para o share_memory_ do torch (ver
+        # SMProducer._transbordar): a tabela do mrope de um prompt longo com imagem passa dos 64 MiB
+        self.tp_producer = SMProducer(buffer_size = 64 * 1024**2, transbordo_em_arquivo = True)
 
         for rank, device in enumerate(self.active_devices + [-1]):
             log_tp(None, f"Spawning child process: {device}")

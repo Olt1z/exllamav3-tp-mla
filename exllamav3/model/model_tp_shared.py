@@ -3,6 +3,7 @@ import torch
 import numpy as np
 from multiprocessing import shared_memory
 import uuid
+import os
 from .model_tp_cuda import cuda_host_register, cuda_host_unregister, CUDA_HOST_REGISTER_PORTABLE
 from ..util.shm import check_shm_capacity
 
@@ -26,6 +27,7 @@ class SMProducer:
         self,
         shm_name: str | None = None,
         buffer_size: int = DEFAULT_BUFFER_SIZE,
+        transbordo_em_arquivo: bool = False,
     ):
         """
         Create the producer side of a shared-memory tensor transfer arena.
@@ -50,6 +52,46 @@ class SMProducer:
         # Cache
         self.cached_cpu_tensors = {}
         self.cache_size = 0
+
+        # Ver `_transbordar`. So a arena de inferencia liga: a de carga continua no share_memory_
+        self.transbordo_em_arquivo = transbordo_em_arquivo
+        self.segmentos: list[str] = []
+
+    def _transbordar(self, tensor: torch.Tensor, nbytes: int) -> dict:
+        """
+        O que nao cabe na arena vai para um arquivo em /dev/shm, com a vida presa a arena.
+
+        O caminho antigo era o `share_memory_()` do torch, com a estrategia `file_system`: o segmento
+        tem o nome do processo e some quando o storage e liberado, e o rank filho so o abre quando le a
+        mensagem -- que, com as confirmacoes adiadas, pode ser um passo depois. Em 27/09/2026 a `y3psf`
+        (GLM-5.3-Flash, TP4, 360k de contexto) morreu assim no primeiro pedido com IMAGEM: a tabela de
+        frequencias do mrope (`inv_freq`, uma linha por posicao do prompt inteiro, float32) passa dos
+        64 MiB da arena, caiu no fallback, e os tres filhos levantaram "unable to open shared memory
+        object </torch_550_...>: No such file or directory" ao desempacotar o comando.
+
+        O arquivo vive ate o proximo `clear()`, que so roda depois de todos os ranks confirmarem o passo
+        anterior -- a mesma garantia que ja protege o conteudo da arena. `close()` apaga o que sobrar.
+        """
+        caminho = f"/dev/shm/exl3-transbordo-{self.shm_name}-{uuid.uuid4().hex}"
+        tensor_d = tensor.view((1,)) if len(tensor.shape) == 0 else tensor
+        t_cpu = tensor_d.detach().cpu().contiguous()
+        t_cpu.view(torch.uint8).numpy().tofile(caminho)
+        self.segmentos.append(caminho)
+        return {
+            "method": "arquivo",
+            "path": caminho,
+            "nbytes": nbytes,
+            "dtype": str(tensor.dtype),
+            "shape": tuple(tensor.shape),
+        }
+
+    def _apagar_segmentos(self):
+        for caminho in self.segmentos:
+            try:
+                os.unlink(caminho)
+            except FileNotFoundError:
+                pass
+        self.segmentos = []
 
     def export(self):
         """
@@ -80,6 +122,8 @@ class SMProducer:
 
         # Fall back on slow sharing if buffer too small
         if self.next_offset + nbytes_align >= self.buffer_size:
+            if self.transbordo_em_arquivo:
+                return self._transbordar(tensor, nbytes)
             tensor.share_memory_()
             return {
                 "method": "share_memory",
@@ -128,8 +172,10 @@ class SMProducer:
         Reset the arena write pointer so subsequent sends can reuse the buffer.
         """
         self.next_offset = 0
+        self._apagar_segmentos()
 
     def close(self):
+        self._apagar_segmentos()
         self.shm.close()
         self.shm.unlink()
 
@@ -233,6 +279,13 @@ class SMConsumer:
         # Fallback method
         if method == "share_memory":
             tensor = imp["shared_tensor"]
+
+        # Transbordo da arena de inferencia (ver SMProducer._transbordar): le o arquivo inteiro para memoria
+        # propria deste processo, entao o produtor pode apaga-lo depois sem afetar o tensor recebido
+        elif method == "arquivo":
+            dtype = _torch_dtypes[imp["dtype"]]
+            bruto = torch.from_numpy(np.fromfile(imp["path"], dtype = np.uint8))
+            tensor = bruto.view(dtype).view(imp["shape"])
 
         # Construct Torch tensor in shared memory
         else:
