@@ -1,4 +1,7 @@
 from __future__ import annotations
+import os as _os
+import sys as _sys
+import traceback as _traceback
 import multiprocessing
 from multiprocessing import Process, Pipe
 from multiprocessing.reduction import ForkingPickler
@@ -17,6 +20,39 @@ from ..tokenizer.mm_embedding import send_embeddings
 
 cleanupper = Cleanupper()
 DISPATCH_TIMEOUT = 20
+
+
+# Ver `_tp_abortar`. Lido uma vez, no import: e decisao de operacao, nao de pedido.
+_ABORTAR_NA_FALHA = _os.environ.get("EXL3_TP_ABORTAR_NA_FALHA", "1") != "0"
+TP_DESSINCRONIZADO = 70
+
+
+def _tp_abortar(onde: str, e: BaseException):
+    """
+    O rank da saida falhou no meio de um passo com coletivos: encerra o processo em vez de seguir.
+
+    O pseudo-worker roda dentro do processo principal e e o ULTIMO a receber o comando, entao quando ele
+    levanta os outros ranks ja estao dentro dos coletivos daquele passo -- e ficam la. Seguir para o
+    proximo pedido e o pior caminho: o processo principal entra nos coletivos do passo seguinte com o mesmo
+    numero de sequencia do NCCL, os tamanhos nao batem, e o grupo trava ate o watchdog derrubar tudo
+    (EXLLAMA_TP_SYNC_TIMEOUT, 600 s), respondendo 503 "Maybe the model was unloaded?" nesse meio-tempo.
+
+    Foi o que se viu em 10/09/2026 na 50449460 (GLM-5.3 EXL3, TP4 com EXL3_DCP=4): OOM dentro do
+    `cp_combinar` em alguns ranks, e no mesmo SeqNum 16847 tres ranks num all-reduce de prefill (6144 x
+    4085) e o rank 3 num de decode (6144). Encerrar na hora troca 10 minutos travado por um reinicio do
+    conteiner (politica `unless-stopped`), e deixa no log o erro que causou, em vez do timeout que o
+    esconde. `EXL3_TP_ABORTAR_NA_FALHA=0` volta ao comportamento antigo.
+    """
+    _traceback.print_exception(type(e), e, e.__traceback__, file = _sys.stderr)
+    _sys.stderr.write(
+        f"[exl3] {onde}: o rank da saida falhou no meio de um passo com coletivos "
+        f"({type(e).__name__}: {e}). Os outros ranks ficaram presos nos coletivos desse passo, e seguir "
+        f"travaria o grupo ate o watchdog do NCCL. Encerrando o processo para o conteiner reiniciar "
+        f"(codigo {TP_DESSINCRONIZADO}; EXL3_TP_ABORTAR_NA_FALHA=0 desliga).\n"
+    )
+    _sys.stderr.flush()
+    _sys.stdout.flush()
+    _os._exit(TP_DESSINCRONIZADO)
 
 class Model_TPMixin:
 
@@ -703,7 +739,12 @@ class Model_TPMixin:
         msg = ForkingPickler.dumps((mp_model_forward, args))
         for device in self.active_devices:
             if device == self.tp_output_device:
-                self.tp_worker_dispatch(device, mp_model_forward, args)
+                try:
+                    self.tp_worker_dispatch(device, mp_model_forward, args)
+                except Exception as e:
+                    if _ABORTAR_NA_FALHA:
+                        _tp_abortar("prefill", e)
+                    raise
             else:
                 self.mp_parent_conn[device].send_bytes(msg)
         # Same deferred-ack scheme as forward_tp: only the inline pseudo-worker's result is
@@ -739,7 +780,13 @@ class Model_TPMixin:
         msg = ForkingPickler.dumps((mp_model_forward, args))
         for device in self.active_devices:
             if device == self.tp_output_device:
-                self.tp_worker_dispatch(device, mp_model_forward, args)
+                try:
+                    self.tp_worker_dispatch(device, mp_model_forward, args)
+                except Exception as e:
+                    # No warmup nao ha coletivo (ver acima): a falha ali e de carga, e sobe como sempre
+                    if _ABORTAR_NA_FALHA and not warmup:
+                        _tp_abortar("forward", e)
+                    raise
             else:
                 self.mp_parent_conn[device].send_bytes(msg)
         # The output-device pseudo-worker ran inline during the dispatch loop above, so its result
