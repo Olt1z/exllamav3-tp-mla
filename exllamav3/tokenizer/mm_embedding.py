@@ -21,6 +21,27 @@ class MMTokenAllocator:
 global_allocator = MMTokenAllocator()
 
 
+def embeddings_presentes(ids: torch.Tensor, embeddings: list | None) -> list | None:
+    """
+    So os embeddings indexados cujos ids aparecem em `ids`, na ordem em que vieram.
+
+    O forward so consulta um embedding quando algum id do passo cai na faixa dele. Sob tensor parallel,
+    porem, cada embedding passado nos params e serializado para todos os ranks a cada forward, use ele ou
+    nao. Em 28/09/2026 (i5v7s, GLM-5.3-Flash, TP4, duas imagens no contexto de 348k) eram 68 MB por passo
+    de decode, gravados em /dev/shm pelo processo principal e lidos por cada rank, com o pool do OpenMP
+    girando na copia. O decode nunca tem id de imagem (o token amostrado e o rascunho vem do
+    vocabulario), e o bloco de prefill so tem os da imagem que cai nele.
+
+    `ids` fica na CPU: o filtro nao pode custar uma sincronizacao com a GPU por passo.
+    """
+    if not embeddings:
+        return embeddings
+    mm = ids[ids >= FIRST_MM_EMBEDDING_INDEX]
+    if mm.numel() == 0:
+        return []
+    return [e for e in embeddings if bool(((mm >= e.first_index) & (mm < e.first_index + e.mm_length)).any())]
+
+
 class MMEmbedding:
     """
     Container for one embedding (image etc.) and associated metadata

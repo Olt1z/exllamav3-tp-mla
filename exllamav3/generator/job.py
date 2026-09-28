@@ -14,6 +14,7 @@ from .loop_detect import LoopDetector
 from .sampler import Sampler, DefaultSampler
 from ..util.tensor import SeqTensor
 from ..tokenizer import MMEmbedding
+from ..tokenizer.mm_embedding import embeddings_presentes
 from functools import lru_cache
 from ..util import profile_opt
 from ..util import telemetria as tel
@@ -1406,7 +1407,8 @@ class Job:
                     "cache": self.generator.cache,
                     "cache_seqlens": torch.tensor([prefill_start], dtype = torch.int32),
                     "recurrent_states": [self.recurrent_state] if self.recurrent_state is not None else None,
-                    "indexed_embeddings": self.embeddings,
+                    # So as imagens deste bloco: sob TP cada uma vai para todos os ranks; ver `embeddings_presentes`
+                    "indexed_embeddings": embeddings_presentes(prefill_ids, self.embeddings),
                     "inv_freq": self.alt_rope_freqs,
                     "mm_span_prefix": mm_span_prefix,
                 }

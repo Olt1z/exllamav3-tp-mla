@@ -21,6 +21,7 @@ from .visualizer import CacheVisualizer
 import time
 import threading
 from ..tokenizer import MMEmbedding
+from ..tokenizer.mm_embedding import embeddings_presentes
 from ..util import profile_opt
 
 class Generator:
@@ -1048,7 +1049,8 @@ class Generator:
             "cache": self.cache,
             "cache_seqlens": cache_seqlens,
             "recurrent_states": batch_states,
-            "indexed_embeddings": active_embeddings,
+            # Sob TP cada embedding passado aqui vai para todos os ranks a cada passo; ver `embeddings_presentes`
+            "indexed_embeddings": embeddings_presentes(batch_ids, active_embeddings),
             "positions": positions,
             "recurrent_history": draft_tokens is not None,
             "pinned_staging": True,
