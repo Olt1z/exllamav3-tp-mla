@@ -24,10 +24,19 @@ intervalo menos o dos filhos medidos. A soma dos exclusivos é o tempo coberto, 
 
 Nada aqui roda sem ser chamado: instrumentar substitui métodos de instância (o atributo da
 instância encobre o da classe), e desinstrumentar os devolve.
+
+Decode em lote (tests/bancada/medir_decode_lote.py): além do tempo na GPU, cada chamada guarda o
+tempo de PAREDE no host (perf_counter na entrada e na saída) -- o 4º campo da coleta, inclusivo. No
+decode a GPU espera a CPU, então host >> GPU num componente é lançamento Python ou sincronização.
+`mp_perfil_contar_syncs` conta, por componente aberto, as chamadas que bloqueiam o host na placa
+(.item(), .tolist(), .cpu() de tensor CUDA, torch.tensor(..., device = cuda), synchronize).
+`instrumentar_local` faz o mesmo com os módulos de um modelo do processo principal (a cabeça MTP,
+que o TabbyAPI carrega fora do TP).
 """
 from __future__ import annotations
 
 import collections
+import time
 
 import torch
 
@@ -84,26 +93,38 @@ class _Registro:
         if orig is None or getattr(orig, "_perfil_componentes", False):
             return 0
         reg = self
+        # O device do próprio módulo, quando ele tem um (a cabeça MTP pode estar em outra placa
+        # que a do registro); o stream corrente DESSE device é o que mede o trabalho dele
+        dev = getattr(obj, "device", None)
+        try:
+            dev = reg.device if dev is None else torch.device(dev)
+            if dev.type != "cuda":
+                dev = reg.device
+        except (TypeError, RuntimeError):
+            dev = reg.device
 
         def f(*a, **k):
             if not reg.ativo:
                 return orig(*a, **k)
             if reg.nvtx:
                 torch.cuda.nvtx.range_push(rotulo)
-            stream = torch.cuda.current_stream(reg.device)
+            stream = torch.cuda.current_stream(dev)
             e0 = torch.cuda.Event(enable_timing = True)
             e0.record(stream)
             pai = reg.pilha[-1] if reg.pilha else -1
             idx = len(reg.chamadas)
-            reg.chamadas.append([rotulo, pai, e0, None])
+            reg.chamadas.append([rotulo, pai, e0, None, time.perf_counter(), None])
             reg.pilha.append(idx)
+            _abertos.append(rotulo)
             try:
                 return orig(*a, **k)
             finally:
+                _abertos.pop()
                 reg.pilha.pop()
                 e1 = torch.cuda.Event(enable_timing = True)
-                e1.record(torch.cuda.current_stream(reg.device))
+                e1.record(torch.cuda.current_stream(dev))
                 reg.chamadas[idx][3] = e1
+                reg.chamadas[idx][5] = time.perf_counter()
                 if reg.nvtx:
                     torch.cuda.nvtx.range_pop()
 
@@ -127,6 +148,68 @@ class _Registro:
 
 
 _AUSENTE = object()
+
+# Rótulos abertos NESTE processo, de todos os registros (o do rank e o local da cabeça MTP): a
+# contagem de sincronizações atribui cada uma ao componente mais interno aberto, ou "fora"
+_abertos = []
+_syncs = collections.Counter()
+_syncs_originais = []
+
+
+def _contar_sync(motivo):
+    _syncs[(_abertos[-1] if _abertos else "fora")] += 1
+
+
+def _ligar_contagem_syncs():
+    if _syncs_originais:
+        return
+    T = torch.Tensor
+
+    def em_tensor(nome):
+        orig = getattr(T, nome)
+
+        def f(self, *a, **k):
+            if self.is_cuda:
+                _contar_sync(nome)
+            return orig(self, *a, **k)
+        _syncs_originais.append((T, nome, orig))
+        setattr(T, nome, f)
+
+    for nome in ("item", "tolist", "cpu"):
+        em_tensor(nome)
+
+    orig_tensor = torch.tensor
+
+    def tensor(*a, **k):
+        d = k.get("device")
+        if d is not None and torch.device(d).type == "cuda":
+            _contar_sync("torch.tensor")
+        return orig_tensor(*a, **k)
+    _syncs_originais.append((torch, "tensor", orig_tensor))
+    torch.tensor = tensor
+
+    orig_sync = torch.cuda.synchronize
+
+    def synchronize(*a, **k):
+        _contar_sync("synchronize")
+        return orig_sync(*a, **k)
+    _syncs_originais.append((torch.cuda, "synchronize", orig_sync))
+    torch.cuda.synchronize = synchronize
+
+
+def _desligar_contagem_syncs():
+    for obj, nome, orig in reversed(_syncs_originais):
+        setattr(obj, nome, orig)
+    _syncs_originais.clear()
+
+
+def mp_perfil_contar_syncs(local_context: dict, ligado: bool):
+    """Liga/desliga a contagem de sincronizações host-placa neste processo (ver o topo)."""
+    if ligado:
+        _ligar_contagem_syncs()
+    else:
+        _desligar_contagem_syncs()
+    _syncs.clear()
 
 
 def _rotulo(m) -> str:
@@ -173,6 +256,27 @@ def _digest(indices: torch.Tensor) -> tuple:
     )
 
 
+def _instrumentar_modulos(reg: _Registro, modules, prefixo: str = "") -> int:
+    n = 0
+    for m in modules:
+        filhos = [getattr(m, f, None) for f in _FILHOS_DO_BLOCO]
+        if not any(f is not None for f in filhos):
+            n += reg.envolver(m, "forward", prefixo + _rotulo(m))
+            continue
+        for f in filhos:
+            if f is None:
+                continue
+            n += reg.envolver(f, "forward", prefixo + _rotulo(f))
+            if type(f).__name__ == "MLAttention" and not prefixo:
+                n += _instrumentar_mla(reg, f)
+        for nome in ("attn_hc", "mlp_hc"):
+            hc = getattr(m, nome, None)
+            if hc is not None:
+                n += reg.envolver(hc, "mix", prefixo + "hc")
+                n += reg.envolver(hc, "apply_", prefixo + "hc")
+    return n
+
+
 def mp_perfil_instrumentar(local_context: dict) -> int:
     """Envolve os componentes deste rank. Idempotente. Devolve quantos pontos foram envolvidos."""
     reg = local_context.get("_perfil_componentes")
@@ -181,28 +285,21 @@ def mp_perfil_instrumentar(local_context: dict) -> int:
     device = local_context["device"]
     reg = _Registro(device)
     local_context["_perfil_componentes"] = reg
-    n = 0
-    for m in local_context["modules"]:
-        filhos = [getattr(m, f, None) for f in _FILHOS_DO_BLOCO]
-        if not any(f is not None for f in filhos):
-            n += reg.envolver(m, "forward", _rotulo(m))
-            continue
-        for f in filhos:
-            if f is None:
-                continue
-            n += reg.envolver(f, "forward", _rotulo(f))
-            if type(f).__name__ == "MLAttention":
-                n += _instrumentar_mla(reg, f)
-        for nome in ("attn_hc", "mlp_hc"):
-            hc = getattr(m, nome, None)
-            if hc is not None:
-                n += reg.envolver(hc, "mix", "hc")
-                n += reg.envolver(hc, "apply_", "hc")
+    n = _instrumentar_modulos(reg, local_context["modules"])
     backend = local_context["backend"]
     for rotulo, metodo in _COLETIVOS:
         if hasattr(backend, metodo):
             n += reg.envolver(backend, metodo, rotulo)
     return n
+
+
+def instrumentar_local(modules, device, prefixo: str = "mtp.") -> dict:
+    """Instrumenta os módulos de um modelo do PROCESSO PRINCIPAL (fora do TP), com rótulos
+    prefixados. Devolve um local_context mínimo para usar com mp_perfil_colher / _zerar / _ativar
+    / _desinstrumentar diretamente (sem despacho)."""
+    reg = _Registro(torch.device(device))
+    _instrumentar_modulos(reg, modules, prefixo)
+    return {"_perfil_componentes": reg, "device": torch.device(device)}
 
 
 def mp_perfil_desinstrumentar(local_context: dict):
@@ -219,20 +316,23 @@ def mp_perfil_zerar(local_context: dict):
         reg.pilha.clear()
         reg.digests.clear()
         reg.indices_guardados.clear()
+    _syncs.clear()
 
 
 def mp_perfil_colher(local_context: dict, zerar: bool = True) -> dict:
-    """{rótulo: (chamadas, ms inclusivo, ms exclusivo)} deste rank desde o último zerar."""
+    """{rótulo: (chamadas, ms inclusivo, ms exclusivo, ms de host inclusivo)} deste rank desde o
+    último zerar."""
     reg = local_context.get("_perfil_componentes")
     if reg is None:
         return {}
     torch.cuda.synchronize(reg.device)
     dur = [c[2].elapsed_time(c[3]) if c[3] is not None else 0.0 for c in reg.chamadas]
+    host = [(c[5] - c[4]) * 1000.0 if c[5] is not None else 0.0 for c in reg.chamadas]
     filhos = [0.0] * len(dur)
     for i, c in enumerate(reg.chamadas):
         if c[1] >= 0:
             filhos[c[1]] += dur[i]
-    tab = collections.defaultdict(lambda: [0, 0.0, 0.0])
+    tab = collections.defaultdict(lambda: [0, 0.0, 0.0, 0.0])
     for i, c in enumerate(reg.chamadas):
         t = tab[c[0]]
         t[0] += 1
@@ -244,9 +344,21 @@ def mp_perfil_colher(local_context: dict, zerar: bool = True) -> dict:
             p = reg.chamadas[p][1]
         if p < 0:
             t[1] += dur[i]
+            t[3] += host[i]
+    out = {k: tuple(v) for k, v in tab.items()}
     if zerar:
         mp_perfil_zerar(local_context)
-    return {k: tuple(v) for k, v in tab.items()}
+    return out
+
+
+def mp_perfil_syncs(local_context: dict, zerar: bool = True) -> dict:
+    """{rótulo: sincronizações} deste PROCESSO desde o último zerar (com a contagem ligada). No
+    rank de saída, que roda no processo principal, entram as do gerador ("fora") e as da cabeça
+    MTP ("mtp.*"). Chamar ANTES de mp_perfil_colher, que zera a contagem."""
+    out = dict(_syncs)
+    if zerar:
+        _syncs.clear()
+    return out
 
 
 def mp_perfil_conferir(local_context: dict, ligado: bool, guardar_camada: int | None = None):
@@ -312,4 +424,26 @@ def mp_descrever_mla(local_context: dict) -> list:
         if a is not None and type(a).__name__ == "MLAttention":
             out.append((a.layer_idx, a.indexer_mode, a.num_q_heads, a.tp_mundo, a.tp_rank,
                         a.tp_coletivo_ok, a.cp_world))
+    return out
+
+
+def mp_definir_decode_lote(local_context: dict, kpool_lote: bool, pool_kernel: bool):
+    """Liga/desliga, NESTE processo, o grafo da MLA kpool em lote (attention_fn/bc_mla.py:
+    kpool_lote) e o kernel do plano agrupado no eager (mla_attn._pool_kernel_eager). Despachar
+    a todos os ranks juntos, entre dois forwards (o processo principal também roda a cabeça MTP,
+    e o rank de saída é ele mesmo)."""
+    from ..modules import mla_attn
+    from ..modules.attention_fn import bc_mla
+    bc_mla.kpool_lote = bool(kpool_lote)
+    mla_attn._pool_kernel_eager = bool(pool_kernel)
+    return (bc_mla.kpool_lote, mla_attn._pool_kernel_eager)
+
+
+def mp_contagem_kpool_lote(local_context: dict, zerar: bool = True) -> dict:
+    """Quantos passos de MLA kpool com bsz > 1 foram ao grafo e por que os outros recusaram
+    (desligado / recusa_esparso / recusa_ext = extensão sem o lote)."""
+    from ..modules.attention_fn import bc_mla
+    out = dict(bc_mla.contagem_kpool_lote)
+    if zerar:
+        bc_mla.contagem_kpool_lote.clear()
     return out

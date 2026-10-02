@@ -1,3 +1,5 @@
+import collections
+import os
 import torch
 from ...util.device_copy import to_device
 
@@ -29,6 +31,26 @@ Follows bc_attn.py; shares its enable flag (EXL3_BC_ATTN=0 disables both). Unsup
 module/cache configurations fall back to the dispatch path by design (build_bc_mla returns
 None); unexpected failures while building raise.
 """
+
+# Lote no regime DENSO das camadas kpool (GLM-5.3): sem isto, todo passo com bsz > 1 recusa o grafo
+# e as 11 MLA do GLM-5.3-Flash caem no despacho eager, com um laco Python por linha no plano
+# agrupado do indexador (_update_pool_plane) -- o decode com 4 pedidos simultaneos ficava 12x mais
+# lento que com 1. No denso o grafo ja trata o lote: o append da chave e do gate e por linha
+# (R programas) e a atualizacao dos pools roda em grade (bsz, q_len / P + 1), lendo cache_seqlens
+# de cada linha. O esparso continua so com um job (a pontuacao em lote conta tokens, e o plano
+# agrupado conta pools). Padrao desligado; pede a extensao compilada deste branch (a antiga recusa
+# o lote no C++ e o passo cai no eager, contado em `contagem_kpool_lote["recusa_ext"]`).
+kpool_lote = os.environ.get("EXL3_BC_MLA_KPOOL_LOTE", "0") == "1"
+contagem_kpool_lote = collections.Counter()
+_MSG_EXT_ANTIGA = "kpool indexer requires bsz 1"
+
+
+def kpool_lote_aceito(index_kpool: int, bsz: int, regime: int, ligado: bool, recusado: bool) -> bool:
+    """O passo de uma camada kpool pode ir ao grafo? Lote 1 sempre; lote > 1 so no regime denso,
+    com o lote ligado e a extensao aceitando."""
+    if not index_kpool or bsz == 1:
+        return True
+    return regime == 0 and ligado and not recusado
 
 
 class BCMLA:
@@ -205,6 +227,7 @@ class BCMLA:
 
         self.slot_indices = {}
         self.configured = set()
+        self.kpool_lote_recusado = False
 
     def _configure(self, bsz: int, q_len: int, regime: int):
         import triton
@@ -596,11 +619,6 @@ class BCMLA:
     ) -> torch.Tensor | None:
         bsz, q_len, _ = x.shape
 
-        # kpool slots are single-job only: the batched scoring path derives token-unit
-        # bounds on device, and the pooled scan counts pools
-        if self.index_kpool and bsz > 1:
-            return None
-
         if self.indexer_mode is None:
             regime, t_total, ext_indices = 0, 0, None
         else:
@@ -621,6 +639,17 @@ class BCMLA:
                         return None
                     ext_indices = to_device(ext_indices, x.device)
 
+        # kpool sparse slots are single-job only: the batched scoring path derives token-unit
+        # bounds on device, and the pooled scan counts pools. O denso em lote vai ao grafo atras
+        # de EXL3_BC_MLA_KPOOL_LOTE (ver kpool_lote no topo)
+        if self.index_kpool and bsz > 1:
+            # (sob context parallel o lote kpool fica no eager, como antes: nao provado la)
+            if not kpool_lote_aceito(self.index_kpool, bsz, regime, kpool_lote and self.cp_world == 1,
+                                     self.kpool_lote_recusado):
+                contagem_kpool_lote["recusa_esparso" if regime else
+                                    ("recusa_ext" if self.kpool_lote_recusado else "desligado")] += 1
+                return None
+
         if (bsz, q_len, regime) not in self.configured:
             try:
                 self._configure(bsz, q_len, regime)
@@ -629,8 +658,19 @@ class BCMLA:
             self.configured.add((bsz, q_len, regime))
         y = torch.empty((bsz, q_len, self.hidden_size), dtype = self.o_dtype, device = x.device)
         if self.cp_world == 1:
-            self.bc.run(bsz, q_len, x, y, cache_seqlens, block_table, position, positions,
-                        position_ids, regime, t_total, ext_indices)
+            try:
+                self.bc.run(bsz, q_len, x, y, cache_seqlens, block_table, position, positions,
+                            position_ids, regime, t_total, ext_indices)
+            except RuntimeError as e:
+                # Extensao de antes do lote kpool: o TORCH_CHECK roda antes de qualquer lancamento,
+                # entao nada foi gravado e o eager refaz o passo inteiro
+                if not (self.index_kpool and bsz > 1 and _MSG_EXT_ANTIGA in str(e)):
+                    raise
+                self.kpool_lote_recusado = True
+                contagem_kpool_lote["recusa_ext"] += 1
+                return None
+            if self.index_kpool and bsz > 1:
+                contagem_kpool_lote["grafo"] += 1
         else:
             # Duas fases capturadas com o combine entre os ranks em eager no meio (os coletivos
             # nao entram no bloco gravado, como o all-reduce do TP que roda depois dele)

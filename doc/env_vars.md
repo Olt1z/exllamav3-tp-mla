@@ -196,6 +196,30 @@ and short chunks keep the replicated path. Side effect: near-tie selections no l
 between ranks. See `exllamav3/modules/attention_fn/indexador_dividido.py` and
 `tests/bancada/medir_componentes.py`.
 
+### `EXL3_BC_MLA_KPOOL_LOTE` (default: `0`)
+
+GLM-5.3 (DSA indexer with k-pool): with `1`, decode/verify steps with more than one job (bsz 2..8)
+run the graph-captured MLA block in the dense regime (visible context <= `index_topk`) instead
+of declining to the eager dispatch path. The sparse regime stays single-job. Needs the extension
+built from this branch; an older extension raises inside `BC_MLAttention.run` before launching
+anything and the step falls back to eager (counted as `recusa_ext`). Not used under context
+parallel. See `tests/bancada/medir_decode_lote.py`.
+
+### `EXL3_POOL_KERNEL_EAGER` (default: `0`)
+
+GLM-5.3, eager MLA path: with `1`, the pooled indexer-key plane is updated for all rows with one
+launch of the same Triton kernel the graph uses, instead of a Python loop per row. Changes the
+fp32 summation order of the pooled keys. (The loop itself no longer syncs the stream: the pool
+index comes from the device `cache_seqlens`.)
+
+### `EXL3_REWIND_LOTE` (default: `0`), `EXL3_MTP_PREFILL_LOTE` (default: `0`)
+
+Generator with a draft model, batched decode: `EXL3_REWIND_LOTE=1` defers the per-job recurrent
+state rewinds of a verification round and runs them together after sampling (one dispatch to the
+TP ranks instead of one per job). `EXL3_MTP_PREFILL_LOTE=1` absorbs the accepted positions into
+the MTP head's cache with one prefill per accepted length instead of one per job. Both are also
+`Generator` attributes (`rewind_lote`, `mtp_prefill_lote`).
+
 ### `EXL3_PREFER_FA2` (default: `0`)
 
 Put the flash-attn-2 backends ahead of the built-in Triton attention kernels in the dispatch

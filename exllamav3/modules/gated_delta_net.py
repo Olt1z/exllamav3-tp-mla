@@ -102,6 +102,37 @@ def mp_cache_recurrent_rewind(local_context: dict, cache_id: int, slot: int, las
     _dispatch_rewind_jobs(_collect_rewind_jobs(layers, slot, last_history, num_tokens))
 
 
+def _juntar_rewind_jobs(layers, pendentes):
+    """_collect_rewind_jobs de varios slots num so dicionario por device: um par de lancamentos
+    (conv + estado) para o lote inteiro. Slots diferentes nao se sobrepoem, entao a ordem entre
+    eles nao importa; dentro de um slot a descricao e a mesma do rewind avulso."""
+    juntos = {}
+    for slot, last_history, num_tokens in pendentes:
+        for dev, (cj, sj) in _collect_rewind_jobs(layers, slot, last_history, num_tokens).items():
+            acc = juntos.setdefault(dev, ([], []))
+            acc[0].extend(cj)
+            acc[1].extend(sj)
+    return juntos
+
+
+def mp_cache_recurrent_rewind_lote(local_context: dict, cache_id: int, pendentes: list):
+    recurrent_modules = local_context["recurrent_modules"]
+    layers = [module.tp_recurrent_lookup[cache_id] for module in recurrent_modules]
+    _dispatch_rewind_jobs(_juntar_rewind_jobs(layers, pendentes))
+
+
+def rewind_em_lote(cache, pendentes: list):
+    """Executa os rewinds adiados por GDNState.rewind_adiado: no TP, UMA ida e volta aos ranks para
+    o lote inteiro, em vez de uma por job (o gerador rebobina todo job em todo passo com rascunho,
+    nem que seja rewind(0) para normalizar o conv_state)."""
+    if not pendentes:
+        return
+    if not cache.model.loaded_tp:
+        _dispatch_rewind_jobs(_juntar_rewind_jobs(cache.get_all_recurrent_layers().values(), pendentes))
+    else:
+        cache.model.tp_dispatch_all(mp_cache_recurrent_rewind_lote, (id(cache), list(pendentes)))
+
+
 class GDNState:
 
     def __init__(
@@ -151,6 +182,15 @@ class GDNState:
             ))
         else:
             self.cache.model.tp_dispatch_all(mp_cache_recurrent_rewind, (id(self.cache), self.slot, self.last_history, num_tokens))
+        self.position -= num_tokens
+        self.last_history = 0
+
+
+    def rewind_adiado(self, num_tokens: int, pendentes: list):
+        """Como rewind(), mas so anota o trabalho na placa em `pendentes` (slot, historico,
+        tokens); quem chamou executa a lista com rewind_em_lote antes de qualquer outro uso do
+        estado deste slot. A posicao e o historico mudam ja, como no rewind imediato."""
+        pendentes.append((self.slot, self.last_history, num_tokens))
         self.position -= num_tokens
         self.last_history = 0
 

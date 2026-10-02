@@ -943,7 +943,11 @@ void BC_MLAttention::run
     TORCH_CHECK(regime == 0 || idx_mode != 0, "BC_MLAttention: sparse regime without indexer");
     TORCH_CHECK(idx_mode != 2 || regime == 0 || ext_indices,
                 "BC_MLAttention: shared-indexer sparse step requires external indices");
-    TORCH_CHECK(!index_kpool || bsz == 1, "BC_MLAttention: kpool indexer requires bsz 1");
+    // kpool em lote so no regime denso: o append da chave/gate e por linha e a atualizacao dos
+    // pools roda em grade (bsz, q_len / P + 1) lendo cache_seqlens de cada linha. O esparso
+    // (pontuacao sobre o plano agrupado + expansao) continua de um job so
+    TORCH_CHECK(!index_kpool || bsz == 1 || regime == 0,
+                "BC_MLAttention: kpool indexer requires bsz 1 in the sparse regime");
 
     // First run per slot executes eagerly (GEMM autotune, kernel warmup); the second run is
     // captured, then launched below like every later run, with only the I/O pointers patched.

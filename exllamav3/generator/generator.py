@@ -21,6 +21,7 @@ from concurrent.futures import ThreadPoolExecutor
 from .sampler import Sampler
 from .visualizer import CacheVisualizer
 import time
+import os
 import threading
 import dataclasses
 from ..tokenizer import MMEmbedding
@@ -330,6 +331,16 @@ class Generator:
                           f"(max_history = {hist}); cópias limitadas a {hist}. Construa o Cache com "
                           f"max_history >= EXL3_COPIA_MAX")
                     self.copia = dataclasses.replace(self.copia, maximo = hist)
+        # Decode em lote com rascunho (padrão desligado; a bancada medir_decode_lote.py alterna os
+        # atributos entre rodadas):
+        # - rewind_lote: os rewinds dos estados recorrentes do passo (todo job rebobina em todo
+        #   passo, nem que seja rewind(0)) vão juntos no fim da amostragem, numa ida e volta aos
+        #   ranks do TP só, em vez de uma por job
+        # - mtp_prefill_lote: a cabeça MTP absorve as posições aceitas num prefill por COMPRIMENTO
+        #   aceito (no máximo num_draft_tokens forwards), em vez de um prefill por job
+        self.rewind_lote = os.environ.get("EXL3_REWIND_LOTE", "0") == "1"
+        self.mtp_prefill_lote = os.environ.get("EXL3_MTP_PREFILL_LOTE", "0") == "1"
+
         # Maior janela de rascunho de uma rodada: dimensiona a folga de páginas do job (job.py)
         self.janela_max = max(self.num_draft_tokens, self.copia.maximo if self.copia is not None else 0)
         self._copia_rodada = None
@@ -1248,6 +1259,17 @@ class Generator:
 
         # Reject the trailing draft positions after the last accepted token at index i: count them, roll back the
         # job's recurrent state and return cache pages to the accepted position
+        # Rewinds adiados (rewind_lote): executados juntos logo depois do laço de amostragem, antes
+        # de qualquer outro uso dos estados (o stash de requeue, o próximo forward). Cada job só
+        # mexe no próprio slot, e o rewind de um job é a última coisa que o laço faz com ele
+        rewinds_pendentes = [] if self.rewind_lote and batch_states is not None else None
+
+        def rewind_estado(state, n):
+            if rewinds_pendentes is not None and hasattr(state, "rewind_adiado"):
+                state.rewind_adiado(n, rewinds_pendentes)
+            else:
+                state.rewind(n)
+
         def reject_remainder(job_, j_, i_, batch_states_):
             num_rejected = batch_logits.shape[1] - 1 - i_
             if num_rejected == 0:
@@ -1256,7 +1278,7 @@ class Generator:
 
             # Rewind recurrent states
             if batch_states_ is not None:
-                batch_states_[j_].rewind(num_rejected)
+                rewind_estado(batch_states_[j_], num_rejected)
 
             # Rewind cache position (draft model cache layout is always the same as target)
             for seq_ in job_.sequences:
@@ -1413,7 +1435,7 @@ class Generator:
 
                 # Make sure outgoing state is valid if entire draft was accepted
                 if batch_states and draft_tokens is not None and rejected == 0:
-                    batch_states[j].rewind(0)
+                    rewind_estado(batch_states[j], 0)
 
                 # Rodada de cópia: conta o que a cópia propôs e o que dela foi aceito
                 if copia_rodada is not None and copia_rodada["usa"][j]:
@@ -1444,6 +1466,10 @@ class Generator:
 
                 accepted_lengths.append(accepted_length)
                 j += 1
+
+        if rewinds_pendentes:
+            from ..modules.gated_delta_net import rewind_em_lote
+            rewind_em_lote(batch_states[0].cache, rewinds_pendentes)
 
         # Update the draft-confidence calibration with this round's verification outcomes (any
         # draft-model mode)
@@ -1508,6 +1534,9 @@ class Generator:
         if self.mtp_draft:
             target_hidden = p_export_states[-1]
             accepted_idx = 0
+            # mtp_prefill_lote: comprimento aceito -> faixas (a_idx, b_idx) dos jobs, absorvidas
+            # juntas depois do laço (um prefill da cabeça por comprimento, não por job)
+            mtp_grupos = {} if self.mtp_prefill_lote else None
             for job, a_idx, b_idx in zip(self.active_jobs, logit_mapping[:-1], logit_mapping[1:]):
                 if a_idx == b_idx:
                     continue
@@ -1546,6 +1575,8 @@ class Generator:
 
                 # Position K was drafted from the last target state already. Replace accepted
                 # speculative positions K+1..K+A-1 with the corresponding target-state inputs.
+                elif accepted_length > 1 and mtp_grupos is not None:
+                    mtp_grupos.setdefault(accepted_length, []).append((a_idx, b_idx))
                 elif accepted_length > 1:
                     self.draft_model.prefill(
                         batch_ids[a_idx:b_idx, 1:accepted_length],
@@ -1562,6 +1593,9 @@ class Generator:
                 job.mtp_last_hidden = target_hidden[
                     a_idx:b_idx, accepted_length - 1:accepted_length, :
                 ].clone()
+
+            if mtp_grupos:
+                self._mtp_prefill_em_lote(mtp_grupos, batch_ids, block_index, p_cache_seqlens, target_hidden)
 
         # Release pages for completed jobs. Finished and requeued jobs no longer need their active page references.
         # Requeued recurrent jobs may stash the last checkpoint first so the next queued job can resume from cached
@@ -1583,6 +1617,27 @@ class Generator:
         # Defrag. Physical page indices can only be compacted when no active block tables are using them.
         if num_jobs and not self.num_remaining_jobs():
             self.on_queue_drained()
+
+
+    def _mtp_prefill_em_lote(self, grupos: dict, batch_ids, block_index, cache_seqlens, target_hidden):
+        """Absorção das posições aceitas pela cabeça MTP, um prefill por comprimento aceito A: as
+        linhas dos jobs que aceitaram A tokens entram juntas, cada uma com as entradas K+1..K+A-1
+        e os estados do alvo das posições anteriores -- o mesmo que o prefill por job faz, linha
+        a linha. As fatias são juntadas por cat (nenhuma cópia host -> placa bloqueante)."""
+        for A, faixas in sorted(grupos.items()):
+            def juntar(t):
+                partes = [t[a:b] for a, b in faixas]
+                return partes[0] if len(partes) == 1 else torch.cat(partes, dim = 0)
+            self.draft_model.prefill(
+                juntar(batch_ids)[:, 1:A],
+                {
+                    "attn_mode": "flash_attn",
+                    "block_table": self.draft_cache.tabela_fisica(juntar(block_index)),
+                    "cache": self.draft_cache,
+                    "cache_seqlens": juntar(cache_seqlens) + 1,
+                    "target_hidden": juntar(target_hidden[:, :A - 1, :]),
+                },
+            )
 
 
     def reap_failed_job(self, job, error, results: list):

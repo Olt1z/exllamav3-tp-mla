@@ -53,6 +53,13 @@ assert _score_tile % 256 == 0 and _score_tile > 0
 _indexador_dividido = os.environ.get("EXL3_INDEXADOR_DIVIDIDO", "0") == "1"
 _indexador_dividido_min = int(os.environ.get("EXL3_INDEXADOR_DIVIDIDO_MIN_LINHAS", 1024))
 
+# Plano agrupado do indexador kpool (GLM-5.3) no caminho eager: com 1, os pools tocados pelo append
+# de TODAS as linhas sao refeitos por um lancamento do mesmo kernel Triton que o grafo usa
+# (_dsa_pool_update_kernel), em vez do laco Python por linha (~15 lancamentos cada). Muda a ordem
+# das somas em fp32 (o kernel contra o softmax do torch), por isso fica atras da env; padrao
+# desligado. Global de modulo para a bancada alternar sem recarregar (perfil_componentes.py).
+_pool_kernel_eager = os.environ.get("EXL3_POOL_KERNEL_EAGER", "0") == "1"
+
 
 
 def _host_seqlens(params: dict, cache_seqlens: torch.Tensor) -> list:
@@ -650,17 +657,39 @@ class MLAttention(Module):
         return indices
 
 
-    def _update_pool_plane(self, idx_layer, block_table, host_seqlens, seqlen):
+    def _update_pool_plane(self, idx_layer, block_table, host_seqlens, seqlen, cache_seqlens = None):
         """
         Incrementally extend the pooled-key plane with the pools completed by this chunk's
         append. A pool's key is the (gate_scores + APE)-softmax-weighted mean of its
         index_kpool members' keys; members are read back from the packed per-token plane
         (already appended), so pools straddling chunk boundaries resolve correctly. Complete
         pools are immutable, so each is written exactly once.
+
+        `cache_seqlens`: os comprimentos ANTES do append, na placa (os mesmos de host_seqlens).
+        Com eles o primeiro pool de cada linha sai de uma divisao na placa; sem eles, de um
+        torch.tensor(..., device = placa), que e uma copia bloqueante: sincronizava o stream uma
+        vez por linha em toda camada "full", e no TP cada sincronizacao trava o rank ate o
+        all-reduce anterior fechar em todos.
         """
         P, D_i = self.index_kpool, self.index_head_dim
         plane = idx_layer.get_idx()
         epp = plane.shape[1]
+
+        if (_pool_kernel_eager and cache_seqlens is not None and block_table.dim() == 2 and
+                cache_seqlens.dtype == torch.int32 and block_table.dtype == torch.int32):
+            # Um lancamento para o lote inteiro: o kernel le cache_seqlens de cada linha, refaz os
+            # pools tocados (os parciais tambem, que a selecao nunca escolhe: o limite causal so
+            # admite pools completos) -- exatamente o que o grafo faz no decode de lote 1
+            from .attention_fn.dsa_triton import _dsa_pool_update_kernel
+            bt = block_table.contiguous()
+            _dsa_pool_update_kernel[(bt.shape[0], seqlen // P + 1)](
+                plane, idx_layer.get_pool(), self.idx_kpool_ape, bt, cache_seqlens.contiguous(),
+                bt.shape[1], seqlen,
+                page_size = epp, P = P, D = D_i,
+                MAXPOOLS = 0,   # so documenta a altura da grade; fixo para nao recompilar por chunk
+            )
+            return
+
         flat = plane.view(-1, 2 * D_i)
         ape = self.idx_kpool_ape
         for b in range(block_table.shape[0] if block_table.dim() == 2 else 1):
@@ -677,8 +706,12 @@ class MLAttention(Module):
             keys, gates = members[..., :D_i], members[..., D_i:]
             probs = torch.softmax(gates + ape.unsqueeze(0), dim = 1)
             pool_keys = (probs * keys).sum(dim = 1).to(torch.half)
+            if cache_seqlens is not None:
+                pool_seqlens = cache_seqlens[b : b + 1].div(P, rounding_mode = "floor").to(torch.int32)
+            else:
+                pool_seqlens = torch.tensor([first_pool], dtype = torch.int32, device = plane.device)
             idx_layer.update_pool_direct(
-                torch.tensor([first_pool], dtype = torch.int32, device = plane.device),
+                pool_seqlens,
                 bt.unsqueeze(0) if bt.dim() == 1 else bt,
                 pool_keys.unsqueeze(0),
             )
@@ -936,7 +969,8 @@ class MLAttention(Module):
             if idx_layer is not None:
                 idx_layer.update_idx_direct(cache_seqlens, block_table, k_idx, seqlen)
                 if self.index_kpool:
-                    self._update_pool_plane(idx_layer, block_table, host_seqlens, seqlen)
+                    self._update_pool_plane(idx_layer, block_table, host_seqlens, seqlen,
+                                            cache_seqlens = cache_seqlens)
 
         if sparse:
             if self.indexer_mode == "full":
