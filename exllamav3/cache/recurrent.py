@@ -80,6 +80,10 @@ class RecurrentCache(OrderedDict):
         """
         if key in self:
             self.move_to_end(key)
+            # Guardado de novo como prompt -- o turno seguinte de um agente (a resposta virou historico)
+            # passou pela mesma posicao, ou a volta a fila --: deixa de ser o primeiro a sair
+            if not geracao:
+                self[key].pop("geracao", None)
         else:
             stashed_state = state.stash()
             if parcial is not None:

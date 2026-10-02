@@ -366,3 +366,6 @@ def test_checkpoint_classificado_pela_posicao(config):
     seq.kv_position = 3 * PT
     j.maybe_stash_recurrent(rc, PT, geracao = False)      # o do job que volta a fila
     assert not rc[paginas[2].phash].get("geracao")
+    # O mesmo checkpoint, ja guardado como de geracao, guardado de novo como prompt: deixa de ser de geracao
+    rc.put(paginas[1].phash, j.recurrent_state, geracao = False)
+    assert not rc[paginas[1].phash].get("geracao")
