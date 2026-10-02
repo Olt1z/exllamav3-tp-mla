@@ -3,7 +3,7 @@ import logging
 import torch
 from ..model.model import Model
 from ..cache.cache import Cache
-from ..cache.recurrent import RecurrentCache
+from ..cache.recurrent import RecurrentCache, MAX_PARCIAIS
 from ..tokenizer.tokenizer import Tokenizer
 from ..constants import PAGE_SIZE  # so para a pagina logica; contabilidade usa self.page_tokens
 from ..util import cuda_sync_active
@@ -14,6 +14,7 @@ from .pagetable import PageTable, is_content_hash
 from .cpu_cache import CPUPageCache
 from .draft_confidence import DraftConfidenceCalibrator
 from .job import Job
+from . import reuso
 from .filter import Filter
 from concurrent.futures import ThreadPoolExecutor
 from .sampler import Sampler
@@ -242,11 +243,36 @@ class Generator:
         # Defrag
         self.enable_defrag = enable_defrag
 
-        # Recurrent cache
+        # Recurrent cache. Os interruptores de reaproveitamento de prompt (EXL3_REPLAY,
+        # EXL3_PONTOS_DE_GUARDA, ...) estao em `generator/reuso.py`; desligados, nada muda aqui
+        cfg_reuso = reuso.CONFIG
+        if cfg_reuso.recorrente_bytes:
+            recurrent_cache_size = cfg_reuso.recorrente_bytes
+        if cfg_reuso.intervalo_pp:
+            recurrent_checkpoint_interval_pp = cfg_reuso.intervalo_pp
         self.recurrent_cache_size = recurrent_cache_size
+        self.ids_de_guarda = []
         if self.model.caps.get("recurrent_states"):
             self.recurrent_cache = RecurrentCache(self.model, recurrent_cache_size)
             self.recurrent_cache.pagetable = self.pagetable
+            self.recurrent_cache.max_parciais = cfg_reuso.limite_parciais(MAX_PARCIAIS)
+            self.recurrent_cache.max_entradas = cfg_reuso.recorrente_max
+            self.recurrent_cache.proteger_prompt = cfg_reuso.proteger_prompt
+            if cfg_reuso.guarda:
+                for t in cfg_reuso.tokens_de_guarda:
+                    tid = tokenizer.single_id(t)
+                    if tid is not None and tid not in self.ids_de_guarda:
+                        self.ids_de_guarda.append(tid)
+                if not self.ids_de_guarda:
+                    print(f" !! EXL3_PONTOS_DE_GUARDA: nenhum de {cfg_reuso.tokens_de_guarda} e um token deste "
+                          f"tokenizer (EXL3_GUARDA_TOKENS); so o prefixo compartilhado vira ponto de guarda")
+            if cfg_reuso.replay or cfg_reuso.guarda or cfg_reuso.intervalo_pp or cfg_reuso.recorrente_bytes \
+                    or cfg_reuso.recorrente_max:
+                print(f" -- reuso de prompt: replay {int(cfg_reuso.replay)}, pontos de guarda "
+                      f"{int(cfg_reuso.guarda)} (ids {self.ids_de_guarda}), intervalo do prompt "
+                      f"{recurrent_checkpoint_interval_pp}, checkpoints ate {recurrent_cache_size / 1024**3:.1f} GiB"
+                      f"{f' e {cfg_reuso.recorrente_max}' if cfg_reuso.recorrente_max else ''}, parciais ate "
+                      f"{self.recurrent_cache.max_parciais}")
             # The new page table owns every page, so every state slot is ours too
             cache.reset_states()
             # Limit batch size if cache has recurrent states
@@ -1361,7 +1387,8 @@ class Generator:
         num_jobs = self.num_remaining_jobs()
         for job in completed_jobs + requeuing_jobs:
             if job in requeuing_jobs and self.recurrent_cache is not None:
-                job.maybe_stash_recurrent(self.recurrent_cache, self.page_tokens)
+                # O job que volta a fila retoma daqui logo em seguida: e o prompt dele, nao geracao
+                job.maybe_stash_recurrent(self.recurrent_cache, self.page_tokens, geracao = False)
             job.deallocate_pages()
             self.active_jobs.remove(job)
 

@@ -35,6 +35,13 @@ class RecurrentCache(OrderedDict):
         self.current_size = 0
         self.model = model
 
+        # Ajustados pelo Generator conforme `generator/reuso.py` (EXL3_REPLAY, EXL3_PONTOS_DE_GUARDA):
+        # teto de checkpoints parciais, teto em quantidade (0: sem teto) e se o LRU despeja os de
+        # geracao antes dos do prompt. Os padroes reproduzem o comportamento de antes.
+        self.max_parciais = MAX_PARCIAIS
+        self.max_entradas = 0
+        self.proteger_prompt = False
+
         # Optionally set by the Generator; enables stranded-first eviction and staleness metrics
         self.pagetable = None
         self.metrics = {
@@ -44,6 +51,8 @@ class RecurrentCache(OrderedDict):
             "stash_pruned": 0,              # stranded checkpoints dropped by prune_stranded()
             "parciais_guardados": 0,        # checkpoints de fim de prompt no meio da pagina
             "parciais_descartados": 0,      # os que sairam pelo limite MAX_PARCIAIS
+            "despejos_geracao": 0,          # despejos que levaram um checkpoint de geracao (proteger_prompt)
+            "despejos_por_quantidade": 0,   # despejos pelo teto de quantidade (max_entradas)
         }
 
 
@@ -57,7 +66,7 @@ class RecurrentCache(OrderedDict):
         return default
 
 
-    def put(self, key, state, parcial: dict | None = None):
+    def put(self, key, state, parcial: dict | None = None, geracao: bool = False):
         """
         Add state to cache
 
@@ -65,51 +74,78 @@ class RecurrentCache(OrderedDict):
         `Job.maybe_stash_recurrent_parcial`): a chave nao e o hash de uma pagina, e sim o do prefixo da
         pagina ate aquela posicao, e o dicionario leva `prev_hash` (a pagina anterior, a ancora da
         cadeia) e `n` (quantos tokens da pagina o estado ja viu).
+
+        `geracao` marca um checkpoint tirado depois do fim do prompt (no meio da resposta). Com
+        `proteger_prompt` eles saem antes dos do prompt quando falta espaco.
         """
         if key in self:
             self.move_to_end(key)
+            # Guardado de novo como prompt -- o turno seguinte de um agente (a resposta virou historico)
+            # passou pela mesma posicao, ou a volta a fila --: deixa de ser o primeiro a sair
+            if not geracao:
+                self[key].pop("geracao", None)
         else:
             stashed_state = state.stash()
             if parcial is not None:
                 stashed_state["parcial"] = parcial
+            if geracao:
+                stashed_state["geracao"] = True
             state_size = stashed_state["checkpoint_size"]
-            while self.update_total_size() + state_size > self.max_size:
+            while self.update_total_size() + state_size > self.max_size or \
+                    (self.max_entradas and len(self) >= self.max_entradas):
                 assert self.current_size >= 0, "Not enough space in cache for single state"
-                pt = self.pagetable
-
-                # A checkpoint whose anchor page chain has been broken by KV eviction can never be restored by
-                # an allocation, so drop stranded checkpoints (oldest first) before restorable ones. This is a
-                # pure win: if the conversation returns, the replay prefill recreates the same checkpoint at no
-                # extra cost, since the missing pages force a replay past this position either way.
-                popped_key = None
-                if pt is not None:
-                    for k, v in self.items():
-                        if self._encalhado(k, v):
-                            popped_key = k
-                            break
-                if popped_key is not None:
-                    popped = self.pop(popped_key)
-                    self.metrics["stash_evictions_stranded"] += 1
-                else:
-                    popped_key, popped = self.popitem(last = False)
-                    if pt is not None:
-                        page = pt.referenced_pages.get(popped_key) or pt.unreferenced_pages.get(popped_key)
-                        if page is not None and page.kv_position == PAGE_SIZE:
-                            self.metrics["stash_evictions_live_kv"] += 1
-
-                self.metrics["stash_evictions"] += 1
-                note_freed(popped["checkpoint_size"])
-                if self.model.loaded_tp:
-                    self.model.tp_dispatch_all(mp_cache_recurrent_del, (id(self), popped["tp_handle"]))
+                if self.max_entradas and len(self) >= self.max_entradas and \
+                        self.current_size + state_size <= self.max_size:
+                    self.metrics["despejos_por_quantidade"] += 1
+                self._despejar_um()
 
             self[key] = stashed_state
             self.update_total_size()
             if parcial is not None:
                 self.metrics["parciais_guardados"] += 1
                 parciais = [k for k, v in self.items() if "parcial" in v]
-                for k in parciais[:-MAX_PARCIAIS]:
+                for k in parciais[:-self.max_parciais]:
                     self._descartar(k)
                     self.metrics["parciais_descartados"] += 1
+
+
+    def _escolher_vitima(self):
+        """
+        A chave do proximo checkpoint a despejar.
+
+        A checkpoint whose anchor page chain has been broken by KV eviction can never be restored by an
+        allocation, so drop stranded checkpoints (oldest first) before restorable ones. This is a pure win:
+        if the conversation returns, the replay prefill recreates the same checkpoint at no extra cost,
+        since the missing pages force a replay past this position either way. Depois, com
+        `proteger_prompt`, o de geracao mais antigo; por fim o mais antigo de todos.
+        """
+        if self.pagetable is not None:
+            for k, v in self.items():
+                if self._encalhado(k, v):
+                    self.metrics["stash_evictions_stranded"] += 1
+                    return k, "encalhado"
+        if self.proteger_prompt:
+            for k, v in self.items():
+                if v.get("geracao"):
+                    self.metrics["despejos_geracao"] += 1
+                    return k, "geracao"
+        assert len(self) > 0, "Not enough space in cache for single state"
+        return next(iter(self)), "lru"
+
+
+    def _despejar_um(self):
+        pt = self.pagetable
+        popped_key, motivo = self._escolher_vitima()
+        popped = self.pop(popped_key)
+        if pt is not None and motivo != "encalhado":
+            page = pt.referenced_pages.get(popped_key) or pt.unreferenced_pages.get(popped_key)
+            if page is not None and page.kv_position == PAGE_SIZE:
+                self.metrics["stash_evictions_live_kv"] += 1
+        self.metrics["stash_evictions"] += 1
+        note_freed(popped["checkpoint_size"])
+        if self.model.loaded_tp:
+            self.model.tp_dispatch_all(mp_cache_recurrent_del, (id(self), popped["tp_handle"]))
+        self.update_total_size()
 
 
     def _descartar(self, key):
