@@ -199,6 +199,18 @@ def test_vigia_do_passo_sem_descritor_se_desliga(capsys):
     assert "vigia desligada" in capsys.readouterr().err
 
 
+def test_vigia_do_passo_sem_thread_se_desliga_e_nao_levanta(capsys):
+    # O faulthandler levanta RuntimeError("unable to start watchdog thread") quando nao consegue criar a
+    # thread. Subir dali derrubaria o filho (o except do laco do worker trata como falha com coletivos) e
+    # deixaria a profundidade presa em 1, ja que o __exit__ nao roda quando o __enter__ levanta
+    v = vigia.VigiaDoPasso(30, fh = FhFalso(falha = RuntimeError("unable to start watchdog thread")),
+                           arquivo = sys.__stderr__)
+    with v:
+        pass
+    assert not v.ligado and v.profundidade == 0
+    assert "unable to start watchdog thread" in capsys.readouterr().err
+
+
 def test_vigiar_passo_devolve_o_resultado(monkeypatch):
     fh = FhFalso()
     monkeypatch.setattr(vigia, "VIGIA_DO_PASSO", vigia.VigiaDoPasso(30, fh = fh, arquivo = sys.__stderr__))

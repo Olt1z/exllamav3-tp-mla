@@ -216,8 +216,13 @@ class VigiaDoPasso:
                     file = self.arquivo if self.arquivo is not None else sys.__stderr__,
                     exit = False,
                 )
-            except (ValueError, OSError, AttributeError) as e:
-                # Sem descritor para escrever (stderr trocado por algo sem fileno): sem vigia
+            except Exception as e:
+                # Sem descritor para escrever (stderr trocado por algo sem fileno), ou sem thread para o
+                # faulthandler ("unable to start watchdog thread", RuntimeError, com o limite de processos do
+                # conteiner batido): sem vigia. Nunca deixar subir: no filho, uma excecao aqui cairia no
+                # `except` de mp_model_worker como falha de comando com coletivos e derrubaria o servidor por
+                # causa de um diagnostico; no principal, falharia o passo. E a profundidade ficaria presa em 1
+                # (o __exit__ nao roda quando o __enter__ levanta), desligando a vigia sem aviso
                 self.segundos = 0
                 self.profundidade = 0
                 _escrever(f"[exl3] EXL3_TP_VIGIA_S: vigia desligada, o faulthandler nao pode escrever ({e})\n")
