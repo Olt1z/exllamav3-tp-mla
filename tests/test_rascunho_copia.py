@@ -185,6 +185,32 @@ def test_contexto_longo_rapido():
     assert dt < 2e-3, f"proposta levou {dt * 1e3:.2f} ms"
 
 
+
+def test_balde_grande_segue_a_referencia():
+    # Contexto periodico: o balde do sufixo passa do teto de candidatos, na base e no extra. Os
+    # mais recentes ficam, e a proposta e a da referencia sem teto
+    ctx = [1, 2, 3] * 3000
+    for corte in (len(ctx), 400):                             # tudo na base / quase tudo no extra
+        idx = CopiaIndice(ctx[:corte], prompt = len(ctx), casamento = 8, casamento_resposta = 0)
+        idx.estender(ctx[corte:])
+        assert len(idx.ocorrencias()) == copia._MAX_CANDIDATOS
+        assert idx.propor() == referencia(ctx, len(ctx), 8, 0, 15)
+        assert idx.propor(espaco = 4) == referencia(ctx, len(ctx), 8, 0, 15, 4)
+
+
+def test_contexto_repetitivo_rapido():
+    # 1M tokens iguais: o balde do sufixo tem 1M posicoes; a proposta nao pode passar por ele
+    import time
+    ctx = np.zeros(1_000_000, dtype = np.int64)
+    idx = CopiaIndice(ctx, prompt = ctx.shape[0], casamento = 8, casamento_resposta = 16)
+    idx.estender([0] * 64)
+    t0 = time.perf_counter()
+    for _ in range(50):
+        out = idx.propor()
+    dt = (time.perf_counter() - t0) / 50
+    assert out == [0] * 15
+    assert dt < 2e-3, f"proposta levou {dt * 1e3:.2f} ms"
+
 # ---- configuração
 
 def test_config_desligada_por_padrao():

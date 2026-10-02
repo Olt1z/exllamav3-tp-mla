@@ -25,6 +25,7 @@ Só numpy, sem torch: testável sem placa (tests/test_rascunho_copia.py).
 
 from __future__ import annotations
 
+import bisect
 import os
 from dataclasses import dataclass
 from typing import Sequence
@@ -208,25 +209,34 @@ class CopiaIndice:
             return np.empty((0,), dtype = np.int64)
         q = self.buf[L - n:L]
         hq = _hash_py(q.tolist())
-        partes = []
+        lim = L - n                                    # deixa um token depois; tira o sufixo
+        # Os dois baldes ja estao em ordem crescente de inicio: o da base sai do argsort estavel
+        # (posicoes crescentes no mesmo hash) e o do extra so tem inicios >= base_n, na ordem de
+        # chegada. Corta e recorta por busca binaria e fatia, sem passar pelo balde inteiro: num
+        # contexto repetitivo (1M tokens iguais) o balde tem 1M posicoes, e o filtro com np.sort
+        # de antes custava ~20 ms por job a cada rodada
+        b = np.empty((0,), dtype = np.int64)
         if self.base_n:
             hq_np = np.uint64(hq)
             lo = int(np.searchsorted(self.base_h, hq_np, side = "left"))
             hi = int(np.searchsorted(self.base_h, hq_np, side = "right"))
             if hi > lo:
-                partes.append(self.base_p[lo:hi])
-        mais = self.extra.get(hq)
-        if mais:
-            partes.append(np.asarray(mais, dtype = np.int64))
-        if not partes:
+                b = self.base_p[lo:hi]
+                b = b[:int(np.searchsorted(b, lim, side = "left"))]
+        e = self.extra.get(hq) or []
+        ne = bisect.bisect_left(e, lim)
+        nb = int(b.shape[0])
+        if nb + ne == 0:
             return np.empty((0,), dtype = np.int64)
-        c = np.concatenate(partes) if len(partes) > 1 else partes[0]
-        c = c[c < L - n]                               # deixa um token depois; tira o sufixo
-        if c.size > _MAX_CANDIDATOS:
-            c = np.sort(c)
-            c = np.concatenate((c[:16], c[-(_MAX_CANDIDATOS - 16):]))
-        if not c.size:
-            return c
+        k_ini, k_fim = 16, _MAX_CANDIDATOS - 16       # acima do teto: os 16 primeiros e os mais recentes
+        if nb + ne <= k_ini + k_fim:
+            c = np.concatenate((b, np.asarray(e[:ne], dtype = np.int64)))
+        else:
+            ini = b[:k_ini] if nb >= k_ini else \
+                np.concatenate((b, np.asarray(e[:k_ini - nb], dtype = np.int64)))
+            fim = np.asarray(e[ne - k_fim:ne], dtype = np.int64) if ne >= k_fim else \
+                np.concatenate((b[nb - (k_fim - ne):], np.asarray(e[:ne], dtype = np.int64)))
+            c = np.concatenate((ini, fim))
         # Colisão de hash: confere os tokens
         ok = (self.buf[c[:, None] + np.arange(n)] == q[None, :]).all(axis = 1)
         c = c[ok]
