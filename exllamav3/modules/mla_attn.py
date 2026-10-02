@@ -17,6 +17,13 @@ from .attention_fn.mla_triton import (
 )
 from .attention_fn.bc_attn import MAX_BSZ as _bc_max_bsz
 from .attention_fn.smem import NoFittingConfig
+from .attention_fn.indexador_dividido import (
+    deve_dividir,
+    faixas_por_rank,
+    linhas_max,
+    empacotar,
+    desempacotar,
+)
 import os
 
 # Prefill strategy: "mha" (default) up-projects past tiles from the compressed cache and attends
@@ -36,6 +43,15 @@ MAX_DECODE_QLEN = 16
 # of the page size (256)
 _score_tile = int(os.environ.get("EXL3_DSA_SCORE_TILE", 32768))
 assert _score_tile % 256 == 0 and _score_tile > 0
+
+# Indexador DSA dividido entre os ranks do TP no prefill (attention_fn/indexador_dividido.py):
+# cada rank pontua e seleciona só a sua faixa de linhas do chunk, e um all-gather de int32 junta
+# as faixas. Desligado por padrão. Chunks abaixo de _indexador_dividido_min linhas (o decode, a
+# cauda curta de um prompt) seguem replicados: o all-gather custaria mais que a pontuação.
+# Globais de módulo, e não atributos, para a bancada poder alternar A/B sem recarregar
+# (util/perfil_componentes.py: mp_definir_indexador_dividido) -- sempre em TODOS os ranks juntos.
+_indexador_dividido = os.environ.get("EXL3_INDEXADOR_DIVIDIDO", "0") == "1"
+_indexador_dividido_min = int(os.environ.get("EXL3_INDEXADOR_DIVIDIDO_MIN_LINHAS", 1024))
 
 
 
@@ -192,6 +208,12 @@ class MLAttention(Module):
         # e (1, 0) e nenhum caminho abaixo muda.
         self.cp_world = 1
         self.cp_rank = 0
+        # Tensor parallel: tamanho do mundo e posicao deste rank nele, para o indexador dividido.
+        # Fora do TP e (1, 0) e o indexador roda inteiro. tp_coletivo_ok: o backend tem all-gather
+        # em que se confia dentro do modelo (so o NCCL; ver tp_import)
+        self.tp_mundo = 1
+        self.tp_rank = 0
+        self.tp_coletivo_ok = False
         self.dispatch_cache = {}
 
         # kv_b_proj, stored ONLY in the flattened (kv_lora_rank, H * dim) form: the prefill
@@ -527,11 +549,16 @@ class MLAttention(Module):
 
     def _indexer_topk(self, x, params, q_resid, bsz, seqlen, host_seqlens,
                       position, positions, position_ids, inv_freq,
-                      k_idx_chunk = None, idx_pool = None, block_table = None):
+                      k_idx_chunk = None, idx_pool = None, block_table = None, linhas = None):
         """Lightning-indexer scoring + top-k selection, per batch row. Keys come either from
         the current chunk (cache-less path, k_idx_chunk) or the paged indexer plane (idx_pool +
         block_table). Returns -1-padded int32 indices, (bsz * seqlen, K_pad); selection is per
-        query token, shared by all attention heads."""
+        query token, shared by all attention heads.
+
+        `linhas = (a, b)`: so as linhas [a, b) do chunk (em cada linha do lote) sao pontuadas e
+        selecionadas; as outras ficam sem inicializar e quem chamou as preenche (indexador
+        dividido no TP). a e b caem em fronteiras de slab, entao os slabs feitos sao os mesmos
+        que o caminho inteiro faria para essas linhas."""
         from .attention_fn.dsa_triton import dsa_indexer_scores
         from ..ext import exllamav3_ext as ext
 
@@ -557,9 +584,11 @@ class MLAttention(Module):
             epp = idx_pool.shape[1]
             t_tile = max(epp, t_tile // epp * epp)
         from ..util.tensor import g_tensor_cache
+        l0, l1 = linhas if linhas is not None else (0, seqlen)
+        assert l0 % slab == 0 and (l1 % slab == 0 or l1 == seqlen)
         for b in range(bsz):
-            for r0 in range(0, seqlen, slab):
-                r1 = min(r0 + slab, seqlen)
+            for r0 in range(l0, l1, slab):
+                r1 = min(r0 + slab, l1)
                 rows = r1 - r0
                 pos0 = host_seqlens[b] + r0
                 t_slab = host_seqlens[b] + r1
@@ -655,7 +684,7 @@ class MLAttention(Module):
 
     def _indexer_topk_kpool(self, x, params, q_resid, bsz, seqlen, host_seqlens,
                             k_idx_chunk = None, idx_pool = None, pool_plane = None,
-                            block_table = None):
+                            block_table = None, linhas = None):
         """
         K-pool indexer selection (GLM5.3): scoring and top-k run over pooled keys
         (index_kpool consecutive tokens per entry), selections expand back to raw indices,
@@ -663,6 +692,9 @@ class MLAttention(Module):
         the incrementally maintained pooled plane through the tiled scorer (compress_rate
         gives the per-query causal pool bound); the cache-less path (k_idx_chunk, packed
         [k || gate] rows) builds pools eagerly. Returns -1-padded int32 indices.
+
+        `linhas = (a, b)`: so no caminho paginado, pontua e seleciona so as linhas [a, b) do chunk
+        (indexador dividido no TP; ver _indexer_topk). As demais ficam em -1.
         """
         import torch.nn.functional as F
         from .attention_fn.dsa_triton import dsa_indexer_scores
@@ -679,10 +711,10 @@ class MLAttention(Module):
         k_pad = -(-out_w // 32) * 32
         indices = torch.full((bsz * seqlen, k_pad), -1, dtype = torch.int32, device = x.device)
 
-        def append_tail(b, base_cols):
-            if not self.index_kpool_tail or P <= 1:
+        def append_tail(b, base_cols, l0 = 0, l1 = seqlen):
+            if not self.index_kpool_tail or P <= 1 or l1 <= l0:
                 return
-            q_pos = host_seqlens[b] + torch.arange(seqlen, device = x.device)
+            q_pos = host_seqlens[b] + torch.arange(l0, l1, device = x.device)
             vis = q_pos + 1
             tail_count = vis.remainder(P)
             tail_start = vis - tail_count
@@ -690,7 +722,7 @@ class MLAttention(Module):
             tail = tail_start.unsqueeze(1) + toff.unsqueeze(0)
             tail = torch.where(toff.unsqueeze(0) < tail_count.unsqueeze(1),
                                tail, tail.new_full((), -1))
-            rows = indices[b * seqlen : (b + 1) * seqlen]
+            rows = indices[b * seqlen + l0 : b * seqlen + l1]
             rows[:, base_cols : base_cols + P - 1] = tail.int()
 
         if pool_plane is not None:
@@ -701,11 +733,18 @@ class MLAttention(Module):
             epp = pool_plane.shape[1]
             slab = 256
             t_tile = max(epp, _score_tile // epp * epp)
+            l0, l1 = linhas if linhas is not None else (0, seqlen)
+            assert l0 % slab == 0 and (l1 % slab == 0 or l1 == seqlen)
             for b in range(bsz):
                 pools_b = (host_seqlens[b] + seqlen) // P
-                base_cols = 0
-                for r0 in range(0, seqlen, slab):
-                    r1 = min(r0 + slab, seqlen)
+                # Coluna da cauda: a largura expandida do ULTIMO slab do chunk (k_sel cresce com
+                # o slab), a mesma para todas as linhas. Calculada do chunk inteiro, e nao do
+                # maximo dos slabs que este rank fez, para o indexador dividido pôr a cauda na
+                # mesma coluna que o caminho inteiro -- a ordem das colunas e a ordem da soma
+                # na atencao esparsa.
+                base_cols = max(min(self.index_topk // P, pools_b), 0) * P
+                for r0 in range(l0, l1, slab):
+                    r1 = min(r0 + slab, l1)
                     rows = r1 - r0
                     pos0 = host_seqlens[b] + r0
                     pools_slab = (host_seqlens[b] + r1) // P
@@ -764,8 +803,7 @@ class MLAttention(Module):
                         pool_idx.unsqueeze(-1).expand(-1, -1, P).flatten(1) >= 0,
                         exp, exp.new_full((), -1))
                     out_slab[:, : exp.shape[1]] = exp
-                    base_cols = max(base_cols, exp.shape[1])
-                append_tail(b, base_cols)
+                append_tail(b, base_cols, l0, l1)
             return indices
 
         # Cache-less eager path (parity/compare): pools built from the packed chunk rows
@@ -900,12 +938,23 @@ class MLAttention(Module):
 
         if sparse:
             if self.indexer_mode == "full":
+                # Indexador dividido (TP, prefill): este rank pontua so a sua faixa de linhas e o
+                # all-gather traz as dos outros. Tudo o que entra na decisao e igual em todo rank
+                faixas = None
+                if deve_dividir(
+                    _indexador_dividido, self.tp_mundo, self.tp_coletivo_ok, self.cp_world,
+                    seqlen, max(_indexador_dividido_min, MAX_DECODE_QLEN + 1),
+                    idx_layer is not None, bool(params.get("tp_warmup")),
+                ):
+                    faixas = faixas_por_rank(seqlen, self.tp_mundo)
+                linhas = faixas[self.tp_rank] if faixas is not None else None
                 if self.index_kpool:
                     indices = self._indexer_topk_kpool(
                         x, params, q_resid, bsz, seqlen, host_seqlens,
                         k_idx_chunk = k_idx if idx_layer is None else None,
                         pool_plane = idx_layer.get_pool() if idx_layer is not None else None,
                         block_table = block_table,
+                        linhas = linhas,
                     )
                 else:
                     indices = self._indexer_topk(
@@ -914,7 +963,10 @@ class MLAttention(Module):
                         k_idx_chunk = k_idx if idx_layer is None else None,
                         idx_pool = idx_layer.get_idx() if idx_layer is not None else None,
                         block_table = block_table,
+                        linhas = linhas,
                     )
+                if faixas is not None:
+                    indices = self._indexador_reunir(params["backend"], indices, bsz, seqlen, faixas)
                 params["dsa_topk_indices"] = indices
             else:
                 indices = params.get("dsa_topk_indices")
@@ -989,6 +1041,19 @@ class MLAttention(Module):
         del o_lat
         o = o.reshape(bsz, seqlen, -1)     # H/cp_world cabecas depois do combine
         return self.o_proj.forward(o, params)
+
+
+    def _indexador_reunir(self, backend, indices, bsz, seqlen, faixas):
+        """All-gather das faixas do indexador dividido: entra a matriz com so a faixa deste rank
+        valida, sai `(bsz * seqlen, k_pad)` inteira e identica em todo rank. Um coletivo por camada
+        "full" por chunk de prefill, de `mundo * bsz * altura * k_pad * 4` bytes (~34 MB num chunk
+        de 4096 linhas com top-k 2048); as camadas "shared" reusam o resultado sem coletivo."""
+        altura = linhas_max(faixas)
+        envio = empacotar(indices, bsz, seqlen, faixas[self.tp_rank], altura)
+        reunido = torch.empty((self.tp_mundo,) + tuple(envio.shape), dtype = envio.dtype,
+                              device = envio.device)
+        backend.all_gather(reunido, envio)
+        return desempacotar(reunido, faixas, bsz, seqlen)
 
 
     def _cp_combinar(self, o_lat, lse, params):
@@ -1252,6 +1317,12 @@ class MLAttention(Module):
     # on near-ties, which the TP smoke test measures against single-device noise). Query heads
     # are split: each rank holds its column block of q_b/q_proj, W_UK and W_UV, and its row block
     # of o_proj, and the partial o_proj outputs are all-reduced in forward()
+    #
+    # Com EXL3_INDEXADOR_DIVIDIDO=1 (backend NCCL, sem CP), o prefill divide a pontuacao e o top-k
+    # das camadas "full" por linhas entre os ranks e junta os indices por all-gather
+    # (_indexador_reunir). Os pesos do indexador continuam replicados -- o decode e os chunks
+    # curtos seguem pelo caminho de sempre -- e o quase-empate deixa de divergir entre ranks:
+    # cada linha tem UMA selecao, feita por um rank e copiada aos outros
 
     def _tp_channel_width(self) -> int:
         # Heads per allocation channel: the smallest head group whose q_b columns and o_proj rows
@@ -1436,6 +1507,15 @@ class MLAttention(Module):
         )
         module.device = device
         module.cp_world, module.cp_rank = dcp, cp_rank
+        # Indexador dividido: a posicao no all-gather e a do rank no backend (o NCCL usa
+        # active_devices.index(device) como rank, e o anel nativo indexa a fatia do mesmo jeito).
+        # So o NCCL e liberado: o all-gather do anel nativo e exato isolado, mas a prova 24 (ver
+        # configurar_cp do backend nativo) mediu divergencia quando ele convive com o all-reduce
+        # por CPU dentro do modelo -- e indice errado aqui e leitura de token errado em silencio
+        from ..model.model_tp_backend import TPBackendNCCL
+        module.tp_mundo = len(backend.active_devices)
+        module.tp_rank = backend.active_devices.index(backend.device)
+        module.tp_coletivo_ok = isinstance(backend, TPBackendNCCL)
 
         if H:
             module.w_uk_flat = consumer.recv(
