@@ -1487,9 +1487,12 @@ class Generator:
                 # Rodada de cópia em que o rascunhador MTP não rodou: a posição K (token pendente +
                 # estado do alvo que ficou da rodada anterior) nunca foi gravada no cache da MTP.
                 # Grava K..K+A-1 de uma vez, cada token aceito com o estado do alvo da posição
-                # anterior, e a cabeça segue coerente como se tivesse rascunhado
-                eh_copia = copia_rodada is not None and copia_rodada["usa"][accepted_idx - 1]
-                if eh_copia and not copia_rodada["rodou"]:
+                # anterior, e a cabeça segue coerente como se tivesse rascunhado.
+                # Vale tambem para as linhas sem copia dessa rodada: o rascunhador devolve None
+                # para o lote inteiro quando um job nao tem estado (rebobinada de string banida),
+                # e a posicao K dos outros jobs tambem ficaria sem gravar
+                sem_rascunhador = copia_rodada is not None and not copia_rodada["rodou"]
+                if sem_rascunhador and job.mtp_last_hidden is not None:
                     hidden = torch.cat((
                         job.mtp_last_hidden.to(target_hidden.device, target_hidden.dtype),
                         target_hidden[a_idx:b_idx, :accepted_length - 1, :],
