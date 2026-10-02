@@ -1105,6 +1105,9 @@ class Job:
             max_rq_tokens = self.orig_max_rq_tokens,
             stop_on_loop = self.stop_on_loop,
             rq_state = rq_state,
+            # Os pedidos pelo chamador continuam valendo: se o checkpoint da volta a fila for despejado,
+            # o prefill da nova rodada passa de novo por eles
+            pontos_de_guarda = self.pontos_de_guarda_pedidos,
         )
 
         rq_job.prepare_for_queue(generator, serial_number, rq = True)
