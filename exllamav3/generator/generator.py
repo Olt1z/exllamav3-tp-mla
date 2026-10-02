@@ -1436,14 +1436,20 @@ class Generator:
                     # só as posições que o rascunhador propôs (o resto é enchimento da janela)
                     if copia_rodada["usa"][row - 1]:
                         continue
+                    # A sonda vai na primeira posicao que o rascunhador nao acertou ou nao propos
+                    # (p = min(a, m)), contra o token que o alvo amostrou ali, como no caminho sem
+                    # copia: o DFlash exporta o bloco inteiro e aprende alem da janela cortada, e
+                    # com m = 0 (bloco cortado inteiro) e a unica sonda da rodada. Com enchimento
+                    # aceito (a > m) o token da posicao m nao e o ultimo da sequencia
                     m = copia_rodada["modelo"][row - 1]
-                    for i in range(min(a, m)):
+                    p = min(a, m)
+                    for i in range(p):
                         cal.add_label(conf[i].item(), True)
-                    if a < m:
+                    if p < conf.shape[-1]:
                         seq = job.sequences[0]
-                        n = len(seq.sequence_ids)
-                        tail = seq.sequence_ids.torch_slice(n - 1, n).item()
-                        cal.add_label(conf[a].item(), ids_full[a].item() == tail)
+                        n = len(seq.sequence_ids) - (a - p)
+                        tok = seq.sequence_ids.torch_slice(n - 1, n).item()
+                        cal.add_label(conf[p].item(), ids_full[p].item() == tok)
                     continue
                 for i in range(a):
                     cal.add_label(conf[i].item(), True)
