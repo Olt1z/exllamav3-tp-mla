@@ -173,6 +173,16 @@ class Cache:
                 self.layers[instance] = \
                     layer_type(self.config, attn, id(self), self.max_num_tokens, **layer_kwargs)
 
+        # Rascunho por cópia (EXL3_RASCUNHO_COPIA=1, generator/copia.py): a janela de verificação
+        # vai a EXL3_COPIA_MAX rascunhos, e o estado recorrente só volta atrás dentro do histórico
+        # reservado aqui. Só quando o chamador já reservou histórico (decodificação especulativa
+        # ligada): o TabbyAPI passa o default_draft_size do rascunhador e não sabe da cópia
+        if max_history > 0:
+            from ..generator.copia import CopiaConfig
+            copia = CopiaConfig.do_ambiente()
+            if copia is not None and copia.maximo > max_history:
+                max_history = copia.maximo
+
         # Attach recurrent (SWA/linear-attn) layers
         self.num_slots = max_batch_size
         self.max_history = max_history
