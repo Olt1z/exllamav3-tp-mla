@@ -23,6 +23,14 @@ import os
 # Ver `Job.pode_usar_parcial`. Lido uma vez: o interruptor e para medir, nao para trocar em voo.
 _PAGINA_PARCIAL = os.environ.get("EXL3_PAGINA_PARCIAL", "1") != "0"
 
+
+def _janela_max(generator) -> int:
+    """Maior janela de rascunho de uma rodada: a do rascunhador ou a da cópia (generator.janela_max).
+    A folga de páginas do job e o ponto de requeue usam esta, para a janela nunca passar das
+    páginas alocadas."""
+    return getattr(generator, "janela_max", generator.num_draft_tokens)
+
+
 # Convert list of strings to UTF32 format to pass by reference to partial matching function
 @lru_cache(100)
 def _strings_to_utf32(strings: tuple[str]) -> tuple[np.ndarray, np.ndarray] | None:
@@ -284,6 +292,14 @@ class Job:
         self.rq_prompt_tokens = rq_state.get("prompt_tokens")
         self.rq_cached = rq_state.get("cached")
         self.draft_stats = []
+        # Rascunho por cópia (generator.copia): o índice do contexto deste job, criado na primeira
+        # rodada de decode, e quantos tokens iniciais são o prompt original (o requeue faz da
+        # resposta parte do prompt novo; o índice e a fronteira passam adiante)
+        self.copia = rq_state.get("copia")
+        self.copia_prompt = rq_state.get("copia_prompt")
+        self.copia_rodadas = rq_state.get("copia_rodadas", 0)
+        self.copia_propostos = rq_state.get("copia_propostos", 0)
+        self.copia_aceitos = rq_state.get("copia_aceitos", 0)
         self.cached_pages = 0
         self.cached_tokens = 0
         self.is_finished = False
@@ -642,7 +658,7 @@ class Job:
 
         # Accept token
         self.new_tokens += 1
-        requeue_now = self.new_tokens > self.max_rq_tokens - self.generator.num_draft_tokens
+        requeue_now = self.new_tokens > self.max_rq_tokens - _janela_max(self.generator)
 
         for seq in self.sequences:
 
@@ -793,6 +809,13 @@ class Job:
                         "accepted_draft_tokens": self.accepted_draft_tokens,
                         "rejected_draft_tokens": self.rejected_draft_tokens
                     })
+                if getattr(self.generator, "copia", None) is not None:
+                    # Já contados acima; aqui só a parte que veio da cópia
+                    r.update({
+                        "copy_rounds": self.copia_rodadas,
+                        "copy_drafted": self.copia_propostos,
+                        "copy_accepted": self.copia_aceitos,
+                    })
                 if eos_reason == "stop_string":
                     self.held_text = rem_held_text
                 rh = {}
@@ -927,6 +950,8 @@ class Job:
                 seq.kv_position -= offset
                 seq.sequence_ids.truncate(len(seq.sequence_ids) - offset)
                 self.pinned_ids_valid = min(self.pinned_ids_valid, len(seq.sequence_ids))
+                if self.copia is not None:
+                    self.copia.truncar(len(seq.sequence_ids))
                 n_page = seq.kv_position // self.page_tokens
                 for pi in range(n_page, len(seq.allocated_pages)):
                     page = seq.allocated_pages[pi]
@@ -1066,6 +1091,12 @@ class Job:
             "cached": self.rq_cached if self.rq_cached is not None else (
                 self.cached_pages, self.cached_pages * self.page_tokens + self.cached_tokens),
             "sam": self.sam,
+            "copia": self.copia,
+            "copia_prompt": self.copia.prompt if self.copia is not None else (
+                self.copia_prompt if self.copia_prompt is not None else len(seq.input_ids)),
+            "copia_rodadas": self.copia_rodadas,
+            "copia_propostos": self.copia_propostos,
+            "copia_aceitos": self.copia_aceitos,
             "forced_ids": None if self.forced_ids is None else self.forced_ids[:, self.forced_index:],
             "filters_suspended": self.filters_suspended,
         }
@@ -1117,7 +1148,7 @@ class Job:
         # requeue budget's headroom below so that budget still fits the cache exactly
         if self.max_new_tokens is None:
             self.max_new_tokens = max(1, self.generator.max_total_tokens - len(self.sequences[0].input_ids)
-                                      - 1 - self.generator.num_draft_tokens)
+                                      - 1 - _janela_max(self.generator))
 
         # Align max_rq_tokens to page boundary or recurrent checkpoint
         if self.max_rq_tokens is not None:
@@ -1129,7 +1160,7 @@ class Job:
                 self.max_rq_tokens = y - x
         else:
             # Default budget: the whole response plus one speculative window past the limit
-            self.max_rq_tokens = self.max_new_tokens + 1 + self.generator.num_draft_tokens
+            self.max_rq_tokens = self.max_new_tokens + 1 + _janela_max(self.generator)
 
         # Compatibility checks
         if self.banned_strings and self.generator.recurrent_cache is not None:

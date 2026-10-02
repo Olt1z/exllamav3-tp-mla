@@ -13,6 +13,7 @@ from ..util.memory import malloc_trim
 from .pagetable import PageTable, is_content_hash
 from .cpu_cache import CPUPageCache
 from .draft_confidence import DraftConfidenceCalibrator
+from .copia import CopiaConfig, combinar_janela
 from .job import Job
 from .filter import Filter
 from concurrent.futures import ThreadPoolExecutor
@@ -20,6 +21,7 @@ from .sampler import Sampler
 from .visualizer import CacheVisualizer
 import time
 import threading
+import dataclasses
 from ..tokenizer import MMEmbedding
 from ..tokenizer.mm_embedding import embeddings_presentes
 from ..util import profile_opt
@@ -278,6 +280,33 @@ class Generator:
         self._draft_conf_round = None
         if self.dynamic_draft and self.draft_model is not None:
             self.draft_calibrator = DraftConfidenceCalibrator(draft_confidence)
+
+        # Rascunho por cópia (EXL3_RASCUNHO_COPIA=1, ver copia.py): numa rodada em que os últimos
+        # tokens de um job já apareceram antes, a continuação daquela ocorrência é verificada no
+        # lugar do bloco do MTP/DFlash2. Só com MTP ou DFlash: a cabeça MTP absorve as linhas
+        # aceitas depois (iterate_gen), e o DFlash recebe o K/V do alvo de qualquer forma; um
+        # rascunhador autorregressivo teria posições do cache dele sem escrever
+        self.copia = CopiaConfig.do_ambiente()
+        if self.copia is not None and not (self.mtp_draft or self.dflash_draft):
+            print(" !! EXL3_RASCUNHO_COPIA: o rascunho por cópia só combina com MTP ou DFlash/DFlash2; desligado")
+            self.copia = None
+        if self.copia is not None and self.recurrent_cache is not None:
+            # O estado recorrente só volta atrás dentro do histórico que o cache reservou
+            # (max_history): uma janela de W rascunhos pede W posições de histórico
+            hist = int(getattr(cache, "max_history", 0) or 0)
+            if hist < self.copia.maximo:
+                if hist < 1:
+                    print(" !! EXL3_RASCUNHO_COPIA: o cache não reservou histórico recorrente (max_history = 0); desligado")
+                    self.copia = None
+                else:
+                    print(f" !! EXL3_COPIA_MAX = {self.copia.maximo} passa do histórico recorrente do cache "
+                          f"(max_history = {hist}); cópias limitadas a {hist}. Construa o Cache com "
+                          f"max_history >= EXL3_COPIA_MAX")
+                    self.copia = dataclasses.replace(self.copia, maximo = hist)
+        # Maior janela de rascunho de uma rodada: dimensiona a folga de páginas do job (job.py)
+        self.janela_max = max(self.num_draft_tokens, self.copia.maximo if self.copia is not None else 0)
+        self._copia_rodada = None
+        self._rascunho_rodou = False
 
 
     def num_remaining_jobs(self):
@@ -553,7 +582,10 @@ class Generator:
 
         # Generation with draft model
         if self.draft_model:
-            if self.dflash_draft:
+            if self.copia is not None:
+                draft_tokens = self.iterate_copia_gen(results)
+                self.iterate_gen(results, draft_tokens)
+            elif self.dflash_draft:
                 draft_tokens = self.iterate_draftmodel_dflash_gen(results)
                 self.iterate_gen(results, draft_tokens)
             elif self.mtp_draft:
@@ -720,6 +752,7 @@ class Generator:
     def iterate_draftmodel_mtp_gen(self, results: list):
 
         self._draft_conf_round = None
+        self._rascunho_rodou = False
 
         # Get shape of active batch
         batch_size = 0
@@ -767,6 +800,10 @@ class Generator:
         batch_ids = self.draft_input_ids_pinned[:batch_size, :]
         batch_ids.copy_(torch.cat(input_ids_list, dim = 0))
         temp_hidden = torch.cat(mtp_hidden_list, dim = 0)
+        # O passo 0 abaixo grava, para cada job, a posição do token pendente no cache da MTP (o
+        # par token pendente + estado do alvo). Uma rodada de cópia sem este passo tem de gravá-la
+        # depois da verificação (iterate_gen)
+        self._rascunho_rodou = True
 
         # Greedy sample batched draft tokens. As in iterate_draftmodel_gen, drafting stops once
         # every row's running product of estimated conditional acceptance probabilities falls
@@ -914,6 +951,86 @@ class Generator:
         return self.draft_ids_pinned[:, :window]
 
 
+    def _rascunho_modelo(self, results: list):
+        """O rascunho do MTP/DFlash para o lote inteiro, como sem a cópia."""
+        if self.dflash_draft:
+            return self.iterate_draftmodel_dflash_gen(results)
+        return self.iterate_draftmodel_mtp_gen(results)
+
+
+    def _proposta_copia(self, job, limite: int) -> list[int]:
+        """A proposta de cópia de um job nesta rodada ([] sem casamento ou sem condição)."""
+        if limite < 1 or len(job.sequences) != 1:
+            return []
+        # A cabeça MTP absorve a rodada a partir do estado do alvo que ficou do token pendente;
+        # sem ele (rebobinada de string banida, prompt de um token) ainda não dá para copiar
+        if self.mtp_draft and job.mtp_last_hidden is None:
+            return []
+        espaco = limite
+        if job.max_new_tokens is not None:
+            # W rascunhos rendem até W + 1 tokens; além do que falta, a janela seria desperdício
+            espaco = min(espaco, job.max_new_tokens - max(job.new_tokens, 0) - 1)
+        if espaco < 1:
+            return []
+        seq = job.sequences[0]
+        n = len(seq.sequence_ids)
+        if job.copia is None:
+            prompt = len(seq.input_ids) if job.copia_prompt is None else job.copia_prompt
+            job.copia = self.copia.indice(seq.sequence_ids.torch().reshape(-1).cpu().numpy(), prompt)
+        elif n != len(job.copia):
+            if n < len(job.copia):
+                job.copia.truncar(n)
+            else:
+                novos = seq.sequence_ids.torch_slice(len(job.copia), n)
+                job.copia.estender(novos.reshape(-1).cpu().numpy())
+        return job.copia.propor(espaco, teto_id = self.model.config.vocab_size)
+
+
+    def iterate_copia_gen(self, results: list):
+        """
+        Rodada com rascunho por cópia (EXL3_RASCUNHO_COPIA=1).
+
+        Cada job com casamento de cópia verifica a continuação copiada; os demais, o rascunho do
+        MTP/DFlash. Quando todos copiam, o rascunhador nem roda. A janela é comum ao lote
+        (combinar_janela): a cópia só a estende até o orçamento de linhas do lote
+        (CopiaConfig.limite_por_job), e as linhas mais curtas são completadas.
+        """
+        self._copia_rodada = None
+        jobs = [job for job in self.active_jobs if job.is_prefill_done()]
+        if not jobs:
+            return None
+        limite = self.copia.limite_por_job(len(jobs), self.num_draft_tokens)
+        copias = [self._proposta_copia(job, limite) for job in jobs]
+        num_copias = sum(1 for c in copias if c)
+        if num_copias == 0:
+            return self._rascunho_modelo(results)
+
+        self._rascunho_rodou = False
+        modelo = [[] for _ in jobs]
+        if num_copias < len(jobs):
+            rascunho = self._rascunho_modelo(results)
+            if rascunho is not None:
+                modelo = rascunho[:len(jobs)].tolist()
+        else:
+            # Ninguém precisa do rascunhador: nem o forward dele, nem a confiança dele nesta rodada
+            self._draft_conf_round = None
+
+        pendentes = [int(job.sequences[0].sequence_ids.torch_slice(
+            len(job.sequences[0].sequence_ids) - 1, None).reshape(-1)[0]) for job in jobs]
+        linhas, largura, usa = combinar_janela(copias, modelo, pendentes, limite, self.copia.passo)
+        if largura == 0:
+            return None
+        draft_tokens = self._staging("copia_ids", len(jobs), largura, torch.long)
+        draft_tokens.copy_(torch.tensor(linhas, dtype = torch.long))
+        self._copia_rodada = {
+            "usa": usa,
+            "propostos": [min(len(c), limite) if u else 0 for c, u in zip(copias, usa)],
+            "modelo": [0 if u else len(m) for m, u in zip(modelo, usa)],
+            "rodou": self._rascunho_rodou,
+        }
+        return draft_tokens
+
+
     def iterate_ngram_gen(self, results: list):
 
         # Get shape of active batch
@@ -959,6 +1076,10 @@ class Generator:
 
 
     def iterate_gen(self, results: list, draft_tokens: torch.Tensor | None = None):
+
+        # Rodada de cópia (iterate_copia_gen): quais linhas vieram da cópia, e se o rascunhador rodou
+        copia_rodada = self._copia_rodada if draft_tokens is not None else None
+        self._copia_rodada = None
 
         # Get shape of active batch
         # Only jobs that have finished prefill can participate in token generation. The maximum sequence length
@@ -1264,6 +1385,23 @@ class Generator:
                 if batch_states and draft_tokens is not None and rejected == 0:
                     batch_states[j].rewind(0)
 
+                # Rodada de cópia: conta o que a cópia propôs e o que dela foi aceito
+                if copia_rodada is not None and copia_rodada["usa"][j]:
+                    propostos = copia_rodada["propostos"][j]
+                    job.copia_rodadas += 1
+                    job.copia_propostos += propostos
+                    job.copia_aceitos += min(accepted_length - 1, propostos)
+                    # O evento de EOS desta rodada já saiu de receive_sample: atualiza as contas dele
+                    if completed_jobs and completed_jobs[-1] is job:
+                        for r_ in reversed(results):
+                            if r_.get("eos") and r_["job"] is job and "copy_rounds" in r_:
+                                r_.update({
+                                    "copy_rounds": job.copia_rodadas,
+                                    "copy_drafted": job.copia_propostos,
+                                    "copy_accepted": job.copia_aceitos,
+                                })
+                                break
+
                 # Record per-round draft stats. Skip abandoned windows (banned-string rewind);
                 # checkpoint-boundary truncations are rare enough to count as ordinary rejections.
                 if draft_tokens is not None and rejected != -1:
@@ -1293,6 +1431,20 @@ class Generator:
                 if id(job) in rewound_jobs:
                     continue
                 a = accepted_length - 1
+                if copia_rodada is not None:
+                    # A linha da cópia não diz nada da confiança do rascunhador; na dos outros,
+                    # só as posições que o rascunhador propôs (o resto é enchimento da janela)
+                    if copia_rodada["usa"][row - 1]:
+                        continue
+                    m = copia_rodada["modelo"][row - 1]
+                    for i in range(min(a, m)):
+                        cal.add_label(conf[i].item(), True)
+                    if a < m:
+                        seq = job.sequences[0]
+                        n = len(seq.sequence_ids)
+                        tail = seq.sequence_ids.torch_slice(n - 1, n).item()
+                        cal.add_label(conf[a].item(), ids_full[a].item() == tail)
+                    continue
                 for i in range(a):
                     cal.add_label(conf[i].item(), True)
                 if a < conf.shape[-1]:
@@ -1332,9 +1484,30 @@ class Generator:
                 if id(job) in rewound_jobs:
                     continue
 
+                # Rodada de cópia em que o rascunhador MTP não rodou: a posição K (token pendente +
+                # estado do alvo que ficou da rodada anterior) nunca foi gravada no cache da MTP.
+                # Grava K..K+A-1 de uma vez, cada token aceito com o estado do alvo da posição
+                # anterior, e a cabeça segue coerente como se tivesse rascunhado
+                eh_copia = copia_rodada is not None and copia_rodada["usa"][accepted_idx - 1]
+                if eh_copia and not copia_rodada["rodou"]:
+                    hidden = torch.cat((
+                        job.mtp_last_hidden.to(target_hidden.device, target_hidden.dtype),
+                        target_hidden[a_idx:b_idx, :accepted_length - 1, :],
+                    ), dim = 1)
+                    self.draft_model.prefill(
+                        batch_ids[a_idx:b_idx, :accepted_length],
+                        {
+                            "attn_mode": "flash_attn",
+                            "block_table": self.draft_cache.tabela_fisica(block_index[a_idx:b_idx]),
+                            "cache": self.draft_cache,
+                            "cache_seqlens": p_cache_seqlens[a_idx:b_idx].clone(),
+                            "target_hidden": hidden,
+                        },
+                    )
+
                 # Position K was drafted from the last target state already. Replace accepted
                 # speculative positions K+1..K+A-1 with the corresponding target-state inputs.
-                if accepted_length > 1:
+                elif accepted_length > 1:
                     self.draft_model.prefill(
                         batch_ids[a_idx:b_idx, 1:accepted_length],
                         {
