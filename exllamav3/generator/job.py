@@ -18,6 +18,7 @@ from ..tokenizer.mm_embedding import embeddings_presentes
 from functools import lru_cache
 from ..util import profile_opt
 from ..util import telemetria as tel
+from . import reuso
 import os
 
 # Ver `Job.pode_usar_parcial`. Lido uma vez: o interruptor e para medir, nao para trocar em voo.
@@ -71,6 +72,7 @@ class Job:
         max_rq_tokens: int | None = None,
         stop_on_loop: tuple[int, int] = None,
         rq_state: dict | None = None,
+        pontos_de_guarda: list[int] | None = None,
         **kwargs
     ):
         """
@@ -145,6 +147,12 @@ class Job:
 
         :param rq_state:
             Internal, passed when job requeues itself
+
+        :param pontos_de_guarda:
+            Modelos recorrentes: posicoes do prompt (em tokens; descem para a fronteira de pagina) onde
+            o prefill tambem guarda o estado recorrente, para que outro prompt com o mesmo comeco
+            retome dali -- p. ex. o fim do bloco de sistema, que o chamador conhece pelo template.
+            Ver `generator/reuso.py`; com EXL3_PONTOS_DE_GUARDA=1 o gerador acha alguns sozinho.
 
         :param kwargs:
         """
@@ -313,6 +321,12 @@ class Job:
         # Recurrent state
         self.recurrent_state = None
         self.last_recurrent_checkpoint_pos = None
+
+        # Pontos de guarda (ver `generator/reuso.py`): os pedidos pelo chamador, os escolhidos na
+        # alocacao, e onde o bloco de prefill cortado num deles terminaria
+        self.pontos_de_guarda_pedidos = [int(p) for p in pontos_de_guarda] if pontos_de_guarda else []
+        self.pontos_de_guarda = []
+        self.retomar_bloco_ate = None
 
         # Loop detector
         self.loop_detector = None
@@ -1237,6 +1251,12 @@ class Job:
             prefill_end = seq.kv_position + self.generator.max_chunk_size
             prefill_end = (prefill_end // self.page_tokens) * self.page_tokens
             prefill_end = min(prefill_end, len(seq.sequence_ids) - 1)
+            # Depois de um corte num ponto de guarda, este bloco termina onde o bloco cortado terminaria:
+            # os checkpoints de intervalo (contados do inicio em cache) continuam caindo nas fronteiras
+            if self.retomar_bloco_ate is not None:
+                if prefill_start < self.retomar_bloco_ate:
+                    prefill_end = min(prefill_end, self.retomar_bloco_ate)
+                self.retomar_bloco_ate = None
 
             atomic_mm_prefill = bool(self.embeddings) and self.generator.model.caps.get("atomic_mm_prefill")
             mm_exact_chunks = bool(self.embeddings) and self.generator.model.caps.get("mm_exact_chunks")
@@ -1318,11 +1338,17 @@ class Job:
             # so existia na fronteira de pagina. Agora ha um checkpoint no fim de cada prompt
             # (`maybe_stash_recurrent_parcial`), e o turno seguinte da conversa comeca por aquele prompt
             elif prefill_start == p0 * self.page_tokens and self.pode_usar_parcial():
-                n = self.reusar_pagina_parcial(seq, p0, prefill_ids)
+                n = self.reusar_pagina_parcial(
+                    seq, p0, prefill_ids, fim_do_prompt = prefill_end == len(seq.sequence_ids) - 1
+                )
                 if n:
                     prefill_ids = prefill_ids[:, n:]
                     prefill_start += n
                     progress += n
+                    # Replay (EXL3_REPLAY): o prompt inteiro veio do checkpoint; o passo de geracao
+                    # processa o ultimo token, como depois de um prefill
+                    if seq.kv_position >= len(seq.sequence_ids) - 1:
+                        seq.prefill_complete = True
 
             # For recurrent models, do a separate forward pass for the last page to get the latest possible checkpoint
             recurrent_last_page = False
@@ -1333,6 +1359,17 @@ class Job:
                     prefill_end = last_page_b
                     recurrent_last_page = True
                     prefill_ids = seq.sequence_ids.torch_slice(prefill_start, prefill_end)
+                # Ponto de guarda dentro do bloco: o bloco para nele, e o estado e guardado ali como na
+                # ultima fronteira do prompt. O bloco seguinte termina onde este terminaria
+                for g in self.pontos_de_guarda:
+                    if prefill_start < g < prefill_end:
+                        self.retomar_bloco_ate = prefill_end
+                        prefill_end = g
+                        recurrent_last_page = True
+                        prefill_ids = seq.sequence_ids.torch_slice(prefill_start, prefill_end)
+                        self.pagetable.metrics["pontos_de_guarda"] = \
+                            self.pagetable.metrics.get("pontos_de_guarda", 0) + 1
+                        break
 
             # Exact multimodal chunking (DeepSeek-V4 vision): an image span is prefilled as
             # exactly one chunk (non-causal within itself) and never re-fed, since the
@@ -1538,6 +1575,8 @@ class Job:
                         position = cached_pages * self.page_tokens,
                     )
                     self.last_recurrent_checkpoint_pos = self.recurrent_state.position
+            self.pontos_de_guarda = self.escolher_pontos_de_guarda(seq)
+            self.retomar_bloco_ate = None
 
             # Metrics
             self.cached_pages += cached_pages
@@ -1627,9 +1666,12 @@ class Job:
             self._mm_exact_spans = spans
         return spans
 
-    def maybe_stash_recurrent(self, cache, interval = None):
+    def maybe_stash_recurrent(self, cache, interval = None, geracao: bool | None = None):
         """
         Store the current recurrent state if the sequence is at a checkpoint boundary.
+
+        `geracao`: o checkpoint e de depois do fim do prompt (ver `RecurrentCache.put`); None decide pela
+        posicao.
         """
         seq = self.sequences[0]
 
@@ -1645,10 +1687,59 @@ class Job:
 
             page = seq.allocated_pages[last_page]
             assert page.kv_position == self.page_tokens
-            cache.put(page.phash, self.recurrent_state)
+            if geracao is None:
+                geracao = seq.kv_position > self.fim_do_prompt()
+            cache.put(page.phash, self.recurrent_state, geracao = geracao)
 
             # Prevent setting the same checkpoint twice in a row if prefill ends on the first page of a chunk
             self.last_recurrent_checkpoint_pos = seq.kv_position
+
+
+    def fim_do_prompt(self) -> int:
+        """Ate onde vai o prefill do prompt original (o ultimo token do prompt vai no passo de geracao)."""
+        return (self.rq_prompt_tokens or len(self.sequences[0].input_ids)) - 1
+
+
+    def escolher_pontos_de_guarda(self, seq) -> list[int]:
+        """
+        Onde este job guarda o estado recorrente alem do de costume (ver `reuso.pontos_de_guarda`).
+
+        So em modelo recorrente, com uma sequencia e sem embeddings (o id de um token de imagem e um
+        indice, e o hash dos tokens nao provaria que e o mesmo texto). Os pontos automaticos -- o
+        primeiro token de guarda (`<|user|>`: o fim do bloco de sistema) e o fim do prefixo de K/V
+        que ja esta em cache -- so com EXL3_PONTOS_DE_GUARDA=1; os pedidos pelo chamador, sempre.
+        """
+        gen = self.generator
+        if gen.recurrent_cache is None or self.embeddings or len(self.sequences) != 1:
+            return []
+        automaticos = reuso.CONFIG.guarda
+        if not automaticos and not self.pontos_de_guarda_pedidos:
+            return []
+        fim = len(seq.sequence_ids) - 1
+        aberturas = []
+        prefixo_kv = 0
+        if automaticos:
+            ids_de_guarda = getattr(gen, "ids_de_guarda", None) or []
+            if ids_de_guarda:
+                ids = seq.sequence_ids.torch()[0, :fim]
+                for tid in ids_de_guarda:
+                    achado = torch.nonzero(ids == tid)
+                    if achado.numel():
+                        aberturas.append(int(achado[0, 0]))
+            # Paginas do prompt com K/V valido: a cadeia de hashes achada no cache, de outra conversa
+            # com o mesmo comeco. Onde ela termina, o prompt deixa de ser compartilhado
+            n_hash = len(seq.page_hashes) if seq.max_cached_pages is None else seq.max_cached_pages
+            prefixo_kv = reuso.prefixo_de_kv(
+                [p.kv_position == self.page_tokens for p in seq.allocated_pages[:n_hash]]
+            ) * self.page_tokens
+        return reuso.pontos_de_guarda(
+            self.page_tokens,
+            seq.kv_position,
+            fim,
+            explicitos = self.pontos_de_guarda_pedidos,
+            aberturas = aberturas,
+            prefixo_kv = prefixo_kv,
+        )
 
 
     def pode_usar_parcial(self) -> bool:
@@ -1685,7 +1776,8 @@ class Job:
         if not self.pode_usar_parcial():
             return
         n = seq.kv_position % self.page_tokens
-        if n < 2 or self.recurrent_state.position != seq.kv_position:
+        # Sem replay um parcial de 1 token nunca serviria: sobra sempre um token para o prefill
+        if n < (1 if reuso.CONFIG.replay else 2) or self.recurrent_state.position != seq.kv_position:
             return
         p = seq.kv_position // self.page_tokens
         page = seq.allocated_pages[p]
@@ -1709,23 +1801,34 @@ class Job:
         )
 
 
-    def reusar_pagina_parcial(self, seq, p0: int, prefill_ids: torch.Tensor) -> int:
+    def reusar_pagina_parcial(self, seq, p0: int, prefill_ids: torch.Tensor, fim_do_prompt: bool = False) -> int:
         """
         Retoma do checkpoint de fim de prompt, se o prompt deste job comeca por aquele prompt.
 
         Tres coisas tem de bater, e cada uma cai no prefill normal se nao bater: a chave (o hash dos
         `n` tokens do prompt novo, encadeado na pagina anterior), uma pagina que ainda guarda o K/V
         daqueles tokens (pelo conteudo), e a posicao do estado. Devolve quantos tokens pulou.
+
+        `fim_do_prompt`: `prefill_ids` vai ate o fim do prefill do prompt. Com EXL3_REPLAY=1 o
+        checkpoint pode entao cobrir o trecho inteiro (um prompt identico ao guardado): nao sobra token
+        para o prefill, e o passo de geracao -- que processa o ultimo token do prompt de qualquer jeito
+        -- produz o primeiro token a partir do estado restaurado. Com rascunho MTP, so se o checkpoint
+        trouxe o carry (o hidden do ultimo token prefilado, que o primeiro rascunho consome).
         """
         rc = self.generator.recurrent_cache
         prev_hash = None if p0 == 0 else seq.allocated_pages[p0 - 1].phash
         destino = seq.allocated_pages[p0]
-        # Sempre sobra pelo menos um token para o prefill: o MTP precisa de um token real do alvo no fim
-        # do prompt para o carry, e o laco abaixo espera um passo de verdade
-        limite = prefill_ids.shape[-1] - 1
+        restante = prefill_ids.shape[-1]
+        replay = reuso.CONFIG.replay
+        mtp = bool(self.generator.mtp_draft)
 
         melhor = None
         for chave, n, parcial in list(rc.parciais(prev_hash)):
+            # Sem replay sobra sempre pelo menos um token para o prefill: o MTP precisava de um token
+            # real do alvo no fim do prompt para o carry
+            limite = reuso.limite_do_reuso_parcial(
+                restante, fim_do_prompt, replay, parcial.get("mtp_carry") is not None, mtp
+            )
             if n > limite or (melhor is not None and n <= melhor[1]):
                 continue
             if chave != chave_parcial(prefill_ids[:, :n], prev_hash):
@@ -1759,7 +1862,13 @@ class Job:
         self.last_recurrent_checkpoint_pos = posicao
         if self.generator.mtp_draft and parcial.get("mtp_carry") is not None:
             seq.mtp_carry_hidden = parcial["mtp_carry"].clone()
+            if n == restante:
+                # Replay: nenhum token do alvo roda no prefill, entao o hidden que o primeiro rascunho
+                # consome e o carry guardado -- o mesmo que o prefill deixaria em mtp_last_hidden
+                self.mtp_last_hidden = seq.mtp_carry_hidden
 
+        if n == restante:
+            self.pagetable.metrics["replays"] = self.pagetable.metrics.get("replays", 0) + 1
         self.cached_tokens += n
         self.pagetable.metrics["parcial_reusos"] = self.pagetable.metrics.get("parcial_reusos", 0) + 1
         self.pagetable.metrics["parcial_tokens"] = self.pagetable.metrics.get("parcial_tokens", 0) + n
