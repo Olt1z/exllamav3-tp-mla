@@ -121,6 +121,20 @@ def descrever_saida(codigo: int | None) -> str:
     return f"codigo {codigo}"
 
 
+def filhos_para_vigiar(mp_children: list) -> dict:
+    """
+    device -> processo filho, a partir de `Model_TPMixin.mp_children`: indexada pelo device, com o ajudante
+    de CPU (device -1) na ultima posicao. Ficam de fora os devices fora do grupo (None) e o pseudo-filho do
+    device da saida, que roda no proprio processo principal e nao tem sentinela.
+    """
+    n = len(mp_children)
+    return {
+        (-1 if i == n - 1 else i): p
+        for i, p in enumerate(mp_children)
+        if p is not None and hasattr(p, "sentinel")
+    }
+
+
 class VigiaDosFilhos:
     """
     Thread do processo principal que espera nos sentinelas dos processos filhos e chama `ao_morrer(device,

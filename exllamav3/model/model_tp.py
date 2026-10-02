@@ -18,7 +18,7 @@ import uuid
 from ..util import log_tp, global_t0
 from ..tokenizer.mm_embedding import send_embeddings
 from . import model_tp_vigia as _vigia
-from .model_tp_vigia import VigiaDosFilhos, vigiar_passo
+from .model_tp_vigia import VigiaDosFilhos, filhos_para_vigiar, vigiar_passo
 
 cleanupper = Cleanupper()
 DISPATCH_TIMEOUT = 20
@@ -691,14 +691,7 @@ class Model_TPMixin:
         # So depois da carga: uma falha na carga sobe como excecao, como sempre (o servidor relata o erro
         # em vez de reiniciar e tentar carregar de novo em laco)
         if _ABORTAR_NA_FALHA:
-            # mp_children[-1] e o ajudante de CPU (device -1); o pseudo-filho do device da saida nao tem sentinela
-            n = len(self.mp_children)
-            filhos = {
-                (-1 if i == n - 1 else i): p
-                for i, p in enumerate(self.mp_children)
-                if hasattr(p, "sentinel")
-            }
-            self.tp_vigia_dos_filhos = VigiaDosFilhos(filhos, _tp_filho_morreu)
+            self.tp_vigia_dos_filhos = VigiaDosFilhos(filhos_para_vigiar(self.mp_children), _tp_filho_morreu)
             self.tp_vigia_dos_filhos.iniciar()
 
         if 'yield' in locals():

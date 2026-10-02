@@ -109,6 +109,25 @@ def test_vigia_dos_filhos_parada_nao_avisa():
     assert mortes == []
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason = "fork")
+def test_filhos_para_vigiar_segue_o_layout_do_mp_children():
+    # TP em [0, 2, 3] com a saida no 3: mp_children = [P0, None, P2, Pseudo3, P(-1)], indexado pelo device
+    # e com o ajudante de CPU na ultima posicao. O device 1 fica fora do grupo; o pseudo-filho do device da
+    # saida roda no proprio processo e nao tem sentinela
+    ctx = multiprocessing.get_context("fork")
+    p0, p2, cpu = (ctx.Process(target = time.sleep, args = (30,)) for _ in range(3))
+    pseudo = SimpleNamespace(is_alive = lambda: True)
+    for p in (p0, p2, cpu):
+        p.start()
+    try:
+        filhos = vigia.filhos_para_vigiar([p0, None, p2, pseudo, cpu])
+        assert filhos == {0: p0, 2: p2, -1: cpu}
+    finally:
+        for p in (p0, p2, cpu):
+            p.terminate()
+            p.join()
+
+
 def test_vigia_dos_filhos_sem_filhos_nao_cria_thread():
     v = vigia.VigiaDosFilhos({}, lambda d, c: None)
     v.iniciar()
