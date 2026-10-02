@@ -1360,13 +1360,21 @@ class Job:
                     recurrent_last_page = True
                     prefill_ids = seq.sequence_ids.torch_slice(prefill_start, prefill_end)
                 # Ponto de guarda dentro do bloco: o bloco para nele, e o estado e guardado ali como na
-                # ultima fronteira do prompt. O bloco seguinte termina onde este terminaria
+                # ultima fronteira do prompt. O bloco seguinte termina onde este terminaria. Um ponto que
+                # cai exatamente no fim do bloco nao corta nada, mas o estado tambem e guardado ali (como
+                # o `<=` da ultima pagina acima); sem isso o checkpoint de intervalo raramente cai nele
                 for g in self.pontos_de_guarda:
-                    if prefill_start < g < prefill_end:
-                        self.retomar_bloco_ate = prefill_end
-                        prefill_end = g
+                    if prefill_start < g <= prefill_end:
+                        if g < prefill_end:
+                            self.retomar_bloco_ate = prefill_end
+                            prefill_end = g
+                            prefill_ids = seq.sequence_ids.torch_slice(prefill_start, prefill_end)
+                            # As paginas atualizadas depois do forward vao so ate a do corte: as de
+                            # (g, fim do bloco cortado] podem ter K/V valido de outra conversa (o
+                            # prefixo compartilhado), e zerar o kv_position delas faria o LRU dos
+                            # checkpoints julgar encalhados os ancorados alem dali
+                            p1 = prefill_end // self.page_tokens
                         recurrent_last_page = True
-                        prefill_ids = seq.sequence_ids.torch_slice(prefill_start, prefill_end)
                         self.pagetable.metrics["pontos_de_guarda"] = \
                             self.pagetable.metrics.get("pontos_de_guarda", 0) + 1
                         break

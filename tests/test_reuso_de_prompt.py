@@ -176,6 +176,36 @@ def test_ponto_de_guarda_corta_o_bloco_sem_deslocar_os_seguintes(config):
     assert tabela.metrics["pontos_de_guarda"] == 1
 
 
+def test_ponto_de_guarda_no_fim_de_um_bloco_tambem_e_guardado(config):
+    # O ponto cai exatamente onde o bloco ja terminaria (4P, com blocos de 4P): nao ha corte, mas o
+    # estado tem de ser guardado ali do mesmo jeito. Sob context parallel 4 (pagina de 1.024 tokens,
+    # blocos de 2.048) metade dos pontos cai assim
+    config(EXL3_PONTOS_DE_GUARDA = 1)
+    rc, tabela, gen, _, paginas = _primeira_vez(guarda = [4 * PT])
+
+    assert gen.model.blocos == [(0, 4 * PT), (4 * PT, 4 * PT), (8 * PT, 2 * PT), (10 * PT, 50)]
+    assert rc[paginas[3].phash]["position"] == 4 * PT
+    assert tabela.metrics["pontos_de_guarda"] == 1
+
+
+def test_corte_nao_mexe_nas_paginas_alem_do_ponto(config):
+    # As paginas depois do ponto ainda guardam o K/V de outra conversa com o mesmo comeco: o corte so
+    # atualiza ate a pagina do ponto (e a seguinte, como qualquer bloco), nao ate o fim do bloco cortado
+    config(EXL3_PONTOS_DE_GUARDA = 1)
+    rc = RecurrentCache(SimpleNamespace(loaded_tp = False), max_size = 10**9)
+    tabela = Tabela()
+    rc.pagetable = tabela
+    gen, _ = _gerador(rc)
+    prompt = [(7 * i) % 1000 + 1 for i in range(10 * PT + 51)]
+    paginas = [_pagina(i, PT if i < 8 else 0) for i in range(11)]
+    j, seq = _job(gen, tabela, prompt, paginas, Estado(0))
+    j.pontos_de_guarda = [PT]
+    j.prefill([])
+    assert gen.model.blocos == [(0, PT)]
+    assert paginas[1].kv_position == 0                    # a seguinte ao bloco, como sempre
+    assert [p.kv_position for p in paginas[2:8]] == [PT] * 6
+
+
 def _de_novo(rc, tabela, gen, prompt, paginas, mtp = False):
     """O mesmo prompt outra vez: as 10 paginas inteiras vem do cache, a parcial e uma pagina nova."""
     gen2, copias = _gerador(rc, mtp = mtp)
