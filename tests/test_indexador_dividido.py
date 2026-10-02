@@ -121,6 +121,99 @@ def test_ida_e_volta(bsz, seqlen, mundo):
 
 
 # ---------------------------------------------------------------------------------------------------
+# 2b. Os metodos do indexador de mla_attn.py, na CPU, com o kernel de pontuacao e o top-k trocados
+# por referencias em torch: as faixas montadas sao exatamente o inteiro, inclusive com rank sem
+# faixa e R fora da grade do slab. Prova a logica de slabs/faixas/cauda, nao o kernel
+
+def _extrair_metodo(nome, score_tile):
+    import ast, re, textwrap
+    torch = pytest.importorskip("torch")
+    arq = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                       "exllamav3", "modules", "mla_attn.py")
+    src = open(arq, encoding = "utf-8").read()
+
+    def scores(q, w, keys, q_pos0, cr, bound_max, scores = None, block_table = None, epp = 0):
+        R, H, D = q.shape
+        T = bound_max
+        t = torch.arange(T)
+        bt = block_table.reshape(-1).long()
+        K = keys[bt[t // epp] * epp + t % epp]
+        s = torch.einsum("rhd,td->rht", q.float(), K.float()).relu() * (D ** -0.5)
+        s = torch.einsum("rh,rht->rt", w.float() * (H ** -0.5), s).half()
+        lim = torch.clamp((q_pos0 + torch.arange(R) + 1) // cr, max = bound_max)
+        s = s.masked_fill(t.unsqueeze(0) >= lim.unsqueeze(1), -float("inf"))
+        scores[:R, :T] = s
+        return scores[:, :T]
+
+    class Ext:
+        @staticmethod
+        def dsa_topk(sc, out, k, _a, _b):
+            out.fill_(-1)
+            o = torch.sort(sc.float(), dim = 1, descending = True, stable = True)
+            idx = o.indices[:, :k].int()
+            out[:, :k] = torch.where(o.values[:, :k] > -float("inf"), idx, idx.new_full((), -1))
+
+    class Cache:
+        def __init__(self): self.d = {}
+        def get(self, dev, shape, dtype, nome):
+            return self.d.setdefault((nome, shape, dtype), torch.empty(shape, dtype = dtype))
+
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.FunctionDef) and node.name == nome:
+            code = textwrap.dedent(ast.get_source_segment(src, node))
+            code = re.sub(r"^(\s*)from \.\S+ import .*$", r"\1pass", code, flags = re.M)
+            ns = dict(torch = torch, dsa_indexer_scores = scores, ext = Ext, g_tensor_cache = Cache(),
+                      _score_tile = score_tile)
+            exec(code, ns)
+            return ns[nome]
+    raise KeyError(nome)
+
+
+@pytest.mark.parametrize("kpool,tile", [(0, 32768), (0, 256), (4, 32768), (4, 128)])
+def test_metodos_por_faixa_cpu(kpool, tile):
+    torch = pytest.importorskip("torch")
+    fn = _extrair_metodo("_indexer_topk_kpool" if kpool else "_indexer_topk", tile)
+
+    class Lin:
+        def __init__(self, t): self.t = t
+        def forward(self, x, params): return self.t
+
+    class M:
+        pass
+
+    H, D, topk, epp = 2, 16, 96, 64
+    for seqlen, host0, bsz in [(1100, 0, 1), (700, 50, 2), (1280, 300, 1), (513, 1000, 1), (257, 2000, 2), (40, 3000, 1)]:
+        g = torch.Generator().manual_seed(seqlen + host0)
+        host = [host0 + 13 * b for b in range(bsz)]
+        m = M()
+        m.index_n_heads, m.index_head_dim, m.index_topk, m.index_kpool = H, D, topk, kpool
+        m.index_kpool_tail = True
+        m._indexer_rope_ = lambda *a, **k: None
+        m.idx_wq_b = Lin(torch.randn(bsz, seqlen, H * D, generator = g).half())
+        m.idx_weights = Lin(torch.randn(bsz, seqlen, H, generator = g).half())
+        n_ent = (max(host) + seqlen) // (kpool or 1)
+        pages = -(-n_ent // epp)
+        plane = torch.randn(bsz * pages + 3, epp, D, generator = g).half()
+        bt = torch.randperm(bsz * pages + 3, generator = g)[: bsz * pages].int().view(bsz, pages)
+        x = torch.zeros(bsz, seqlen, 8)
+
+        def rodar(linhas = None):
+            if kpool:
+                return fn(m, x, {}, None, bsz, seqlen, host, pool_plane = plane, block_table = bt,
+                          linhas = linhas)
+            return fn(m, x, {}, None, bsz, seqlen, host, 0, None, None, None, idx_pool = plane,
+                      block_table = bt, linhas = linhas)
+
+        inteiro = rodar()
+        for mundo in (2, 3, 4, 8):
+            faixas = idv.faixas_por_rank(seqlen, mundo)
+            altura = idv.linhas_max(faixas)
+            reunido = torch.stack([idv.empacotar(rodar(f), bsz, seqlen, f, altura) for f in faixas])
+            montado = idv.desempacotar(reunido, faixas, bsz, seqlen)
+            assert torch.equal(montado, inteiro), f"seqlen {seqlen} host {host} mundo {mundo}"
+
+
+# ---------------------------------------------------------------------------------------------------
 # 3. Na placa
 
 def _cuda():

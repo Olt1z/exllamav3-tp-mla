@@ -585,7 +585,9 @@ class MLAttention(Module):
             t_tile = max(epp, t_tile // epp * epp)
         from ..util.tensor import g_tensor_cache
         l0, l1 = linhas if linhas is not None else (0, seqlen)
-        assert l0 % slab == 0 and (l1 % slab == 0 or l1 == seqlen)
+        # Faixa vazia (rank sem slab: chunk curto para o mundo) sai como (R, R), e R pode nao ser
+        # multiplo do slab; nao pontua nada, mas o rank ainda entra no all-gather
+        assert l0 == l1 or (l0 % slab == 0 and (l1 % slab == 0 or l1 == seqlen))
         for b in range(bsz):
             for r0 in range(l0, l1, slab):
                 r1 = min(r0 + slab, l1)
@@ -734,7 +736,7 @@ class MLAttention(Module):
             slab = 256
             t_tile = max(epp, _score_tile // epp * epp)
             l0, l1 = linhas if linhas is not None else (0, seqlen)
-            assert l0 % slab == 0 and (l1 % slab == 0 or l1 == seqlen)
+            assert l0 == l1 or (l0 % slab == 0 and (l1 % slab == 0 or l1 == seqlen))
             for b in range(bsz):
                 pools_b = (host_seqlens[b] + seqlen) // P
                 # Coluna da cauda: a largura expandida do ULTIMO slab do chunk (k_sel cresce com
