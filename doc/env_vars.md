@@ -220,6 +220,32 @@ TP ranks instead of one per job). `EXL3_MTP_PREFILL_LOTE=1` absorbs the accepted
 the MTP head's cache with one prefill per accepted length instead of one per job. Both are also
 `Generator` attributes (`rewind_lote`, `mtp_prefill_lote`).
 
+### `EXL3_EMBEDDING_CPU_SERIAL` (default: `0`), `EXL3_EMBEDDING_CPU_SERIAL_MAX_LINHAS` (default: `256`)
+
+CPU-resident token embedding (`Embedding`, `prefer_cpu`): with `1`, lookups of up to
+`..._MAX_LINHAS` ids run as slices of at most `32768 / hidden_size` rows, so the gather, the cast
+to fp32 and the copy into the generator's pinned buffer each stay below ATen's parallel grain
+(`at::internal::GRAIN_SIZE` = 32768 elements) and run serially on the calling thread instead of
+opening an OpenMP parallel region. Bit-identical output. Why: with hidden 4096 (GLM-5.3-Flash) the
+default path goes parallel exactly above 8 rows, i.e. from 3 jobs x 4 verification positions on.
+Under TP every rank process does that at the same moment, each with a machine-sized OpenMP team,
+and the region's closing barrier waits on descheduled threads: on 02/10/2026 the `Embedding` row
+of the per-component profile was ~38 ms per decode step at bsz 3 (GPU idle, the other ranks
+spinning in the all-reduce), against nothing at bsz 2. Also casts the MTP head's TP-dispatched
+embedding to half on the GPU instead of the CPU (the MTP absorption reaches 9 rows). Prefill-sized
+lookups keep the parallel path.
+
+### `EXL3_MOE_SUBLOTE_MAX` (default: `0` = off)
+
+Block-sparse MoE with the fused decode kernels (`BC_BlockSparseMLP.run_bszN`, limited to
+`MAX_BSZN` = 8 rows per call): batches of 9..N rows run those kernels in balanced sub-batches of
+at most 8 rows back to back on the same stream (12 -> 6 + 6, 16 -> 8 + 8), each copied out of the
+shared static output before the next, instead of falling to the `exl3_moe` path (argsort, counts,
+slot tables, gather, and the shared expert run separately and eagerly: ~20 launches per layer).
+Each row's result is what the same row gives in a batch of <= 8 rows. No rebuild needed. `16`
+covers 4 jobs x 4 verification positions. Must be the same on every TP rank (it is, from the
+environment). See `tests/bancada/medir_decode_lote.py` (modes `emb`, `moe`, `lote3`).
+
 ### `EXL3_PREFER_FA2` (default: `0`)
 
 Put the flash-attn-2 backends ahead of the built-in Triton attention kernels in the dispatch

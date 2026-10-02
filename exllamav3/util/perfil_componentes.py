@@ -439,6 +439,17 @@ def mp_definir_decode_lote(local_context: dict, kpool_lote: bool, pool_kernel: b
     return (bc_mla.kpool_lote, mla_attn._pool_kernel_eager)
 
 
+def mp_definir_decode_lote3(local_context: dict, embedding_serial: bool, moe_sublote_max: int):
+    """Liga/desliga, NESTE processo, o embedding na CPU sem o pool do OpenMP
+    (modules/embedding.py: cpu_serial, EXL3_EMBEDDING_CPU_SERIAL) e os sub-lotes da MoE acima de
+    MAX_BSZN linhas (block_sparse_mlp.moe_sublote_max, EXL3_MOE_SUBLOTE_MAX; 0 desliga). Despachar
+    a todos os ranks juntos, entre dois forwards: a decisao da MoE tem de ser a mesma em todos."""
+    from ..modules import embedding, block_sparse_mlp
+    embedding.cpu_serial = bool(embedding_serial)
+    block_sparse_mlp.moe_sublote_max = int(moe_sublote_max)
+    return (embedding.cpu_serial, block_sparse_mlp.moe_sublote_max)
+
+
 def mp_contagem_kpool_lote(local_context: dict, zerar: bool = True) -> dict:
     """Quantos passos de MLA kpool com bsz > 1 foram ao grafo e por que os outros recusaram
     (desligado / recusa_esparso / recusa_ext = extensão sem o lote)."""

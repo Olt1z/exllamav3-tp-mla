@@ -1,5 +1,6 @@
 from __future__ import annotations
 from typing_extensions import override
+import os
 import torch
 from torch import nn
 from ..model.config import Config
@@ -7,6 +8,28 @@ from ..util.tensor import to2
 from . import Module
 from ..tokenizer.mm_embedding import FIRST_MM_EMBEDDING_INDEX
 from ..model.model_tp_alloc import TPAllocation
+
+# Embedding na CPU sem o pool do OpenMP (decode em lote, 02/10/2026). O at::parallel_for do PyTorch
+# so abre uma regiao paralela quando o trabalho passa do grao (at::internal::GRAIN_SIZE = 32768
+# elementos; no index_select o grao e 32768 / largura linhas). Com largura 4096 (GLM-5.3-Flash) isso
+# acontece exatamente acima de 8 linhas: o lote 2 x q 4 fica serial, o lote 3 x q 4 abre a regiao
+# no index_select, no cast para fp32 e na copia para o buffer fixado. Sob TP os 4 processos dos ranks
+# abrem a regiao juntos, cada um com um time do tamanho da maquina, e a barreira do fim espera
+# threads desescalonadas: ~38 ms por passo no perfil, com a GPU parada (o host do rank preso ali, os
+# outros girando no all-reduce). Com EXL3_EMBEDDING_CPU_SERIAL=1, ate
+# EXL3_EMBEDDING_CPU_SERIAL_MAX_LINHAS linhas (o decode, a verificacao, a absorcao da MTP) saem em
+# fatias de no maximo um grao: cada operacao fica abaixo do limiar e roda serial na thread que chamou.
+# Mesmos valores, bit a bit (mesmo gather, mesmo cast). O prefill (mais linhas) segue paralelo.
+_GRAO_ATEN = 32768
+cpu_serial = os.environ.get("EXL3_EMBEDDING_CPU_SERIAL", "0") == "1"
+cpu_serial_max_linhas = int(os.environ.get("EXL3_EMBEDDING_CPU_SERIAL_MAX_LINHAS", 256))
+
+
+def linhas_por_fatia(largura: int) -> int:
+    """Quantas linhas de `largura` elementos cabem num grao do ATen (o maximo que o index_select e
+    a copia fazem sem abrir regiao paralela: os dois so paralelizam com trabalho > grao)."""
+    return max(1, _GRAO_ATEN // max(1, largura))
+
 
 class Embedding(Module):
 
@@ -144,6 +167,9 @@ class Embedding(Module):
             return combined_emb
 
         # No indexed embeddings, or none in current batch
+        elif self._usa_serial(x):
+            return self._forward_serial(x, params, out_dtype)
+
         else:
             x = self.embedding.forward(x)
             if self.multiplier != 1.0:
@@ -166,6 +192,54 @@ class Embedding(Module):
                 buf.copy_(x)
                 x = buf
             return x
+
+    def _usa_serial(self, x: torch.Tensor) -> bool:
+        if not cpu_serial or x.device.type != "cpu":
+            return False
+        w = self.embedding.weight
+        return (
+            w.device.type == "cpu" and
+            x.numel() <= cpu_serial_max_linhas and
+            w.shape[-1] <= _GRAO_ATEN
+        )
+
+    def _forward_serial(self, x: torch.Tensor, params: dict, out_dtype: torch.dtype) -> torch.Tensor:
+        """O mesmo que o caminho padrao (gather, multiplier na largura do peso, cast, normalize, e o
+        buffer fixado do gerador), em fatias de um grao: nenhuma operacao abre o pool do OpenMP. Ver
+        cpu_serial no topo."""
+        w = self.embedding.weight.data
+        largura = w.shape[-1]
+        ids = x.reshape(-1)
+        n = ids.numel()
+        forma = tuple(x.shape) + (largura,)
+
+        # O destino ja e o buffer fixado quando o gerador pede (um cast a menos que o caminho padrao,
+        # que monta x e depois copia para o buffer)
+        destino = None
+        if params.get("pinned_staging"):
+            chave = (torch.Size(forma), out_dtype)
+            destino = self._pinned_staging.get(chave)
+            if destino is None:
+                if len(self._pinned_staging) > 8:
+                    self._pinned_staging.clear()
+                destino = torch.empty(forma, dtype = out_dtype, pin_memory = True)
+                self._pinned_staging[chave] = destino
+        if destino is None:
+            destino = torch.empty(forma, dtype = out_dtype)
+
+        d = destino.view(n, largura)
+        passo = linhas_por_fatia(largura)
+        escala = largura ** 0.5
+        for a in range(0, n, passo):
+            b = min(n, a + passo)
+            linhas = torch.index_select(w, 0, ids[a:b])
+            if self.multiplier != 1.0:
+                linhas *= self.multiplier
+            fatia = d[a:b]
+            fatia.copy_(linhas)
+            if self.normalize:
+                fatia *= escala
+        return destino
 
     def make_tp_allocation(self, options: dict) -> list[TPAllocation]:
         return []

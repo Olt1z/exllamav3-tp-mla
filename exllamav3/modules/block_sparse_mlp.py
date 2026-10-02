@@ -42,6 +42,28 @@ FUSED_ROWS_WIDE = int(os.environ.get("EXL3_MOE_FUSED_ROWS_WIDE", 256))
 # restores the atomic adds
 FUSED_DET = os.environ.get("EXL3_MOE_FUSED_DET", "1") != "0"
 MAX_BSZN = 8  # must match MAX_BSZN in exllamav3_ext/libtorch/blocksparse_mlp.h
+# Verificacao do rascunho com varios jobs (decode em lote, 02/10/2026): 3 jobs x q 4 = 12 linhas
+# passam de MAX_BSZN e caiam no caminho exl3_moe (argsort, contagem, plano, gather, e o shared
+# expert eager por fora: ~20 lancamentos por camada, 42 camadas, com o host do rank como gargalo).
+# Com EXL3_MOE_SUBLOTE_MAX=N (> MAX_BSZN), lotes de MAX_BSZN+1..N linhas rodam os kernels
+# fundidos de decode (run_bszN) em sub-lotes de ate MAX_BSZN linhas, um apos o outro no mesmo
+# stream: cada linha sai como sairia num lote <= MAX_BSZN (o kernel nao mistura linhas). 0 desliga
+# (padrao). Sem recompilar: o limite do C++ continua MAX_BSZN por chamada
+moe_sublote_max = int(os.environ.get("EXL3_MOE_SUBLOTE_MAX", 0))
+
+
+def fatias_sublote(bsz: int, max_linhas: int = MAX_BSZN) -> list[tuple[int, int]]:
+    """Faixas [a, b) de bsz linhas em sub-lotes equilibrados de no maximo max_linhas (12 -> 6 + 6,
+    9 -> 5 + 4, 16 -> 8 + 8)."""
+    n = (bsz + max_linhas - 1) // max_linhas
+    base, resto = divmod(bsz, n)
+    out = []
+    a = 0
+    for i in range(n):
+        b = a + base + (1 if i < resto else 0)
+        out.append((a, b))
+        a = b
+    return out
 
 @dataclass
 class FusedBuffers:
@@ -1000,7 +1022,7 @@ class BlockSparseMLP(BlockSparseMLP_CPU, Module):
         # f_threshold-1 instead of MAX_BSZN). Expert-range shards (CPU split, TP) are masked
         # inside the kernel (out-of-range picks contribute exact zeros). Shared experts run
         # through BC_GatedMLP's own multi-row graph ahead of the kernel (see mlp.py)
-        bszn_eligible = self.bc is not None and bsz <= MAX_BSZN
+        bszn_eligible = self.bc is not None and (bsz <= MAX_BSZN or bsz <= moe_sublote_max)
 
         # Routing
         if self.router_pre_norm:
@@ -1346,8 +1368,11 @@ class BlockSparseMLP(BlockSparseMLP_CPU, Module):
         # quantized paths apply), so this is the last tier
         else:
             assert bszn_eligible
-            self.bc.run_bszN(y, selected_experts, routing_weights)
-            final_hidden_states = self.experts_cfg.out_bszn[:bsz].view(eshape)
+            if bsz <= MAX_BSZN:
+                self.bc.run_bszN(y, selected_experts, routing_weights)
+                final_hidden_states = self.experts_cfg.out_bszn[:bsz].view(eshape)
+            else:
+                final_hidden_states = self._run_bszN_sublotes(y, selected_experts, routing_weights).view(eshape)
             bc_sh_exp = self.bc_sh_exp
 
         # Independent shared-expert work can cover the CPU job (split tail or whole layer)
@@ -1418,6 +1443,20 @@ class BlockSparseMLP(BlockSparseMLP_CPU, Module):
         if out_dtype is not None:
             final_hidden_states = final_hidden_states.to(out_dtype)
         return final_hidden_states
+
+
+    def _run_bszN_sublotes(self, y, selected_experts, routing_weights) -> torch.Tensor:
+        """run_bszN acima de MAX_BSZN linhas (EXL3_MOE_SUBLOTE_MAX): sub-lotes de ate MAX_BSZN
+        linhas, cada um copiado para fora de out_bszn (estatico e compartilhado entre as camadas)
+        antes do proximo. Fatias de linhas de tensores contiguos sao contiguas, e o run_bszN le o
+        roteamento e a entrada direto dos ponteiros (nada capturado por bsz)."""
+        out_bszn = self.experts_cfg.out_bszn
+        bsz = y.shape[0]
+        fhs = torch.empty((bsz, out_bszn.shape[-1]), dtype = out_bszn.dtype, device = y.device)
+        for a, b in fatias_sublote(bsz):
+            self.bc.run_bszN(y[a:b], selected_experts[a:b], routing_weights[a:b])
+            fhs[a:b].copy_(out_bszn[:b - a])
+        return fhs
 
 
     @override

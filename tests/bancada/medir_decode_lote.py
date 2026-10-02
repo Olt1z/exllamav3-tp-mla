@@ -9,6 +9,10 @@ Tempo por PASSO de decode com vários pedidos simultâneos, pelo Generator do je
     # rápido, sem o perfil por componente (só parede por passo)
     NCCL_P2P_LEVEL=SYS python tests/bancada/medir_decode_lote.py -m /workspace/pesos --lotes 1,4
 
+    # o salto de 8 para 12 linhas (lote 2 -> 3 com rascunho de 3): lote3 e as duas metades dele
+    NCCL_P2P_LEVEL=SYS python tests/bancada/medir_decode_lote.py -m /workspace/pesos \\
+        --lotes 1,2,3,4 --modos base,lote,emb,moe,lote3 --componentes --componentes-lotes 3,4 --syncs
+
 A pergunta: em 02/10/2026 o decode com 4 pedidos custava ~250 ms por passo contra ~21 ms com 1 (12x
 para 4x o trabalho). Este roteiro mede o passo (gen.iterate() inteiro: rascunho MTP, verificação, amostragem,
 absorção da MTP, rewinds) com o lote CHEIO -- todos os jobs já prefilados, nenhum na fila --, em contexto
@@ -21,6 +25,11 @@ Modos (alternados na MESMA carga, por globais de módulo em todos os ranks e atr
          + plano agrupado do indexador num kernel só no eager (EXL3_POOL_KERNEL_EAGER)
   lote   mla + rewinds recorrentes numa ida aos ranks (EXL3_REWIND_LOTE)
              + absorção da MTP num prefill por comprimento aceito (EXL3_MTP_PREFILL_LOTE)
+  emb    lote + embedding na CPU sem o pool do OpenMP (EXL3_EMBEDDING_CPU_SERIAL): acima de 8 linhas
+             (largura 4096) o gather e o cast abriam uma região paralela em cada rank ao mesmo tempo
+  moe    lote + MoE acima de 8 linhas pelos kernels fundidos de decode em sub-lotes de até 8
+             (EXL3_MOE_SUBLOTE_MAX = --moe-sublote), em vez do caminho exl3_moe
+  lote3  lote + emb + moe
 
 Saída por (lote, modo): ms por passo (mediana, p90), tokens por passo, tok/s somado e por pedido,
 aceitação do rascunho, e as fases medidas no processo principal (host): rascunho, verificação,
@@ -41,6 +50,11 @@ MODOS = {
     "mla":  dict(kpool_lote = True,  pool_kernel = True,  rewind_lote = False, mtp_prefill_lote = False),
     "lote": dict(kpool_lote = True,  pool_kernel = True,  rewind_lote = True,  mtp_prefill_lote = True),
 }
+for _m in MODOS.values():
+    _m.update(emb_serial = False, moe_sublote = False)
+MODOS["emb"] = dict(MODOS["lote"], emb_serial = True)
+MODOS["moe"] = dict(MODOS["lote"], moe_sublote = True)
+MODOS["lote3"] = dict(MODOS["lote"], emb_serial = True, moe_sublote = True)
 
 ENCHIMENTO = ("A luz do sol atravessa a atmosfera e as moleculas de ar espalham mais os comprimentos de onda "
               "curtos do que os longos. Escreva uma explicacao longa e detalhada sobre isso. ")
@@ -88,17 +102,20 @@ def em_todos(model, fn, *args):
     return [fn({"device": torch.device("cuda:0"), "modules": model.modules}, *args)]
 
 
-def definir_modo(model, gen, modo):
+def definir_modo(model, gen, modo, moe_sublote_max):
     m = MODOS[modo]
+    sub = moe_sublote_max if m["moe_sublote"] else 0
     r = em_todos(model, pc.mp_definir_decode_lote, m["kpool_lote"], m["pool_kernel"])
+    r3 = em_todos(model, pc.mp_definir_decode_lote3, m["emb_serial"], sub)
     # o processo principal roda a cabeça MTP; no TP o rank de saída já é ele, sem TP também
     pc.mp_definir_decode_lote({}, m["kpool_lote"], m["pool_kernel"])
+    pc.mp_definir_decode_lote3({}, m["emb_serial"], sub)
     gen.rewind_lote = m["rewind_lote"]
     gen.mtp_prefill_lote = m["mtp_prefill_lote"]
-    return r
+    return [tuple(a) + tuple(b) for a, b in zip(r, r3)]
 
 
-def rodar(gen, model, tokenizer, bsz, args, medir, fases, perf_local):
+def rodar(gen, model, tokenizer, bsz, args, medir, fases, perf_local, perfil = True):
     """Um lote de bsz jobs até o fim. Devolve as medidas dos passos com o lote cheio (descontados os
     --aquecer primeiros), ou None se não medir."""
     jobs = [Job(input_ids = prompt_de(tokenizer, args.prompt, random.randrange(10**9)),
@@ -111,6 +128,8 @@ def rodar(gen, model, tokenizer, bsz, args, medir, fases, perf_local):
     perfil_ligado = False
 
     def ligar_perfil(ligado):
+        if not perfil:
+            return
         if args.componentes and model.loaded_tp:
             em_todos(model, pc.mp_perfil_ativar, ligado)
         if perf_local is not None:
@@ -158,15 +177,18 @@ def rodar(gen, model, tokenizer, bsz, args, medir, fases, perf_local):
     }
 
 
-def colher_componentes(model, perf_local, passos, syncs):
+def colher_componentes(model, perf_local, passos, syncs, perfil = True):
     out = {}
     if model.loaded_tp:
         if syncs:
             out["syncs_por_rank"] = [{k: v / passos for k, v in d.items()}
                                      for d in em_todos(model, pc.mp_perfil_syncs)]
         tabs = em_todos(model, pc.mp_perfil_colher)
-        out["por_rank"] = [{k: [v[0] / passos, v[1] / passos, v[2] / passos, v[3] / passos]
-                            for k, v in t.items()} for t in tabs]
+        if not perfil:
+            tabs = []
+        if tabs:
+            out["por_rank"] = [{k: [v[0] / passos, v[1] / passos, v[2] / passos, v[3] / passos]
+                                for k, v in t.items()} for t in tabs]
         out["kpool_lote"] = em_todos(model, pc.mp_contagem_kpool_lote)
     elif syncs:
         out["syncs_por_rank"] = [{k: v / passos for k, v in pc.mp_perfil_syncs({}).items()}]
@@ -226,12 +248,17 @@ def main():
     p.add_argument("--cache-bits", type = int, default = 0, help = "cache quantizado (o mesmo cache_mode da produção)")
     p.add_argument("--chunk", type = int, default = 2048)
     p.add_argument("--componentes", action = "store_true", help = "perfil por componente em cada rank (eventos CUDA)")
+    p.add_argument("--componentes-lotes", default = None,
+                   help = "só esses lotes com o perfil por componente (ex.: 3,4); padrão: todos")
+    p.add_argument("--moe-sublote", type = int, default = 16,
+                   help = "EXL3_MOE_SUBLOTE_MAX nos modos moe/lote3 (linhas; 16 = lote 4 x q 4)")
     p.add_argument("--syncs", action = "store_true", help = "conta sincronizações host-placa por componente")
     p.add_argument("--fases-sincronizadas", action = "store_true",
                    help = "synchronize no fim de cada fase do gerador (atribui a GPU à fase; muda a sobreposição)")
     p.add_argument("--saida", default = None)
     args = p.parse_args()
     lotes = [int(x) for x in args.lotes.split(",")]
+    comp_lotes = set(int(x) for x in args.componentes_lotes.split(",")) if args.componentes_lotes else set(lotes)
     modos = args.modos.split(",")
     for m in modos:
         assert m in MODOS, f"modo desconhecido: {m}"
@@ -302,7 +329,8 @@ def main():
     for bsz in lotes:
         resultado["lotes"][bsz] = {}
         for modo in modos:
-            estado = definir_modo(model, gen, modo)
+            estado = definir_modo(model, gen, modo, args.moe_sublote)
+            perfil = bsz in comp_lotes
             rodar(gen, model, tokenizer, bsz, args, False, fases, None)   # compila / captura as formas
             if args.componentes and model.loaded_tp:
                 em_todos(model, pc.mp_perfil_zerar)
@@ -312,10 +340,11 @@ def main():
             if args.syncs:
                 em_todos(model, pc.mp_perfil_syncs)
             fases.zerar()
-            r = rodar(gen, model, tokenizer, bsz, args, True, fases, perf_local)
+            r = rodar(gen, model, tokenizer, bsz, args, True, fases, perf_local if perfil else None, perfil)
             fases_ms = {k: v * 1000 / r["passos"] for k, v in fases.t.items()}
-            comp = colher_componentes(model, perf_local, r["passos"], args.syncs) \
-                if (args.componentes or args.syncs) else None
+            comp = colher_componentes(model, perf_local if perfil else None, r["passos"], args.syncs,
+                                      args.componentes and perfil) \
+                if ((args.componentes and perfil) or args.syncs) else None
             imprimir(bsz, modo, r, fases_ms, comp)
             resultado["lotes"][bsz][modo] = {"medidas": r, "fases_ms_por_passo": fases_ms,
                                              "flags_por_rank": estado, "componentes": comp}

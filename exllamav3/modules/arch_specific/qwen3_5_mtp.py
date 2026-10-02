@@ -7,6 +7,7 @@ from ...util.device_copy import to_device
 from ...model.config import Config
 from ...model.model_tp_fn import mp_model_forward_embedding
 from ...modules import Module, Linear, RMSNorm
+from ...modules import embedding as _embedding
 from ...util.rope import RopeSettings, RoPE
 from ...util.tensor import get_for_device, to2
 
@@ -105,7 +106,13 @@ class Qwen3_5MTPInputLayer(Module):
         else:
             x = self.attached_model().tp_producer.send(x)
             x = self.attached_model().tp_dispatch_master(mp_model_forward_embedding, (x, params))
-            x = x.half()
+            if _embedding.cpu_serial:
+                # O cast para half na placa, e nao na CPU: a absorcao da MTP passa de 8 linhas
+                # (3 jobs x 3 aceitos) e o cast de 9 x 4096 abriria o pool do OpenMP (ver
+                # embedding.cpu_serial). Mesmo arredondamento (RNE) nos dois lados
+                x = to_device(x, self.device).half()
+            else:
+                x = x.half()
         x = self.pre_fc_norm_embedding.forward(to_device(x, self.device), params)
 
         # Project
