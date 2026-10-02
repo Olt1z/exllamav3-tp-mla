@@ -1445,6 +1445,9 @@ class MLAttention(Module):
             "cache_layers": [
                 cl.tp_export(plan) for cl in self.cache_layers
             ],
+            # A flag do indexador dividido do processo principal, que vira a de todos os ranks no
+            # import (ver tp_import)
+            "indexador_dividido": (_indexador_dividido, _indexador_dividido_min),
         }
 
 
@@ -1518,6 +1521,14 @@ class MLAttention(Module):
         module.tp_mundo = len(backend.active_devices)
         module.tp_rank = backend.active_devices.index(backend.device)
         module.tp_coletivo_ok = isinstance(backend, TPBackendNCCL)
+        # A flag e lida do ambiente na importacao do modulo, e os filhos sao spawn: importam de
+        # novo, com o ambiente da hora do spawn. O rank de saida roda no processo principal, que
+        # leu o dele antes -- quem mexe em os.environ entre o import e o load deixaria um rank
+        # dividindo e outro nao, e o primeiro prefill longo trava no all-gather. Vale a do
+        # principal para todos
+        global _indexador_dividido, _indexador_dividido_min
+        if exported.get("indexador_dividido") is not None:
+            _indexador_dividido, _indexador_dividido_min = exported["indexador_dividido"]
 
         if H:
             module.w_uk_flat = consumer.recv(
