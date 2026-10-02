@@ -185,6 +185,17 @@ Prefill strategy for MLA layers: `mha` up-projects past latent tiles from the co
 and attends in MHA form (~2.8× fewer FLOPs per query-past pair); `absorbed` restores the
 single-kernel absorbed-form prefill for A/B testing.
 
+### `EXL3_INDEXADOR_DIVIDIDO` (default: `0`), `EXL3_INDEXADOR_DIVIDIDO_MIN_LINHAS` (default: `1024`)
+
+Tensor parallel, DSA "full" layers, prefill: with `1`, each rank scores and selects top-k only
+for its contiguous share of the chunk's rows (256-row slab boundaries) and an int32 all-gather
+assembles the full index matrix, identical on every rank. Without it every rank recomputes the
+whole indexer (the cost that grows with context). Applies only with the NCCL backend, without
+context parallel, outside the TP warmup, and to chunks of at least `..._MIN_LINHAS` rows; decode
+and short chunks keep the replicated path. Side effect: near-tie selections no longer differ
+between ranks. See `exllamav3/modules/attention_fn/indexador_dividido.py` and
+`tests/bancada/medir_componentes.py`.
+
 ### `EXL3_PREFER_FA2` (default: `0`)
 
 Put the flash-attn-2 backends ahead of the built-in Triton attention kernels in the dispatch
