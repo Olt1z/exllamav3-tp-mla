@@ -17,14 +17,16 @@ from .model_tp_fn import *
 import uuid
 from ..util import log_tp, global_t0
 from ..tokenizer.mm_embedding import send_embeddings
+from . import model_tp_vigia as _vigia
+from .model_tp_vigia import VigiaDosFilhos, vigiar_passo
 
 cleanupper = Cleanupper()
 DISPATCH_TIMEOUT = 20
 
 
 # Ver `_tp_abortar`. Lido uma vez, no import: e decisao de operacao, nao de pedido.
-_ABORTAR_NA_FALHA = _os.environ.get("EXL3_TP_ABORTAR_NA_FALHA", "1") != "0"
-TP_DESSINCRONIZADO = 70
+_ABORTAR_NA_FALHA = _vigia.ABORTAR_NA_FALHA
+TP_DESSINCRONIZADO = _vigia.TP_DESSINCRONIZADO
 
 
 def _tp_abortar(onde: str, e: BaseException):
@@ -54,6 +56,29 @@ def _tp_abortar(onde: str, e: BaseException):
     _sys.stdout.flush()
     _os._exit(TP_DESSINCRONIZADO)
 
+
+def _tp_filho_morreu(device: int, codigo: int | None):
+    """
+    Um processo filho do TP morreu fora do desligamento (chamado pela thread da `VigiaDosFilhos`): encerra
+    o processo principal na hora.
+
+    O caso comum e o filho que falhou num comando com coletivos e encerrou a si mesmo (`filho_abortar`,
+    codigo 71), com o traceback logo acima no log. A thread principal provavelmente esta presa no coletivo
+    desse passo, esperando a parte que o filho nao vai mandar; antes, so o timeout a soltava (90 s no
+    backend nativo, o watchdog do NCCL no outro -- 600 s+ em 10/09/2026), e ai ela entrava em `_tp_abortar`
+    do mesmo jeito. Tambem pega o filho morto por segfault ou pelo OOM killer: sem ele o modelo nao anda.
+    """
+    qual = "o ajudante de CPU do backend" if device == -1 else f"o rank filho do device {device}"
+    _sys.stderr.write(
+        f"[exl3] {qual} morreu ({_vigia.descrever_saida(codigo)}). Os outros ranks ficam presos nos "
+        f"coletivos do passo em andamento, e seguir travaria o grupo ate o timeout. Encerrando o processo "
+        f"para o conteiner reiniciar (codigo {TP_DESSINCRONIZADO}; EXL3_TP_ABORTAR_NA_FALHA=0 desliga).\n"
+    )
+    _sys.stderr.flush()
+    _sys.stdout.flush()
+    _os._exit(TP_DESSINCRONIZADO)
+
+
 class Model_TPMixin:
 
     def __init__(self):
@@ -75,6 +100,8 @@ class Model_TPMixin:
         # command yet when forward_tp returns
         self.tp_pending_acks = []
         self.tp_pending_refs = None
+        # Ver VigiaDosFilhos: armada no fim da carga, parada antes do "quit"
+        self.tp_vigia_dos_filhos = None
 
     def create_tp_context(self, tp_backend: str):
         """
@@ -170,6 +197,12 @@ class Model_TPMixin:
         Destroy child processes (when unloading TP model or atexit)
         """
         log_tp(None, "Destroying TP context")
+
+        # Daqui em diante os filhos saem de proposito
+        vigia = getattr(self, "tp_vigia_dos_filhos", None)
+        if vigia is not None:
+            vigia.parar()
+            self.tp_vigia_dos_filhos = None
 
         # Collect any deferred forward acks so quit commands aren't interleaved with stale results
         try:
@@ -655,6 +688,19 @@ class Model_TPMixin:
         config.stc.close()
         self.loaded_tp = True
 
+        # So depois da carga: uma falha na carga sobe como excecao, como sempre (o servidor relata o erro
+        # em vez de reiniciar e tentar carregar de novo em laco)
+        if _ABORTAR_NA_FALHA:
+            # mp_children[-1] e o ajudante de CPU (device -1); o pseudo-filho do device da saida nao tem sentinela
+            n = len(self.mp_children)
+            filhos = {
+                (-1 if i == n - 1 else i): p
+                for i, p in enumerate(self.mp_children)
+                if hasattr(p, "sentinel")
+            }
+            self.tp_vigia_dos_filhos = VigiaDosFilhos(filhos, _tp_filho_morreu)
+            self.tp_vigia_dos_filhos.iniciar()
+
         if 'yield' in locals():
             yield
 
@@ -722,6 +768,7 @@ class Model_TPMixin:
                     orig.tp_readback(exp)
 
 
+    @vigiar_passo
     def prefill_tp(
         self,
         x: torch.Tensor,
@@ -761,6 +808,7 @@ class Model_TPMixin:
         return None
 
 
+    @vigiar_passo
     def forward_tp(
         self,
         x: torch.Tensor,

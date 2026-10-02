@@ -23,6 +23,7 @@ import threading
 from ..tokenizer import MMEmbedding
 from ..tokenizer.mm_embedding import embeddings_presentes
 from ..util import profile_opt
+from ..model.model_tp_vigia import vigiar_passo
 
 class Generator:
 
@@ -456,6 +457,9 @@ class Generator:
             self.on_queue_drained()
 
 
+    # EXL3_TP_VIGIA_S: pilhas de todas as threads no log se um passo travar (ver model_tp_vigia). E aqui, e
+    # nao so no forward_tp, porque com o NCCL o forward volta logo e o passo trava na sincronia da amostragem
+    @vigiar_passo
     @torch.inference_mode
     def iterate(self) -> list[dict]:
         """

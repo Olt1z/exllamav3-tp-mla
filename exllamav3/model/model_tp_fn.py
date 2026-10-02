@@ -12,6 +12,7 @@ from functools import lru_cache
 from .model_tp_backend import TPBackendNCCL, TPBackendNative, TPBackendNull
 from ..tokenizer.mm_embedding import recv_embeddings
 from ..util import log_tp, set_t0
+from .model_tp_vigia import ABORTAR_NA_FALHA, VIGIA_DO_PASSO, comando_tem_coletivo, filho_abortar
 
 _no_fwd_barrier = os.environ.get("EXL3_TP_NO_FWD_BARRIER", "1") != "0"
 _stream_hash_passes = int(os.environ.get("EXL3_TP_STREAM_HASH", "0") or "0")
@@ -110,10 +111,18 @@ def mp_model_worker(
                 local_context["backend"].close()
                 break
             func, args = msg
+            # Num comando com coletivos os outros ranks estao esperando por este: ver filho_abortar
+            coletivo = comando_tem_coletivo(func, args)
             try:
-                result = func(local_context, *args)
+                if coletivo:
+                    with VIGIA_DO_PASSO:
+                        result = func(local_context, *args)
+                else:
+                    result = func(local_context, *args)
                 conn.send(result)
             except Exception as e:
+                if coletivo and ABORTAR_NA_FALHA:
+                    filho_abortar(device, func, e)
                 tb = traceback.TracebackException.from_exception(e)
                 print("-" * 40)
                 print(" ## Exception in child process")
