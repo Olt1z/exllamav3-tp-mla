@@ -7,6 +7,7 @@ from ..model.config import Config
 from ..util.tensor import get_for_device, to2
 from . import Module, Linear
 from ..ext import exllamav3_ext as ext
+from ..util.backend import QKV_SLICE
 from ..model.model_tp_alloc import TPAllocation
 from .gated_rmsnorm import GatedRMSNorm
 from ..cache import Cache
@@ -16,7 +17,9 @@ import os
 
 # Sliced qkv+z projection bundle at decode for the split-projection GDN (Qwen3.5 / Qwen3.8 style):
 # one mgemm over equal-width column slices, see attn.py. EXL3_QKV_SLICE=0 disables it
-_qkv_slice_enable = os.environ.get("EXL3_QKV_SLICE", "1") != "0"
+# (off by default on ROCm: the RDNA multi-matrix GEMVs do not take sliced bundles, which would fall back to
+# the cooperative GEMM)
+_qkv_slice_enable = QKV_SLICE
 # Prefill projections (qkv, z, forget/beta gates) come out of the GEMM in fp16 rather than fp32.
 # EXL3_GDN_PROJ_FP32=1 restores fp32
 _proj_dtype = torch.float if os.environ.get("EXL3_GDN_PROJ_FP32", "0") != "0" else torch.half
@@ -35,6 +38,7 @@ from ..cache.recurrent import (
 )
 from ..util import profile_opt
 from .attention_fn.bc_attn import MAX_BSZ as _BC_MAX_BSZ, MAX_QLEN as _BC_MAX_QLEN
+from ..cache.recurrent import host_copy
 
 # Enabled by default; EXL3_BC_GDN=0 disables the fused BC_GatedDeltaNetSplit decode path (both the
 # split and the KDA variant), the module then runs the torch path. EXL3_BC_GDN_TRACE=1 prints one
@@ -362,8 +366,8 @@ class GDNLayerState:
     def stash(self, slot, position: int = 0):
         cdim = self.module.conv_kernel_size
         return (
-            self.recurrent_state[slot, :1].cpu(),
-            self.conv_state[slot, :, :cdim].cpu()
+            host_copy(self.recurrent_state[slot, :1]),
+            host_copy(self.conv_state[slot, :, :cdim])
         )
 
 
@@ -637,11 +641,11 @@ class GatedDeltaNet(Module):
         if conv1d_weight is not None:
             self.conv1d_weight = conv1d_weight
             self.conv1d_bias = conv1d_bias
-            self.key_conv1d_weight = None,
-            self.key_conv1d_bias = None,
-            self.key_conv1d_q_weight = None,
-            self.key_conv1d_k_weight = None,
-            self.key_conv1d_v_weight = None,
+            self.key_conv1d_weight = None
+            self.key_conv1d_bias = None
+            self.key_conv1d_q_weight = None
+            self.key_conv1d_k_weight = None
+            self.key_conv1d_v_weight = None
         else:
             self.key_conv1d_weight = f"{key}.{key_conv1d}.weight"
             self.key_conv1d_bias = f"{key}.{key_conv1d}.bias"
@@ -1453,7 +1457,9 @@ class GatedDeltaNet(Module):
             if num_k_heads else None
         k_split = (True, (global_num_k_heads + first) * k_head_dim, (global_num_k_heads + last) * k_head_dim) \
             if num_k_heads else None
-        v_split = (True, (global_num_k_heads * 2 + first * G) * v_head_dim, (global_num_k_heads * 2 + last * G) * v_head_dim) \
+        # V rows follow the q and k rows, which are k_head_dim wide
+        v_base = global_num_k_heads * 2 * k_head_dim
+        v_split = (True, v_base + first * G * v_head_dim, v_base + last * G * v_head_dim) \
             if num_k_heads else None
         z_split = (True, first * v_head_dim * G, last * v_head_dim * G) \
             if num_k_heads else None

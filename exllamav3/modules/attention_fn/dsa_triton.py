@@ -29,6 +29,7 @@ The lightning-indexer scoring kernel is shared as-is between raw-token (V3.2) an
 
 import os
 import torch
+from ...util.backend import DSA_MQA
 from ...util.tensor import g_tensor_cache
 
 # EXL3_DSA_DEBUG_BOUNDS=1: compile the JIT DSA kernels with device-side bounds asserts on
@@ -42,6 +43,7 @@ import triton.language as tl
 
 from .triton_paged import _rot_h32, _qc_load_v, _get_h32
 from .smem import pick_config, shared_bytes, halving_ladder
+from . import dsa_mqa
 
 @triton.jit(do_not_specialize = [
     "k_len", "win_len", "pool_len", "num_pages_per_row", "q_pos0", "R",
@@ -875,10 +877,16 @@ def _stage_packed_pool(pool_c, qc, pool_r, block_table, page_size, pool_len, D_c
     G = D_c // 32
     npw = -(-pool_len // page_size)
     pages = block_table[0, :npw].long()
-    pc = pool_c.reshape(-1, page_size, G * bits)[pages]
+    pool_pages = pool_c.reshape(-1, page_size, G * bits)
+    pc = pool_pages[pages]
     ps = pool_s.reshape(-1, page_size, G)[pages]
     n_rows = npw * page_size
-    rows_alloc = max(page_size, 1 << (n_rows - 1).bit_length())      # pow2: few distinct sizes
+    # pow2: few distinct sizes, but never past the pool itself: the rounding alone would
+    # double a 2049-page window to 4096 pages. MLAttention.autosplit_extra_measure stages a
+    # window spanning the pool (pools within the staging limit), so its reserve follows the
+    # same cap
+    pool_rows = pool_pages.shape[0] * page_size
+    rows_alloc = min(max(page_size, 1 << (n_rows - 1).bit_length()), max(n_rows, pool_rows))
     out = torch.empty((rows_alloc, D_c), dtype = torch.half, device = pool_c.device)
     ext.dequant_cache_cont(pc.view(-1, G * bits), ps.view(-1, G), out[:n_rows], 0.0)
     pr = pool_r.reshape(-1, page_size, D_r)[pages].contiguous() if D_r > 0 else pool_r
@@ -1110,11 +1118,21 @@ def dsa_attn(
                 bh, bn, ns = cfg
                 _, ws_ml, ws_acc = workspace(bh)
                 return shared_bytes(_dsa_attn_split_kernel, s_args(ws_ml, ws_acc), **s_consts(bh, bn), num_warps = num_warps, num_stages = ns)
-            block_h, block_n, s_stages = pick_config(q.device, "dsa_attn_split", pick_key, hb_ladder, probe)
-            hb, ws_ml, ws_acc = workspace(block_h)
-            _dsa_attn_split_kernel[(R * hb, n_splits)](
-                *s_args(ws_ml, ws_acc), **s_consts(block_h, block_n), num_warps = num_warps, num_stages = s_stages,
-            )
+            # ROCm: the MQA decode kernel (dsa_mqa.py) where the shape allows it, at its own tiling
+            mqa = dsa_mqa.decode_eligible(s_consts(dsa_mqa.DECODE_BLOCK_H, dsa_mqa.DECODE_BLOCK_N)) if DSA_MQA else None
+            if mqa is not None:
+                block_h = dsa_mqa.DECODE_BLOCK_H
+                hb, ws_ml, ws_acc = workspace(block_h)
+                dsa_mqa._dsa_decode_mqa_kernel[(R * hb, n_splits)](
+                    *s_args(ws_ml, ws_acc), **dsa_mqa.decode_consts(s_consts(block_h, dsa_mqa.DECODE_BLOCK_N), mqa),
+                    num_warps = dsa_mqa.DECODE_WARPS, num_stages = 1,
+                )
+            else:
+                block_h, block_n, s_stages = pick_config(q.device, "dsa_attn_split", pick_key, hb_ladder, probe)
+                hb, ws_ml, ws_acc = workspace(block_h)
+                _dsa_attn_split_kernel[(R * hb, n_splits)](
+                    *s_args(ws_ml, ws_acc), **s_consts(block_h, block_n), num_warps = num_warps, num_stages = s_stages,
+                )
             _dsa_attn_combine_kernel[(R * hb, triton.cdiv(D_out, 128))](
                 ws_ml, ws_acc, sinks_t, derot_t, out,
                 a_qpos, R, n_splits, h32_t,
@@ -1161,6 +1179,18 @@ def dsa_attn(
             EMIT_LSE = 1 if devolver_lse else 0,
             CP_WORLD = cp_world, CP_RANK = cp_rank,
         )
+    # ROCm: the MQA prefill kernel (dsa_mqa.py) where the shape allows it, at its own tiling
+    if DSA_MQA:
+        c = m_consts((block_h, block_n, num_stages))
+        mqa = dsa_mqa.prefill_eligible(c)
+        if mqa is not None:
+            with torch.cuda.device(q.device):
+                grid = (R * (H // mqa[0]) * ((D_c + D_r) // mqa[1]),)
+                dsa_mqa._dsa_prefill_mqa_kernel[grid](
+                    *m_args, **dsa_mqa.prefill_consts(c, mqa), num_warps = dsa_mqa.PREFILL_WARPS, num_stages = 1,
+                )
+            return out
+
     # Head tile, then kv tile, then pipeline depth (smem.py); the stock config leads
     ladder = [(block_h, block_n, num_stages)]
     for ns in range(num_stages, 0, -1):

@@ -1,6 +1,7 @@
 import collections
 import os
 import torch
+from ...util.backend import DSA_SPLIT_WARPS
 from ...util.device_copy import to_device
 
 from ...ext import exllamav3_ext as ext
@@ -239,6 +240,7 @@ class BCMLA:
             _mla_decode_split_kernel,
             _mla_decode_combine_kernel,
             _mla_unfold_kernel,
+            mla_unfold_block_k,
         )
 
         dev = self.device
@@ -341,7 +343,8 @@ class BCMLA:
         k_unfold = _compile_kernel(dev, _mla_unfold_kernel,
             {"o_lat": "*fp16", "w_uv_flat": "*fp16", "out": "*fp16", "R": "i32"}
             | {n: "constexpr" for n in ("n_q_heads", "D_c", "D_v", "BLOCK_M", "BLOCK_K")},
-            dict(n_q_heads = H_o, D_c = D_c, D_v = D_v, BLOCK_M = unfold_bm, BLOCK_K = 128),
+            dict(n_q_heads = H_o, D_c = D_c, D_v = D_v, BLOCK_M = unfold_bm,
+                 BLOCK_K = mla_unfold_block_k(dev, H_o, D_c, D_v, unfold_bm)),
             4, 2)
 
         # Static intermediates, shared between layers on the same device. Bucketed flat
@@ -580,7 +583,8 @@ class BCMLA:
                 QC = self.k_bits if self.quant else 0,
                 CP_WORLD = self.cp_world, CP_RANK = self.cp_rank,
             )
-            k_dsa_split = _compile_kernel(dev, _dsa_attn_split_kernel, sig_s, consts_s, 4, 2)
+            # ROCm: 8 warps spill far less to scratch on these parts
+            k_dsa_split = _compile_kernel(dev, _dsa_attn_split_kernel, sig_s, consts_s, DSA_SPLIT_WARPS, 2)
             self.cp_slots[(bsz, q_len, regime)].update(
                 dsa_ws_ml = ws_ml, dsa_hb = hb, dsa_splits = N_SPLITS, dsa_block_h = BLOCK_H)
 

@@ -951,12 +951,13 @@ void BC_MLAttention::run
 
     // First run per slot executes eagerly (GEMM autotune, kernel warmup); the second run is
     // captured, then launched below like every later run, with only the I/O pointers patched.
-    // Under context parallel phases 1 and 2 have their own graph and their own run counter
+    // Under context parallel phases 1 and 2 have their own graph and their own run counter.
+    // A disabled graph runs the same C++ path eagerly every time
     TORCH_CHECK(phase >= 0 && phase <= 2, "BC_MLAttention: bad phase");
     Graph* g = (phase == 2) ? s.graph2.get() : s.graph.get();
     int& runs = (phase == 2) ? s.runs2 : s.runs;
     int R = bsz * q_len;
-    if (runs == 0)
+    if (runs == 0 || g->disabled)
     {
         if (phase == 2) run_gr_tail(s, R, y, nullptr);
         else run_gr(bsz, q_len, s, x, y, cache_seqlens, block_table, position, positions, position_ids, regime, t_total, ext_indices, nullptr, phase);

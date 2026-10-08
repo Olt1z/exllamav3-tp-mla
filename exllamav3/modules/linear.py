@@ -7,8 +7,10 @@ from ..model.config import Config
 from . import Module
 from .quant import LinearFP16, LinearEXL3
 from .quant.exl3_lib import quantize_exl3, quantize_exl3_batch
+from .quant.exl3_lib.quantize import codebook_mcg_mult, codebook_mul1_mult
 from ..ext import exllamav3_ext as ext
 from ..model.model_tp_alloc import TPAllocation
+from ..util.pinned_arena import PinnedArena
 
 # MXFP4 (e2m1 + e8m0 block scale) as stored by gpt-oss: each 16-byte block packs 32 fp4 values
 # (low nibble first), one power-of-two scale byte per block
@@ -212,7 +214,7 @@ class Linear(Module):
                 if scale_q is not None and scale_q.dim() == 2:
                     # DeepSeek-V4 style: fp8/fp4 blocks + E8M0 scale grid, checkpoint
                     # orientation (out, in); dequant first, then orient/pad like a plain load
-                    w_raw = self.config.stc.get_tensor(key + ".weight", dev, no_defer = True)
+                    w_raw = self.config.stc.get_tensor(key + ".weight", dev, no_defer = True, arena = False)
                     weight = self.dequant_e8m0_blocks_(w_raw, scale_q)
                     if self.transposed_load:
                         weight = weight.T
@@ -223,9 +225,12 @@ class Linear(Module):
                     scale = self.config.stc.get_tensor(key + ".weight_scale", dev, transpose = self.transposed_load, optional = True, no_defer = True)
                     scale_inv = self.config.stc.get_tensor(key + ".weight_scale_inv", dev, transpose = self.transposed_load, optional = True, no_defer = True)
                     assert scale is None or scale_inv is None
-                    no_defer = scale is not None or scale_inv is not None or self.weight_scale != 1.0
-                    weight = self.config.stc.get_tensor(key + ".weight", dev, float2half = True, transpose = self.transposed_load, pad_to = pad2, no_defer = no_defer)
-                    bias = self.config.stc.get_tensor(key + ".bias", dev, float2half = True, optional = True, pad_to = pad1, no_defer = no_defer)
+                    # Scaled loads are rewritten into a new tensor below: keep the raw load out of
+                    # the loader's slab blocks, where the dead copy would otherwise stay resident
+                    rescaled = scale is not None or scale_inv is not None or self.weight_scale != 1.0
+                    no_defer = rescaled
+                    weight = self.config.stc.get_tensor(key + ".weight", dev, float2half = True, transpose = self.transposed_load, pad_to = pad2, no_defer = no_defer, arena = not rescaled)
+                    bias = self.config.stc.get_tensor(key + ".bias", dev, float2half = True, optional = True, pad_to = pad1, no_defer = no_defer, arena = not rescaled)
                 if scale is not None:
                     weight = self.apply_fp8_scales_(weight, scale)
                 elif scale_inv is not None:
@@ -428,8 +433,8 @@ class Linear(Module):
         sv = opt(".sv", self.device, no_defer = True)
         svh = opt(".svh", self.device)
         trellis = stc.get_tensor(key + ".trellis", self.device)
-        mcg = opt(".mcg", "cpu")
-        mul1 = opt(".mul1", "cpu")
+        mcg = stc.get_codebook_marker(key + ".mcg", codebook_mcg_mult)
+        mul1 = stc.get_codebook_marker(key + ".mul1", codebook_mul1_mult)
         bias = opt(".bias", self.device)
         self.inner = LinearEXL3(
             self.config,
@@ -486,9 +491,13 @@ class Linear(Module):
             return
 
         def pin_alias(t):
+            # An arena of the tensor's own size rather than a tensor from torch's pinned allocator, which
+            # rounds each request up to a power of two and keeps the block after the tower is unloaded
             if not t.is_contiguous():
                 t = t.contiguous()
-            p = torch.empty(t.shape, dtype = t.dtype, device = "cpu", pin_memory = True)
+            nbytes = t.numel() * t.element_size()
+            inner._pinned_arena = PinnedArena(nbytes, f"Pinned weights of {self.key}", mapped = True, required = True)
+            p = inner._pinned_arena.tensor[:nbytes].view(t.dtype).view(t.shape)
             p.copy_(t)
             return p, ext.pinned_cuda_view(p, device.index if device.index is not None else 0)
 

@@ -3,7 +3,7 @@ import logging
 import torch
 from ..model.model import Model
 from ..cache.cache import Cache
-from ..cache.recurrent import RecurrentCache, MAX_PARCIAIS
+from ..cache.recurrent import RecurrentCache, MAX_PARCIAIS, host_pool, mp_host_pool_release
 from ..tokenizer.tokenizer import Tokenizer
 from ..constants import PAGE_SIZE  # so para a pagina logica; contabilidade usa self.page_tokens
 from ..util import cuda_sync_active
@@ -52,6 +52,7 @@ class Generator:
         dynamic_draft_tokens: bool = False,
         draft_confidence: float = 0.4,
         record_draft_stats: bool = False,
+        ngram_corpus: str | None = None,
         **kwargs
     ):
         """
@@ -93,6 +94,9 @@ class Generator:
         :param ngram_match_min:
             Minimum number of tokens to match for n-gram draft (0 = disabled).
 
+        :param ngram_corpus:
+            Optional frozen SAM file shared by n-gram jobs; requires ngram_match_min > 0.
+
         :param dynamic_draft_tokens:
             Adapt the per-round draft length to the workload. The draft is cut using a drafter-provided
             confidence score, calibrated online against observed acceptance rates (see draft_confidence). A
@@ -124,7 +128,8 @@ class Generator:
         :param cpu_cache_size:
             Size in bytes of a second-tier page cache in pinned system memory, 0 (default) to disable. Complete
             K/V pages evicted from the GPU cache are stored there and restored on prompt-cache hits instead of
-            being recomputed by prefill. Not currently supported in tensor-parallel mode
+            being recomputed by prefill. In tensor-parallel mode each rank pins its own shard of the tier and
+            the budget counts whole pages across all of them
 
         :param recurrent_cache_size:
             Size of recurrent cache, in bytes. Recurrent cache resides in system RAM. Default is 4 GB.
@@ -192,6 +197,12 @@ class Generator:
         else:
             self.num_draft_tokens = 0
 
+        self.ngram_corpus = None
+        if ngram_corpus is not None:
+            if ngram_match_min <= 0:
+                raise ValueError("ngram_corpus requires ngram_match_min > 0")
+            from .ngram import NgramCorpus
+            self.ngram_corpus = NgramCorpus(ngram_corpus, tokenizer)
         self.ngram_match_min = ngram_match_min
         self.dynamic_draft = dynamic_draft_tokens and self.num_draft_tokens > 0
         self.record_draft_stats = record_draft_stats
@@ -285,7 +296,7 @@ class Generator:
         if recurrent_checkpoint_interval is None:
             recurrent_checkpoint_interval = model.caps.get("default_recurrent_checkpoint_interval", 2048)
 
-        assert recurrent_checkpoint_interval % self.page_tokens == 0 and recurrent_checkpoint_interval % self.page_tokens == 0, \
+        assert recurrent_checkpoint_interval % self.page_tokens == 0 and recurrent_checkpoint_interval_pp % self.page_tokens == 0, \
             f"checkpoint interval must be a multiple of the page size ({self.page_tokens})"
         def ceil_span(a, b):
             return (a + b - 1) // b * b
@@ -653,6 +664,31 @@ class Generator:
         return results
 
 
+    def close(self):
+        """
+        Release the host memory a retired generator would otherwise hold until it is garbage collected,
+        which can be long after it stops being used: a generator sits in a reference cycle with its page
+        table, and the jobs that failed on it keep it reachable through their exception tracebacks. The
+        model and cache stay loaded for a replacement generator to use; this generator is not reusable
+        afterwards. Safe to call more than once.
+
+        Releases, in order of size: the recurrent checkpoint cache (up to recurrent_cache_size of system
+        RAM, in the tensor-parallel ranks too), the CPU page cache tier (cpu_cache_size of pinned memory),
+        the pinned staging and draft buffers, and the filter thread pool.
+        """
+        if self.recurrent_cache is not None:
+            self.recurrent_cache.close()
+        if self.cpu_page_cache is not None:
+            self.cpu_page_cache.close()
+            self.cpu_page_cache = None
+            self.pagetable.cpu_tier = None
+        self.sample_pinned = None
+        self.staging_buffers = {}
+        self.draft_input_ids_pinned = None
+        self.draft_ids_pinned = None
+        self.filter_pool.shutdown(wait = False)
+
+
     @torch.inference_mode()
     def on_queue_drained(self):
         """
@@ -663,6 +699,11 @@ class Generator:
         """
         if self.recurrent_cache is not None:
             self.recurrent_cache.prune_stranded()
+            # The pruned checkpoints' buffers went back to the stash pool; drop them so the RAM
+            # is actually returned (the next stash reallocates once)
+            host_pool.release()
+            if self.model.loaded_tp:
+                self.model.tp_dispatch_all(mp_host_pool_release, ())
         self.pagetable.defrag()
         # Dynamic expert placement: apply any pending swap sweep now, between generations —
         # a placement change perturbs the logits slightly (same expert, different device
@@ -1318,6 +1359,8 @@ class Generator:
                 launched.append((job, token_logits, sampled))
             if launched:
                 torch.cuda.synchronize(batch_logits.device)
+                # The sampled tokens are the next forward's inputs
+                self.model.prefetch_tokens([t for _, _, s in launched for t in s[0].view(-1).tolist()])
 
             for job, token_logits, (next_token, next_k_tokens, next_k_probs, next_prob) in launched:
                 eos, sampled_token, rq = job.receive_sample(
@@ -1423,8 +1466,11 @@ class Generator:
                             # Advance filters
                             for f in job.filters:
                                 if not f.is_active: continue
+                                # Both lists take one entry per active filter (prepare_logit_mask indexes them
+                                # in step)
                                 if f.use_background_worker():
                                     job.filter_futures.append(self.filter_pool.submit(f.get_next_logit_mask))
+                                    job.logit_masks.append(None)
                                 else:
                                     job.logit_masks.append(f.get_next_logit_mask())
                                     job.filter_futures.append(None)
@@ -1463,6 +1509,9 @@ class Generator:
                             draft_tokens.shape[-1],
                             accepted_length - 1,
                         ))
+
+                # The last sampled token leads the next forward
+                self.model.prefetch_tokens([sampled_token.item()])
 
                 accepted_lengths.append(accepted_length)
                 j += 1

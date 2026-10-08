@@ -60,7 +60,8 @@ def _grouped_dynamic_convolve(
     [b, l, H]), is added into residual in place and residual is returned (the finish()
     variant's residual add, fused into the kernel).
     """
-    if not hidden.is_cuda:
+    # TODO: HIP version
+    if not hidden.is_cuda or not ext.HAS_DFLASH2:
         return _grouped_dynamic_convolve_torch(hidden, dynamic, base, group_size, residual)
     hidden = hidden.contiguous()
     if residual is not None:
@@ -353,9 +354,11 @@ class DFlash2Selector(Module):
 
         topk (fork tp-mla): (valores [b, rows, k] ja escalados, ids [b, rows, k]) calculados fora,
         pelo lm_head fatiado de um alvo em tensor parallel; logits vem None e o top-k e pulado."""
-        gate = self.hidden_proj.forward(hidden.half(), params = {})
+        # The generator passes state[:, 1:], a strided view for more than one row, and .half() on
+        # an fp16 state returns that view as is
+        gate = self.hidden_proj.forward(hidden.half().contiguous(), params = {})
         anchor_ids = anchor_ids.long()
-        cuda = hidden.is_cuda and self.pred_codebook.dtype in (torch.half, torch.bfloat16)
+        cuda = ext.HAS_DFLASH2 and hidden.is_cuda and self.pred_codebook.dtype in (torch.half, torch.bfloat16)
         if topk is not None:
             unary, cands = topk
             bsz, rows = cands.shape[:2]

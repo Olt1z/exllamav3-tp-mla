@@ -2,6 +2,7 @@
 
 #include <ATen/Tensor.h>
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 // CPU-side MoE expert GEMM for mul1 (cb2) EXL3 tensors, standalone from the module code so it
@@ -11,7 +12,7 @@
 // the mul1 codebook is affine in a byte-sum, so dequantization and the activation product
 // fuse into integer dot products (see exl3_moe_cpu_forward for the math).
 //
-// Current limits: mul1 codebook only, K in [1, 8]. Gated experts with silu/gelu/swiglu_oai
+// Current limits: mul1 codebook only, K in [1, 8] or a half-integer rate 1.5 / 2.5 / 3.5. Gated experts with silu/gelu/swiglu_oai
 // (act_limit) or gateless with relu2; optional per-expert biases (uniform per projection).
 
 struct MoeCpuMatrix
@@ -22,7 +23,8 @@ struct MoeCpuMatrix
     const at::Half* bias;   // nullable; added after the output transform
     int k;
     int n;
-    int bits;
+    int bits;               // bits per weight, integer part
+    int hb = 0;             // half-integer rate: bits + 0.5
     // Band-contiguous ("swizzled") trellis layout: tile (kt, nt) stored at group nt/8, then
     // kt, then member nt%8, so each 8-tile output band reads as one sequential k-stream
     int swz = 0;
@@ -115,6 +117,9 @@ void exl3_moe_cpu_set_prof(bool enabled);
 // Wake helpers before the GPU payload arrives; no work or completion barrier.
 void exl3_moe_cpu_pool_prime(int threads);
 int64_t exl3_moe_cpu_pool_stress(int threads, int iters, int small, int spin);   // test hook
+// Pool topology for host placement: physical-core-first encoded LP order and the physical core
+// count; empty when EXL3_MOE_CPU_PIN=0.
+std::pair<std::vector<int64_t>, int64_t> exl3_moe_cpu_core_order();
 
 // Kernel availability (dispatch happens internally; these are informational, post-env-cap).
 // has_avx512_vbmi and has_avx512_bw additionally gate the swizzled weight layout in the child

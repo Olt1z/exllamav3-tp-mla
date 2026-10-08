@@ -6,9 +6,11 @@ import numpy as np
 import torch
 
 from ..ext import exllamav3_ext as ext
+from ..util.device_copy import host_to_device
 from ..util.misc import Cleanupper, install_parent_death_signal
 from ..util.shm import check_shm_capacity
 from ..util.memory import check_host_memory, windows_memory_status
+from .moe_cpu_affinity import plan_host_cpus, default_worker_threads, apply_process_affinity, process_cpus
 from .model_tp_cuda import (
     cuda_host_register,
     cuda_host_unregister,
@@ -78,9 +80,19 @@ class MoeCpuTuning:
         self.num_slots = int(os.environ.get("EXL3_MOE_CPU_SLOTS", 4))
         assert 1 <= self.num_slots <= 8, "EXL3_MOE_CPU_SLOTS must be 1..8 (MOE_MAX_SLOTS in moe_handoff.h)"
         self.cap_rows = int(os.environ.get("EXL3_MOE_CPU_SLOT_ROWS", 64))
+        # Physical cores kept free of pool workers for the host process when the pool pins its
+        # workers (EXL3_MOE_CPU_PIN); the host is confined to them once the worker has started,
+        # see moe_cpu_affinity.py. 0 disables the reservation and the pinning
+        self.host_cores = int(os.environ.get("EXL3_MOE_HOST_CORES", 1))
         # Thread count fallback chain ends here; config.infer_params.moe_cpu_threads (or the
-        # draft/MTP equivalent) takes precedence per host when set (MoeCpuHost.__init__)
-        self.threads = int(os.environ.get("EXL3_MOE_CPU_THREADS", max(1, (os.cpu_count() or 2) // 2)))
+        # draft/MTP equivalent) takes precedence per host when set (MoeCpuHost.__init__).
+        # Default: physical cores minus host_cores; cpu_count/2 when host_cores is 0, pinning
+        # is off or the topology is unreadable
+        _, n_phys = ext.exl3_moe_cpu_core_order()
+        self.threads = int(os.environ.get(
+            "EXL3_MOE_CPU_THREADS",
+            default_worker_threads(n_phys, self.host_cores) if n_phys and self.host_cores > 0
+            else max(1, (os.cpu_count() or 2) // 2)))
         self.num_wslots = min(int(os.environ.get("EXL3_MOE_CPU_WSLOTS", 2)), MOE_MAX_WSLOTS)
         # O padrão é um PISO, não o valor final: `MoeCpuHost` o cresce para caber um lote
         # inteiro de experts depois de conhecer o tamanho deles. Ver `_dimensionar_wslot`.
@@ -93,13 +105,21 @@ class MoeCpuTuning:
         self.stage_threads = int(os.environ.get("EXL3_MOE_CPU_STAGE_THREADS", 4))
         # madvise(MADV_HUGEPAGE) on the expert-weight arena chunks: with defrag=madvise (the
         # common default), the kernel does SYNCHRONOUS compaction on first touch of a hinted
-        # region once easily-compactable free memory runs low, which can stall loading badly
+        # region once easily-compactable free memory runs low, which can stall loading badly.
+        # On Windows the same flag makes each arena chunk attempt MEM_LARGE_PAGES at
+        # VirtualAlloc time (no post-hoc promotion exists there), negotiating the request
+        # size down per chunk and falling back to a plain mapping per chunk
         self.arena_hugepage = os.environ.get("EXL3_MOE_ARENA_HUGEPAGE", "1") != "0"
         # Band-contiguous ("swizzled") expert trellis layout: repacked at arena rehome so each
         # 8-tile output band streams sequentially from DRAM. Applied on every AVX-512 kernel
         # tier (bw, vnni, vbmi); the AVX2 and scalar tiers read the native layout.
         # EXL3_MOE_CPU_SWIZZLE=0 restores the native layout.
         self.swizzle = os.environ.get("EXL3_MOE_CPU_SWIZZLE", "1") != "0"
+        # Experts read per deferred-load pass when the worker loads a layer. Each pass is read
+        # into loader tensors and then copied into the arena, so this bounds the transient host
+        # memory on top of the arena to a slice of a layer instead of the whole layer (~1.2 GiB
+        # per layer on a 512-expert model). 0 loads the whole layer in one pass
+        self.load_batch_experts = int(os.environ.get("EXL3_MOE_CPU_LOAD_BATCH", 32))
 
         # --- GPU-streaming prefill ---
         self.stream_t_explicit = "EXL3_MOE_STREAM_T" in os.environ
@@ -143,6 +163,42 @@ class MoeCpuTuning:
 
 TUNING = MoeCpuTuning()
 ext.exl3_moe_cpu_set_memops(TUNING.memops)
+
+# Host placement is per process: planned for the first started host's worker count and kept
+# for later hosts (MTP head, draft model, reload). Workers spawned after it restore the
+# pre-pin mask (_HOST_ORIG_CPUS) so their pool can pin outside the host's LPs
+_HOST_AFFINITY_THREADS: int | None = None
+_HOST_ORIG_CPUS: list[int] | None = None
+
+
+def _apply_host_affinity(threads: int, host_cores: int):
+    """Confine the host process to the CPUs the worker pool leaves free. Never raises: an OS
+    failure leaves the host unpinned with a notice."""
+    global _HOST_AFFINITY_THREADS, _HOST_ORIG_CPUS
+    if _HOST_AFFINITY_THREADS is not None:
+        if threads > _HOST_AFFINITY_THREADS:
+            print(f" -- CPU MoE host affinity: placement planned for {_HOST_AFFINITY_THREADS} workers, "
+                  f"kept for a {threads}-thread worker")
+        return
+    _HOST_AFFINITY_THREADS = threads
+    order, n_phys = ext.exl3_moe_cpu_core_order()
+    cpus = plan_host_cpus(order, n_phys, threads, host_cores)
+    if cpus is None:
+        if host_cores > 0 and n_phys:
+            print(" -- CPU MoE host affinity: no LP free of workers in one processor group; "
+                  "host threads left unpinned")
+        return
+    try:
+        orig = process_cpus()
+    except OSError as e:
+        print(f" !! CPU MoE host affinity: {e}; host threads left unpinned")
+        return
+    err = apply_process_affinity(cpus)
+    if err is not None:
+        print(f" !! CPU MoE host affinity: {err}; host threads left unpinned")
+        return
+    _HOST_ORIG_CPUS = orig
+    print(f" -- CPU MoE host affinity: host on LPs {[enc & 0xFFFF for enc in cpus]}")
 
 
 # memfd_create only ships in CPython when the interpreter was built against glibc >= 2.27; conda
@@ -201,6 +257,127 @@ def _memfd_create(name: str, flags: int = 0) -> int:
             f"applies ({e}). Unset EXL3_MOE_PINNED_ARENA to use the staged path.") from e
 
 
+# Windows large pages: there is no madvise/promotion path, so MEM_LARGE_PAGES must be requested
+# at VirtualAlloc time. That requires SeLockMemoryPrivilege enabled on this process's token
+# (the privilege is granted-but-disabled by default for accounts that have it), and the size
+# must be a multiple of GetLargePageMinimum() (2 MiB on x64). Large pages are committed and
+# non-pageable, so allocation can fail on a fragmented or busy system -- callers fall back to
+# a plain anonymous mapping per chunk. A failed request is expensive to repeat (the kernel
+# searches for contiguous memory each time) and contiguity does not come back during a load,
+# so the arena remembers how far down the size ladder it had to go (see _HugeArena._new_chunk).
+
+_WIN32_LARGE_PAGE_SUPPORT = None
+
+
+def _win32_enable_lock_memory_privilege() -> bool:
+    """Best-effort SeLockMemoryPrivilege enable on the current process token. Returns True
+    only when the privilege ends up enabled."""
+    import ctypes
+    from ctypes import wintypes
+
+    TOKEN_ADJUST_PRIVILEGES = 0x0020
+    SE_PRIVILEGE_ENABLED = 0x00000002
+
+    class LUID(ctypes.Structure):
+        _fields_ = [("LowPart", wintypes.DWORD), ("HighPart", wintypes.LONG)]
+
+    class LUID_AND_ATTRIBUTES(ctypes.Structure):
+        _fields_ = [("Luid", LUID), ("Attributes", wintypes.DWORD)]
+
+    class TOKEN_PRIVILEGES(ctypes.Structure):
+        _fields_ = [("PrivilegeCount", wintypes.DWORD),
+                    ("Privileges", LUID_AND_ATTRIBUTES * 1)]
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error = True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error = True)
+    # GetCurrentProcess returns the -1 pseudo-handle; without a pointer-sized restype ctypes
+    # truncates it to 32 bits and OpenProcessToken fails with ERROR_INVALID_HANDLE
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    advapi32.OpenProcessToken.argtypes = [
+        wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
+    advapi32.LookupPrivilegeValueW.argtypes = [
+        wintypes.LPCWSTR, wintypes.LPCWSTR, ctypes.POINTER(LUID)]
+    advapi32.AdjustTokenPrivileges.argtypes = [
+        wintypes.HANDLE, wintypes.BOOL, ctypes.POINTER(TOKEN_PRIVILEGES),
+        wintypes.DWORD, ctypes.c_void_p, ctypes.c_void_p]
+    token = wintypes.HANDLE()
+    if not advapi32.OpenProcessToken(
+            kernel32.GetCurrentProcess(),
+            TOKEN_ADJUST_PRIVILEGES,
+            ctypes.byref(token)):
+        return False
+    try:
+        luid = LUID()
+        if not advapi32.LookupPrivilegeValueW(None, "SeLockMemoryPrivilege", ctypes.byref(luid)):
+            return False
+        tp = TOKEN_PRIVILEGES()
+        tp.PrivilegeCount = 1
+        tp.Privileges[0] = LUID_AND_ATTRIBUTES(luid, SE_PRIVILEGE_ENABLED)
+        advapi32.AdjustTokenPrivileges(token, False, ctypes.byref(tp), 0, None, None)
+        # AdjustTokenPrivileges returns success even when it silently dropped privileges it
+        # couldn't assign; GetLastError distinguishes full assignment from partial
+        return ctypes.get_last_error() == 0
+    finally:
+        kernel32.CloseHandle(token)
+
+
+def _win32_large_page_alloc(size: int, min_size: int):
+    """Allocate MEM_LARGE_PAGES memory of up to `size` bytes, halving the request on each
+    failure down to `min_size`, and return the largest buffer obtained (a ctypes byte array
+    bound to the allocation -- buffer-protocol compatible, so it drops into the same
+    memoryview / torch.frombuffer consumers as an mmap object), or None when even `min_size`
+    cannot be supplied. A large request needs that many physically contiguous 2 MiB regions,
+    which a fragmented or busy system often cannot supply even when smaller runs exist, so a
+    shrunken chunk is still a win over falling back to 4K pages outright. A weakref.finalize
+    on the array issues VirtualFree(MEM_RELEASE) when the last reference dies, giving the
+    chunk the same free-on-GC lifetime semantics as an mmap object."""
+    import ctypes
+    import weakref
+
+    global _WIN32_LARGE_PAGE_SUPPORT
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error = True)
+    kernel32.GetLargePageMinimum.restype = ctypes.c_size_t
+
+    if _WIN32_LARGE_PAGE_SUPPORT is None:
+        large_page_min = kernel32.GetLargePageMinimum()
+        _WIN32_LARGE_PAGE_SUPPORT = bool(large_page_min) and _win32_enable_lock_memory_privilege()
+        if not _WIN32_LARGE_PAGE_SUPPORT and os.environ.get("EXL3_MOE_ARENA_DEBUG"):
+            print(" -- arena: MEM_LARGE_PAGES unavailable "
+                  f"(GetLargePageMinimum={large_page_min}, SeLockMemoryPrivilege "
+                  "not enabled); arena chunks will use regular pages", flush = True)
+    if not _WIN32_LARGE_PAGE_SUPPORT:
+        return None
+
+    granularity = kernel32.GetLargePageMinimum()
+    MEM_RESERVE = 0x2000
+    MEM_COMMIT = 0x1000
+    MEM_LARGE_PAGES = 0x20000000
+    PAGE_READWRITE = 0x04
+    kernel32.VirtualAlloc.restype = ctypes.c_void_p
+    kernel32.VirtualAlloc.argtypes = [
+        ctypes.c_void_p, ctypes.c_size_t, ctypes.c_ulong, ctypes.c_ulong]
+    kernel32.VirtualFree.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_ulong]
+
+    want = (size + granularity - 1) // granularity * granularity
+    floor = (min_size + granularity - 1) // granularity * granularity
+    addr = None
+    while True:
+        addr = kernel32.VirtualAlloc(
+            None, want, MEM_RESERVE | MEM_COMMIT | MEM_LARGE_PAGES, PAGE_READWRITE)
+        if addr or want <= floor:
+            break
+        want = max(want >> 1, floor)
+    if not addr:
+        return None
+    buf = (ctypes.c_uint8 * want).from_address(addr)
+    weakref.finalize(buf, kernel32.VirtualFree, ctypes.c_void_p(addr), 0, 0x8000)  # MEM_RELEASE
+    if want < size and os.environ.get("EXL3_MOE_ARENA_DEBUG"):
+        print(f" -- arena: MEM_LARGE_PAGES negotiated down to {want >> 20} MiB "
+              f"(asked {size >> 20} MiB)", flush = True)
+    return buf
+
+
 class _HugeArena:
     """
     Growable pool of large (default 1 GiB) anonymous mmap chunks that expert weights are copied
@@ -208,6 +385,8 @@ class _HugeArena:
     instead of thousands of separate small (sub-2MB) loader allocations
     """
     CHUNK_BYTES = 1 << 30   # 1 GiB
+    WIN32_LARGE_FLOOR = 64 << 20   # smallest MEM_LARGE_PAGES chunk worth having (Windows)
+    CHECK_STEP = 256 << 20   # host-memory guard granularity for lazily committed chunks
 
     def __init__(self, shared = False, huge = "", conn = None):
         """shared: back each chunk with shared memory and publish it over `conn` as
@@ -220,12 +399,24 @@ class _HugeArena:
         self.chunks = []
         self.cur = None
         self.cur_off = 0
+        # A private anonymous chunk (Linux, not shared) only takes RAM for the pages rehome()
+        # writes, and the last chunk of a load is usually mostly unused, so the host-memory
+        # guard runs on bytes written (in CHECK_STEP slices) rather than on whole chunks.
+        # Shared, hugetlb and Windows chunks are committed up front and keep the per-chunk check
+        self.lazy = not shared and os.name != "nt"
+        self.written = 0
+        self.checked = 0
+        self.win32_large_bytes = 0   # bytes of chunks backed by MEM_LARGE_PAGES (Windows)
+        # Largest MEM_LARGE_PAGES request still worth making (Windows), None until the first
+        # attempt: the size the last chunk was served at, or below the smallest size that failed
+        self.win32_large_ceiling = None
 
     def _new_chunk(self, min_bytes):
         import mmap, os
         size = max(self.CHUNK_BYTES, (min_bytes + (2 << 20) - 1) & ~((2 << 20) - 1))
-        check_host_memory(size, f"CPU MoE expert arena chunk {len(self.chunks)} "
-                                f"({(sum(len(c) for c in self.chunks) + size) >> 20} MiB in total)")
+        if not self.lazy:
+            check_host_memory(size, f"CPU MoE expert arena chunk {len(self.chunks)} "
+                                    f"({(sum(len(c) for c in self.chunks) + size) >> 20} MiB in total)")
         if self.shared and os.name == "nt":
             # Named pagefile-backed section as a plain mmap (a SharedMemory owner's finalizer
             # trips on the layer tensors' exports at worker exit). It charges commit and gets
@@ -285,9 +476,25 @@ class _HugeArena:
             os.close(fd)   # the mapping keeps the pages alive
         elif os.name == "nt":
             # mmap.MAP_PRIVATE / mmap.PROT_* don't exist on Windows; an anonymous mapping is
-            # writable by default there. Hugepage promotion doesn't apply (promote_hugepages
-            # is already a no-op via its try/except), the arena still serves its pooling role
-            m = mmap.mmap(-1, size)
+            # writable by default there. Windows has no post-hoc hugepage promotion, so the
+            # EXL3_MOE_ARENA_HUGEPAGE knob is honoured here instead: each chunk first tries a
+            # MEM_LARGE_PAGES VirtualAlloc (needs SeLockMemoryPrivilege and physically
+            # contiguous 2 MiB regions), halving the request down to 64 MiB -- and no lower
+            # than what the placement needs -- before falling back to a plain mapping, still
+            # at full chunk size since regular pages have no contiguity constraint. Later
+            # chunks start at the size the previous one was served at instead of walking the
+            # ladder from the top again, and stop asking once the smallest size has failed
+            m = None
+            if TUNING.arena_hugepage:
+                floor = max(self.WIN32_LARGE_FLOOR, min_bytes)
+                ceiling = self.win32_large_ceiling
+                if ceiling is None or ceiling >= floor:
+                    m = _win32_large_page_alloc(size if ceiling is None else min(size, ceiling), floor)
+                    self.win32_large_ceiling = len(m) if m is not None else floor // 2
+            if m is not None:
+                self.win32_large_bytes += len(m)
+            else:
+                m = mmap.mmap(-1, size)
         else:
             m = mmap.mmap(-1, size, mmap.MAP_PRIVATE, mmap.PROT_READ | mmap.PROT_WRITE)
         self.chunks.append(m)
@@ -295,7 +502,7 @@ class _HugeArena:
         self.cur_off = 0
         if os.environ.get("EXL3_MOE_ARENA_DEBUG"):
             total = sum(len(c) for c in self.chunks)
-            print(f" -- arena: new chunk {size/1e6:.1f} MB, {len(self.chunks)} chunks, "
+            print(f" -- arena: new chunk {len(m)/1e6:.1f} MB, {len(self.chunks)} chunks, "
                   f"{total/1e9:.3f} GB total", flush = True)
 
     def reserve(self, nbytes):
@@ -318,6 +525,21 @@ class _HugeArena:
         the kernel doesn't support it."""
         import mmap, os, time
         if not TUNING.arena_hugepage:
+            return
+        if os.name == "nt":
+            # MEM_LARGE_PAGES is decided at VirtualAlloc time (see _new_chunk); there is no
+            # promotion step to run here, only coverage to report. Large pages are locked in
+            # RAM, which the user did not ask for explicitly, so say so whenever they are in
+            # use; an account without the privilege gets regular pages and no message
+            total = sum(len(c) for c in self.chunks)
+            if self.win32_large_bytes:
+                print(f" -- CPU MoE arena: {self.win32_large_bytes/1e9:.2f} GB of {total/1e9:.2f} GB "
+                      f"on large pages (locked in RAM, never paged out; set "
+                      f"EXL3_MOE_ARENA_HUGEPAGE=0 to use regular pages)", flush = True)
+            elif _WIN32_LARGE_PAGE_SUPPORT and total:
+                print(" -- CPU MoE arena: no large pages could be allocated, using regular pages "
+                      "(physical memory is too fragmented; large pages are usually available "
+                      "again after a reboot)", flush = True)
             return
         collapse = getattr(mmap, "MADV_COLLAPSE", 25)
         t0 = time.perf_counter()
@@ -344,6 +566,12 @@ class _HugeArena:
             return tensor
         nbytes = tensor.numel() * tensor.element_size()
         aligned = (nbytes + 63) & ~63
+        if self.lazy:
+            if self.written + aligned > self.checked:
+                step = max(aligned, self.CHECK_STEP)
+                check_host_memory(step, f"CPU MoE expert arena ({(self.written + step) >> 20} MiB in total)")
+                self.checked = self.written + step
+            self.written += aligned
         if self.cur is None or self.cur_off + aligned > len(self.cur):
             self._new_chunk(aligned)
         off = self.cur_off
@@ -359,7 +587,7 @@ class _HugeArena:
         return dst.view(tensor.dtype).view(tensor.shape)
 
 
-def _moe_cpu_child_main(conn, model_dir, threads, stage_threads, pinned = False, huge = ""):
+def _moe_cpu_child_main(conn, model_dir, threads, stage_threads, pinned = False, huge = "", cpus = None):
     """
     Child entry point: receives ("layer", spec) messages, loading each layer's expert tensors
     (deferred, multithreaded) and acking, until ("start", shm_name, layout) switches it into the
@@ -377,6 +605,13 @@ def _moe_cpu_child_main(conn, model_dir, threads, stage_threads, pinned = False,
     # orchestrated by the parent (quit flag) or the kernel (PDEATHSIG), never by SIGINT
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     ipds()
+
+    if cpus is not None:
+        # Spawned after the host was confined: drop the inherited host mask, or the pool's
+        # worker pins fail (Windows refuses a thread mask outside the process mask)
+        err = apply_process_affinity(cpus)
+        if err is not None:
+            print(f" !! CPU MoE worker affinity: {err}; worker confined to the host's LPs")
 
     if os.name == "nt":
         # Hold 1 ms timer resolution for this process (per-process since Windows 10 2004): the
@@ -447,14 +682,23 @@ def _moe_cpu_child_main(conn, model_dir, threads, stage_threads, pinned = False,
             msg = conn.recv()
             if msg[0] == "layer":
                 spec = msg[1]
-                stc.begin_deferred_load()
-                g = fetch(spec["gate_keys"])
-                u = fetch(spec["up_keys"])
-                d = fetch(spec["down_keys"])
-                stc.end_deferred_load()
-                # Copy into the hugepage-backed arena now that the deferred reads have actually
-                # populated these tensors
-                g, u, d, blocks = rehome_experts(g, u, d)
+                num_experts = len(spec["up_keys"])
+                batch = TUNING.load_batch_experts or num_experts
+                g, u, d, blocks = [], [], [], []
+                for e0 in range(0, num_experts, batch):
+                    sl = slice(e0, e0 + batch)
+                    stc.begin_deferred_load()
+                    bg = fetch(spec["gate_keys"][sl])
+                    bu = fetch(spec["up_keys"][sl])
+                    bd = fetch(spec["down_keys"][sl])
+                    stc.end_deferred_load()
+                    # Copy into the hugepage-backed arena now that the deferred reads have
+                    # actually populated these tensors; the loader tensors die with this batch
+                    bg, bu, bd, bb = rehome_experts(bg, bu, bd)
+                    g += bg
+                    u += bu
+                    d += bd
+                    blocks += bb
                 cext.exl3_moe_cpu_make_layer(
                     [t[0] for t in g], [t[1] for t in g], [t[2] for t in g],
                     [t[0] for t in u], [t[1] for t in u], [t[2] for t in u],
@@ -592,7 +836,7 @@ class MoeCpuHost:
         self.cap_rows = TUNING.cap_rows
         # Per-component thread override: config.infer_params.moe_cpu_threads for the main model,
         # draft_moe_cpu_threads for anything else (MTP head / draft model); falls back to the
-        # tuning default (EXL3_MOE_CPU_THREADS env, else cpu_count/2)
+        # tuning default (EXL3_MOE_CPU_THREADS env, else physical cores minus EXL3_MOE_HOST_CORES)
         comp = getattr(config.infer_params, "moe_cpu_component", "text")
         cfg_threads = getattr(config.infer_params,
             "moe_cpu_threads" if comp == "text" else "draft_moe_cpu_threads", None)
@@ -628,7 +872,7 @@ class MoeCpuHost:
         self.proc = ctx.Process(
             target = _moe_cpu_child_main,
             args = (child_conn, self.model_dir, self.threads, self.stage_threads,
-                    self.pinned, TUNING.arena_huge if self.pinned else ""),
+                    self.pinned, TUNING.arena_huge if self.pinned else "", _HOST_ORIG_CPUS),
             daemon = True,
         )
         self.proc.start()
@@ -696,7 +940,7 @@ class MoeCpuHost:
                   flush = True)
 
     def register_layer(self, key, gate_keys, up_keys, down_keys, activation, act_limit, hi, ho, topk,
-                       proj_dims = None, aux = None):
+                       proj_dims = None, aux = None, interm_fp32 = False):
         if key in self.by_key:
             # Autosplit rollback retry: the child keeps its copy, reuse the index, but take
             # the re-fetched aux tensors: the retry runs on a different device, and the stored
@@ -717,13 +961,14 @@ class MoeCpuHost:
             hi = hi, ho = ho, topk = topk,
             num_experts = len(up_keys),
             proj_dims = proj_dims,
+            interm_fp32 = interm_fp32,      # resident experts' gate/up output dtype (BlockSparseMLP interm_dtype)
         )
         if proj_dims is not None:
             # Deterministic per-expert byte layout (gate, up, down), mirrored by the worker's
             # stage function
             def tb(d):
                 k, n, K = d
-                return (k // 16) * (n // 16) * 16 * K * 2
+                return (k // 16) * (n // 16) * int(16 * K) * 2
             gb = tb(proj_dims["g"]) if proj_dims.get("g") else 0
             ub, db = tb(proj_dims["u"]), tb(proj_dims["d"])
             spec["proj_bytes"] = (gb, ub, db)
@@ -919,6 +1164,8 @@ class MoeCpuHost:
                ("avx512-bw" if ext.exl3_moe_cpu_has_avx512_bw() else \
                ("avx2" if ext.exl3_moe_cpu_has_avx2() else "scalar")))
         print(f" -- CPU MoE worker started: {len(self.specs)} layers, {kern}, {self.threads} threads")
+        # The worker was spawned before this and pins its own threads; keep the host off them
+        _apply_host_affinity(self.threads, TUNING.host_cores)
 
     def _start_watchdog(self):
         """
@@ -1277,14 +1524,17 @@ class MoeCpuHost:
         self.sstate[key] = st
         return st
 
-    def _dq_linear(self, x, trellis_view, dims, suh, svh, bias, w_scratch):
-        """reconstruct-path linear: had_in(x * suh) @ W -> had_out * svh (+ bias)"""
+    def _dq_linear(self, x, trellis_view, dims, suh, svh, bias, w_scratch, out_dtype = torch.half):
+        """reconstruct-path linear: had_in(x * suh) @ W -> had_out * svh (+ bias). out_dtype
+        follows the resident experts (fp32 for the down projection, the model's interm_dtype
+        for gate/up): on models with massive activations the output-side Hadamard concentrates
+        a 128-block past the fp16 range, and an in-place fp16 transform overflows to inf"""
         k, n, K = dims
         xh = torch.empty_like(x)
         ext.had_r_128(x, xh, suh, None, 1.0)
         w = w_scratch[:k * n].view(k, n)
         ext.reconstruct(w, trellis_view, K, False, True)
-        y = torch.empty((x.shape[0], n), dtype = torch.half, device = x.device)
+        y = torch.empty((x.shape[0], n), dtype = out_dtype, device = x.device)
         ext.hgemm(xh, w, y)
         ext.had_r_128(y, y, None, svh, 1.0)
         if bias is not None:
@@ -1464,7 +1714,7 @@ class MoeCpuHost:
         table = np.zeros(E + 1, dtype = np.bool_)
         for e in streamed:
             table[e + 1] = True
-        smask1 = torch.from_numpy(table).to(y.device, non_blocking = True)
+        smask1 = host_to_device(torch.from_numpy(table), y.device)
         is_streamed = smask1.index_select(0, shifted)
         sel_tail = flat.masked_fill(is_streamed, -1).view(rows, topk)
         tidx = (sel_tail >= 0).any(dim = 1).nonzero(as_tuple = True)[0]
@@ -1595,9 +1845,8 @@ class MoeCpuHost:
                     # Placeholder gate tables, never dereferenced (gate GEMM is skipped)
                     for i in (0, 1, 2):
                         tbl[i] = tbl[i + 3]
-                tblt = torch.tensor(tbl, dtype = torch.int64).to(y.device, non_blocking = True)
-                ec = torch.tensor([counts_h[e] for _, e, _, _ in per_e] + [0],
-                                  dtype = torch.long).to(y.device, non_blocking = True)
+                tblt = host_to_device(torch.tensor(tbl, dtype = torch.int64), y.device)
+                ec = host_to_device(torch.tensor([counts_h[e] for _, e, _, _ in per_e] + [0], dtype = torch.long), y.device)
                 tok = torch.cat([seg for _, _, seg, _ in per_e])
                 wts = torch.cat([wseg for _, _, _, wseg in per_e]).half()
                 Ku, Kd = pd["u"][2], pd["d"][2]
@@ -1675,24 +1924,28 @@ class MoeCpuHost:
                 we = wseg.float().unsqueeze(1)
                 def tview(off_b, dims):
                     k, n, K = dims
-                    numel = (k // 16) * (n // 16) * 16 * K
+                    numel = (k // 16) * (n // 16) * int(16 * K)
                     return vslot[boff + off_b // 2 : boff + off_b // 2 + numel] \
-                        .view(k // 16, n // 16, 16 * K)
+                        .view(k // 16, n // 16, int(16 * K))
+                # Same output dtypes as the resident experts: the intermediate as the model's
+                # interm_dtype, the down projection fp32 (the activation casts to half for the
+                # down GEMM either way)
+                idt = torch.float if spec.get("interm_fp32") else torch.half
                 if gated:
                     gy = self._dq_linear(xg, tview(0, pd["g"]), pd["g"],
                                          aux["suh_g"][e], aux["svh_g"][e],
                                          aux["bias_g"][e] if aux.get("bias_g") else None,
-                                         st["w_scratch"])
+                                         st["w_scratch"], out_dtype = idt)
                 uy = self._dq_linear(xg, tview(gb, pd["u"]), pd["u"],
                                      aux["suh_u"][e], aux["svh_u"][e],
                                      aux["bias_u"][e] if aux.get("bias_u") else None,
-                                     st["w_scratch"])
+                                     st["w_scratch"], out_dtype = idt)
                 a = self._act(spec, gy if gated else None, uy) if gated else self._act(spec, None, uy)
                 dy = self._dq_linear(a, tview(gb + ub, pd["d"]), pd["d"],
                                      aux["suh_d"][e], aux["svh_d"][e],
                                      aux["bias_d"][e] if aux.get("bias_d") else None,
-                                     st["w_scratch"])
-                out.index_add_(0, idx, dy[:, :h].float() * we)
+                                     st["w_scratch"], out_dtype = torch.float)
+                out.index_add_(0, idx, dy[:, :h] * we)
             st["wconsumed_ev"][ws].record(torch.cuda.current_stream())
 
         # Collect the CPU tail (by now usually complete) and merge

@@ -23,6 +23,7 @@ from ..modules.gated_rmsnorm import GatedRMSNorm
 from ..modules.qsa_indexer import QSAIndexer
 from ..modules.attn import prepare_for_attn
 from ..cache.recurrent_util import prepare_for_recurrence
+from ..util.rope import RoPE
 from .qwen3_5 import Qwen3_5VLMoeBaseConfig
 from .qwen4_exp_mtp import Qwen4ExpMTPModel
 
@@ -302,6 +303,7 @@ class Qwen4ExpModel(Model):
         ]
 
         self.logit_layer_idx = len(self.modules) - 1
+        GatedResidual.link_sites(self.modules)
 
         self.calibration_all_experts = True
         self.caps.update({
@@ -312,6 +314,11 @@ class Qwen4ExpModel(Model):
             "linear_attn": True,
         })
         self.recurrent_state_cls = GDNState
+
+        # Generator needs MRoPE freqs when using MMEmbeddings
+        if config.vision:
+            self.caps.update({"mrope": True})
+            self.g_rope = RoPE("cpu", config.rope_settings)
 
     @override
     def prepare_inputs(self, input_ids: torch.Tensor, params: dict) -> torch.Tensor:

@@ -1,7 +1,7 @@
 <h1 align="center">ExLlamaV3 · <code>tp-mla</code></h1>
 
 <p align="center">
-  <a href="https://github.com/turboderp-org/exllamav3"><img alt="upstream" src="https://img.shields.io/badge/upstream-exllamav3%20v1.5.2-1f6feb?style=for-the-badge"></a>
+  <a href="https://github.com/turboderp-org/exllamav3"><img alt="upstream" src="https://img.shields.io/badge/upstream-exllamav3%20v1.6.0-1f6feb?style=for-the-badge"></a>
   <img alt="cuda" src="https://img.shields.io/badge/CUDA-12.4%2B-76b900?style=for-the-badge">
   <img alt="python" src="https://img.shields.io/badge/Python-3.10%2B-3776ab?style=for-the-badge">
   <a href="#licença"><img alt="license" src="https://img.shields.io/badge/license-MIT-blue?style=for-the-badge"></a>

@@ -8,6 +8,7 @@ from . import Module, Linear, RMSNorm, LayerNorm
 from ..constants import PAGE_SIZE
 from .multilinear import MultiLinear, SlicedMultiLinear
 from ..ext import exllamav3_ext as ext
+from ..util.backend import QKV_SLICE
 from ..model.model_tp_alloc import TPAllocation
 from ..util import profile_opt
 import os
@@ -15,7 +16,9 @@ from .attention_fn.bc_attn import bc_attn_enable as _bc_attn_enable, build_bc_at
 
 # Sliced Q/K/V(/G) projection bundle at decode (one mgemm over equal-width column slices);
 # EXL3_QKV_SLICE=0 falls back to the pairwise K/V and Q/G bundles
-_qkv_slice_enable = os.environ.get("EXL3_QKV_SLICE", "1") != "0"
+# (off by default on ROCm: the RDNA multi-matrix GEMVs do not take sliced bundles, which would fall back to
+# the cooperative GEMM)
+_qkv_slice_enable = QKV_SLICE
 
 
 def _sim_kvq_inplace(t: torch.Tensor, bits: int | None, compand_a: float):
@@ -230,6 +233,36 @@ class Attention(Module):
         self.key_sinks = key_sinks
         self.sinks = None
 
+        # Runtime and TP bookkeeping; set before the zero-head early return below (forward(), unload()
+        # and the TP import glue touch these on ranks that hold none of this layer's heads)
+        self.cache_layers = []
+        self.tp_cache_lookup = {}
+        self.multi_kv = None
+        self.multi_qg = None
+        self.tp_reduce = False
+        self.dispatch_cache = {}
+        self.bc_attn = {}
+
+        self.q_norm_tensor = None
+        self.k_norm_tensor = None
+
+        self.has_split_cache = False
+
+        # TP-aware span_heads norm support
+        self.tp_span_heads_norm = False
+        self.q_global_dim = 0
+        self.k_global_dim = 0
+
+        self.prealloc_qgh_1 = None
+        self.prealloc_qg_1 = None
+        self.prealloc_kvh_1 = None
+        self.prealloc_kv_1 = None
+        self.multi_qkv = None
+        self.prealloc_qkvh_1 = None
+        self.prealloc_qkv_out_1 = None
+        self.prealloc_qkv_cptrs_1 = None
+        self.prealloc_qkv_carrier = None
+
         if self.num_kv_heads == 0:
             return
 
@@ -387,34 +420,6 @@ class Attention(Module):
             "kv_cache": True
         })
 
-        self.cache_layers = []
-        self.tp_cache_lookup = {}
-        self.multi_kv = None
-        self.multi_qg = None
-        self.tp_reduce = False
-        self.dispatch_cache = {}
-        self.bc_attn = {}
-
-        self.q_norm_tensor = None
-        self.k_norm_tensor = None
-
-        self.has_split_cache = False
-
-        # TP-aware span_heads norm support
-        self.tp_span_heads_norm = False
-        self.q_global_dim = 0
-        self.k_global_dim = 0
-
-        self.prealloc_qgh_1 = None
-        self.prealloc_qg_1 = None
-        self.prealloc_kvh_1 = None
-        self.prealloc_kv_1 = None
-        self.multi_qkv = None
-        self.prealloc_qkvh_1 = None
-        self.prealloc_qkv_out_1 = None
-        self.prealloc_qkv_cptrs_1 = None
-        self.prealloc_qkv_carrier = None
-
 
     @override
     def optimizer_targets(self):
@@ -442,7 +447,7 @@ class Attention(Module):
 
         if self.key_sinks:
             self.sinks = self.config.stc.get_tensor(
-                f"{self.key}.{self.key_sinks}", device, no_defer = True
+                f"{self.key}.{self.key_sinks}", device, no_defer = True, arena = False
             ).float().contiguous()
 
         # Test if K and V proj can be fused
@@ -1166,6 +1171,14 @@ class Attention(Module):
             # QSA dense regime: the past is bounded by the sparse threshold, which lets the
             # quantized-cache prefill size its staging to the window instead of the job's pages
             max_kv_len = int(qsa_seqlens_cpu.max().item()) if qsa_seqlens_cpu is not None else None
+            # Prefill-sized chunks otherwise take the bound from the host copy of cache_seqlens when
+            # the caller has one (the generator builds it on the CPU, so no sync): the kernels' fallback
+            # bound is the block table's width plus the chunk, which counts the chunk twice once the
+            # table covers it and can push a short context into the kv-split regime
+            if max_kv_len is None and seqlen > 16:
+                cs_host = params.get("cache_seqlens")
+                if isinstance(cs_host, torch.Tensor) and cs_host.device.type == "cpu" and cs_host.numel():
+                    max_kv_len = int(cs_host.max())
             o = attn_dispatch(
                 q = q,
                 k = k,
